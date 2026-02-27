@@ -1,11 +1,11 @@
 [package]
 name = "etch"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 build = "build.rs"
 
 [dependencies]
-metal = "0.32"
+metal = "0.33"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSArray"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSView", "NSResponder", "NSPasteboard"] }
@@ -13,9 +13,9 @@ winit = "0.30"
 bytemuck = { version = "1", features = ["derive"] }
 bitflags = "2"
 bitvec = "1"
-core-graphics = "0.23"
+core-graphics = "0.25"
 core-graphics-types = "0.2"
-core-text = "20"
+core-text = "21"
 block = "0.1"
 libc = "0.2"
 

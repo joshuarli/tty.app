@@ -92,8 +92,8 @@ impl SimdScanner {
         use core::arch::aarch64::*;
         // Find first byte that is 0x00 (not 0xFF)
         // Narrow to 8 bytes, then extract and find trailing zeros
-        let narrowed = vshrn_n_u16::<4>(vreinterpretq_u16_u8(v));
-        let bits = vget_lane_u64::<0>(vreinterpret_u64_u8(narrowed));
+        let narrowed = unsafe { vshrn_n_u16::<4>(vreinterpretq_u16_u8(v)) };
+        let bits = unsafe { vget_lane_u64::<0>(vreinterpret_u64_u8(narrowed)) };
         // Each byte in narrowed is 0x0F (ok) or 0x00 (attention)
         // Find first 0x00 nibble
         if bits == 0xFFFF_FFFF_FFFF_FFFF {
