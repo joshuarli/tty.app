@@ -694,10 +694,8 @@ impl App {
                     if !was_syncing && state.grid.mode.contains(TermMode::SYNC_OUTPUT) {
                         self.sync_start = Instant::now();
                     }
-
-                    if n < buf.len() {
-                        break;
-                    }
+                    // Keep looping — only WouldBlock reliably indicates the
+                    // kernel buffer is empty. A short read doesn't guarantee it.
                 }
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::WouldBlock {
@@ -770,6 +768,12 @@ impl App {
     }
 
     fn render(&mut self) {
+        // Drain any PTY data that arrived since new_events().
+        // This is critical for apps that don't use synchronized updates (mode 2026)
+        // like htop and tmux — it gives the kernel buffer maximum time to accumulate
+        // the full screen update before we paint.
+        self.process_pty_output();
+
         let renderer = match &mut self.renderer {
             Some(r) => r,
             None => return,

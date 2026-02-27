@@ -108,10 +108,10 @@ When the cursor reaches the last column, the wrap is *deferred* (`cursor_pending
 Single-threaded. The winit event loop runs everything:
 
 - `new_events()` → `process_pty_output()` — drains PTY, feeds parser
-- `RedrawRequested` → `render()` — uploads grid, dispatches GPU
+- `RedrawRequested` → `render()` — drains PTY again, then uploads grid, dispatches GPU
 - `about_to_wait()` → `request_redraw()` — continuous polling at vsync
 
-The PTY fd is set to `O_NONBLOCK`. Reads happen synchronously in the event loop, returning `WouldBlock` when empty. GPU work is the only thing that runs asynchronously (via Metal command buffer).
+The PTY fd is set to `O_NONBLOCK`. Reads happen synchronously in the event loop, returning `WouldBlock` when empty. PTY data is drained both in `new_events()` and at the top of `render()` — the second drain catches data that arrived between the two calls, which is critical for apps that don't use synchronized updates (mode 2026) like htop and tmux. GPU work is the only thing that runs asynchronously (via Metal command buffer).
 
 ## Module Details
 
