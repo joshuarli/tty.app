@@ -18,6 +18,11 @@ impl Scrollback {
         }
     }
 
+    /// Number of rows currently stored.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
     /// Push a row into the scrollback. Overwrites oldest if full.
     pub fn push(&mut self, row: Vec<Cell>) {
         if self.capacity == 0 {
