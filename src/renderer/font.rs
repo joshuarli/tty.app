@@ -53,7 +53,7 @@ impl FontRasterizer {
             );
         }
 
-        let cell_width = advances[0].width.ceil() as u32;
+        let cell_width = advances[0].width.round() as u32;
         let cell_height = (ascent + descent + leading).ceil() as u32;
 
         let metrics = FontMetrics {

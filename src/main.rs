@@ -971,7 +971,7 @@ impl ApplicationHandler for App {
         }
 
         let attrs = WindowAttributes::default()
-            .with_title("tty")
+            .with_decorations(false)
             .with_fullscreen(Some(Fullscreen::Borderless(None)));
         let window = event_loop
             .create_window(attrs)
