@@ -33,32 +33,4 @@ impl Scrollback {
         }
     }
 
-    /// Get a row by offset from the most recent (0 = most recent).
-    pub fn get(&self, offset: usize) -> Option<&Vec<Cell>> {
-        if offset >= self.len {
-            return None;
-        }
-        let idx = if self.buf.len() < self.capacity {
-            // Not yet wrapped
-            self.len - 1 - offset
-        } else {
-            // Wrapped ring buffer
-            (self.head + self.capacity - 1 - offset) % self.capacity
-        };
-        self.buf.get(idx)
-    }
-
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    pub fn clear(&mut self) {
-        self.buf.clear();
-        self.head = 0;
-        self.len = 0;
-    }
 }

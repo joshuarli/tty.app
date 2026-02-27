@@ -11,8 +11,6 @@ pub struct RasterizedGlyph {
     pub data: Vec<u8>,
     pub width: u32,
     pub height: u32,
-    pub bearing_x: i32,
-    pub bearing_y: i32,
 }
 
 /// Font metrics for the monospace grid.
@@ -20,10 +18,7 @@ pub struct RasterizedGlyph {
 pub struct FontMetrics {
     pub cell_width: u32,
     pub cell_height: u32,
-    pub ascent: f64,
     pub descent: f64,
-    pub leading: f64,
-    pub scale: f64,
 }
 
 pub struct FontRasterizer {
@@ -67,10 +62,7 @@ impl FontRasterizer {
         let metrics = FontMetrics {
             cell_width,
             cell_height,
-            ascent,
             descent,
-            leading,
-            scale,
         };
 
         Self { ct_font, metrics }
@@ -139,17 +131,12 @@ impl FontRasterizer {
 
         // Extract red channel as alpha (since we drew white on black)
         let rgba_data = ctx.data();
-        let mut alpha_data = vec![0u8; w * h];
-        for i in 0..w * h {
-            alpha_data[i] = rgba_data[i * 4]; // R channel = alpha
-        }
+        let alpha_data: Vec<u8> = (0..w * h).map(|i| rgba_data[i * 4]).collect();
 
         Some(RasterizedGlyph {
             data: alpha_data,
             width: w as u32,
             height: h as u32,
-            bearing_x: 0,
-            bearing_y: 0,
         })
     }
 
@@ -213,8 +200,6 @@ impl FontRasterizer {
             data: alpha_data,
             width: w as u32,
             height: h as u32,
-            bearing_x: 0,
-            bearing_y: 0,
         })
     }
 }

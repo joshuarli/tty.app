@@ -1,5 +1,4 @@
 use crate::config;
-use crate::renderer::metal::CellData;
 
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -19,6 +18,7 @@ bitflags::bitflags! {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct Cell {
     pub codepoint: u16,
     pub flags: CellFlags,
@@ -46,43 +46,16 @@ impl Default for Cell {
 }
 
 impl Cell {
-    /// Convert to GPU-side CellData for upload.
-    pub fn to_cell_data(&self) -> CellData {
-        let mut flags = self.flags;
-        let mut fg_index = self.fg_index;
-
-        // Bold = bright colors: map palette 0-7 → 8-15
-        if flags.contains(CellFlags::BOLD) && fg_index < 8 {
-            fg_index += 8;
-        }
-
-        // Hidden: make fg = bg
-        if flags.contains(CellFlags::HIDDEN) {
-            return CellData {
-                codepoint: self.codepoint,
-                flags: flags.bits(),
-                fg_index: self.bg_index,
-                bg_index: self.bg_index,
-                atlas_x: self.atlas_x,
-                atlas_y: self.atlas_y,
-                fg_rgb: self.bg_rgb,
-                bg_rgb: self.bg_rgb,
-            };
-        }
-
-        CellData {
-            codepoint: self.codepoint,
-            flags: flags.bits(),
-            fg_index,
-            bg_index: self.bg_index,
-            atlas_x: self.atlas_x,
-            atlas_y: self.atlas_y,
-            fg_rgb: self.fg_rgb,
-            bg_rgb: self.bg_rgb,
-        }
-    }
-
-    pub fn reset(&mut self) {
-        *self = Self::default();
+    /// Erase this cell using the current SGR attributes for background color.
+    /// Per VT spec, erase operations (ED/EL/ECH) fill with current bg color.
+    pub fn erase(&mut self, attr: &Cell) {
+        self.codepoint = b' ' as u16;
+        self.flags = CellFlags::empty();
+        self.fg_index = attr.fg_index;
+        self.bg_index = attr.bg_index;
+        self.atlas_x = 0;
+        self.atlas_y = 0;
+        self.fg_rgb = attr.fg_rgb;
+        self.bg_rgb = attr.bg_rgb;
     }
 }

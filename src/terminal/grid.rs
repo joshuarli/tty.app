@@ -1,9 +1,8 @@
 use bitvec::prelude::*;
 
-use crate::config;
 use crate::terminal::cell::{Cell, CellFlags};
 
-/// Terminal mode flags (DECSET/DECRST)
+// Terminal mode flags (DECSET/DECRST)
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, Default)]
     pub struct TermMode: u32 {
@@ -70,7 +69,6 @@ pub struct Grid {
 
     // Alternate screen buffer
     alt_cells: Vec<Cell>,
-    alt_cursor: SavedCursor,
     main_cursor: SavedCursor,
 }
 
@@ -86,8 +84,7 @@ impl Grid {
             tab_stops.set(i, true);
         }
 
-        let mut attr = Cell::default();
-        attr.codepoint = b' ' as u16;
+        let attr = Cell { codepoint: b' ' as u16, ..Cell::default() };
 
         Grid {
             cells,
@@ -107,7 +104,6 @@ impl Grid {
             tab_stops,
             saved_cursor: SavedCursor::default(),
             alt_cells: Vec::new(),
-            alt_cursor: SavedCursor::default(),
             main_cursor: SavedCursor::default(),
         }
     }
@@ -138,25 +134,27 @@ impl Grid {
         self.dirty.fill(false);
     }
 
-    /// Clear row range [from..to) with default cells
+    /// Clear row range [from..to) using current SGR background color.
     pub fn clear_rows(&mut self, from: u16, to: u16) {
+        let attr = self.attr;
         for row in from..to.min(self.rows) {
             let start = row as usize * self.cols as usize;
             let end = start + self.cols as usize;
             for cell in &mut self.cells[start..end] {
-                cell.reset();
+                cell.erase(&attr);
             }
             self.mark_dirty(row);
         }
     }
 
-    /// Clear columns [from_col..to_col) in a specific row
+    /// Clear columns [from_col..to_col) using current SGR background color.
     pub fn clear_cols(&mut self, row: u16, from_col: u16, to_col: u16) {
+        let attr = self.attr;
         let cols = self.cols;
         let start = row as usize * cols as usize + from_col as usize;
         let end = row as usize * cols as usize + to_col.min(cols) as usize;
         for cell in &mut self.cells[start..end] {
-            cell.reset();
+            cell.erase(&attr);
         }
         self.mark_dirty(row);
     }
@@ -182,12 +180,13 @@ impl Grid {
         let count = ((self.scroll_bottom - self.scroll_top + 1 - n) as usize) * cols;
         self.cells.copy_within(src_start..src_start + count, dst_start);
 
-        // Clear new rows at bottom of scroll region
+        // Clear new rows at bottom of scroll region (use current bg color)
+        let attr = self.attr;
         let clear_from = self.scroll_bottom + 1 - n;
         for row in clear_from..=self.scroll_bottom {
             let start = row as usize * cols;
             for cell in &mut self.cells[start..start + cols] {
-                cell.reset();
+                cell.erase(&attr);
             }
         }
 
@@ -211,11 +210,12 @@ impl Grid {
         let count = ((self.scroll_bottom - self.scroll_top + 1 - n) as usize) * cols;
         self.cells.copy_within(src_start..src_start + count, dst_start);
 
-        // Clear new rows at top of scroll region
+        // Clear new rows at top of scroll region (use current bg color)
+        let attr = self.attr;
         for row in self.scroll_top..self.scroll_top + n {
             let start = row as usize * cols;
             for cell in &mut self.cells[start..start + cols] {
-                cell.reset();
+                cell.erase(&attr);
             }
         }
 

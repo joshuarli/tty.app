@@ -1,7 +1,6 @@
-/// Packed VT state transition table.
-///
-/// Based on Paul Williams' VT500 parser model.
-/// Each entry encodes: high nibble = action, low nibble = next state.
+// Packed VT state transition table.
+// Based on Paul Williams' VT500 parser model.
+// Each entry encodes: high nibble = action, low nibble = next state.
 
 // States
 pub const GROUND: u8 = 0;
@@ -49,19 +48,24 @@ pub fn unpack(packed: u8) -> (u8, u8) {
     (packed >> 4, packed & 0x0F)
 }
 
-/// Classify a byte into one of 25 equivalence classes.
+/// Classify a byte into one of the equivalence classes.
 #[inline]
 pub fn byte_class(byte: u8) -> usize {
     BYTE_CLASSES[byte as usize] as usize
 }
 
 // Byte equivalence classes
+//
+// Classes 19-22 split out the 7-bit C1 equivalents from the old class 9
+// (0x40-0x5F) so the ESCAPE state can properly enter CSI, OSC, DCS, etc.
 const BYTE_CLASSES: [u8; 256] = {
     let mut t = [0u8; 256];
     let mut i = 0;
     while i < 256 {
         t[i] = match i as u8 {
-            0x00..=0x17 => 0,  // C0 controls (except ESC, CAN, SUB)
+            0x00..=0x06 => 0,  // C0 controls
+            0x07 => 19,        // BEL (needs special handling in OSC)
+            0x08..=0x17 => 0,  // C0 controls (except ESC, CAN, SUB)
             0x18 => 1,         // CAN
             0x19 => 0,         // C0
             0x1A => 2,         // SUB
@@ -72,7 +76,15 @@ const BYTE_CLASSES: [u8; 256] = {
             0x3A => 6,         // Colon
             0x3B => 7,         // Semicolon
             0x3C..=0x3F => 8,  // < = > ?
-            0x40..=0x5F => 9,  // @ through _  (uppercase + some punct)
+            0x40..=0x4F => 9,  // @ through O
+            0x50 => 20,        // P (7-bit DCS introducer)
+            0x51..=0x57 => 9,  // Q through W
+            0x58 => 21,        // X (7-bit SOS)
+            0x59..=0x5A => 9,  // Y, Z
+            0x5B => 22,        // [ (7-bit CSI introducer)
+            0x5C => 9,         // \ (ST terminator in ESC context — ESC_DISPATCH handles it)
+            0x5D => 23,        // ] (7-bit OSC introducer)
+            0x5E..=0x5F => 21, // ^, _ (7-bit PM, APC)
             0x60..=0x7E => 10, // ` through ~  (lowercase + some punct)
             0x7F => 11,        // DEL
             0x80..=0x8F => 12, // C1 (8-bit)
@@ -91,7 +103,7 @@ const BYTE_CLASSES: [u8; 256] = {
     t
 };
 
-const NUM_CLASSES: usize = 19;
+const NUM_CLASSES: usize = 24;
 
 /// State transition table: STATE_TABLE[state][byte_class] = packed(action, next_state)
 pub static STATE_TABLE: [[u8; NUM_CLASSES]; NUM_STATES] = build_table();
@@ -138,6 +150,8 @@ const fn build_table() -> [[u8; NUM_CLASSES]; NUM_STATES] {
     t[GROUND as usize][17] = pack(ACTION_OSC_START, OSC_STRING);
     // High bytes → print
     t[GROUND as usize][18] = pack(ACTION_PRINT, GROUND);
+    // BEL → execute (like other C0)
+    t[GROUND as usize][19] = pack(ACTION_EXECUTE, GROUND);
 
     // ── ESCAPE state ──
     // C0 → execute, stay
@@ -164,6 +178,13 @@ const fn build_table() -> [[u8; NUM_CLASSES]; NUM_STATES] {
     t[ESCAPE as usize][16] = pack(ACTION_IGNORE, GROUND);
     t[ESCAPE as usize][17] = pack(ACTION_OSC_START, OSC_STRING);
     t[ESCAPE as usize][18] = pack(ACTION_IGNORE, ESCAPE);
+    // BEL in escape → execute, stay
+    t[ESCAPE as usize][19] = pack(ACTION_EXECUTE, ESCAPE);
+    // 7-bit C1 equivalents in ESCAPE state:
+    t[ESCAPE as usize][20] = pack(ACTION_CLEAR, DCS_ENTRY);         // ESC P → DCS
+    t[ESCAPE as usize][21] = pack(ACTION_NONE, SOS_PM_APC_STRING);  // ESC X/^/_ → SOS/PM/APC
+    t[ESCAPE as usize][22] = pack(ACTION_CLEAR, CSI_ENTRY);         // ESC [ → CSI
+    t[ESCAPE as usize][23] = pack(ACTION_OSC_START, OSC_STRING);    // ESC ] → OSC
 
     // ── ESCAPE_INTERMEDIATE ──
     t[ESCAPE_INTERMEDIATE as usize][0] = pack(ACTION_EXECUTE, ESCAPE_INTERMEDIATE);
@@ -307,6 +328,8 @@ const fn build_table() -> [[u8; NUM_CLASSES]; NUM_STATES] {
     t[OSC_STRING as usize][11] = pack(ACTION_IGNORE, OSC_STRING);
     t[OSC_STRING as usize][16] = pack(ACTION_OSC_END, GROUND); // ST
     t[OSC_STRING as usize][18] = pack(ACTION_OSC_PUT, OSC_STRING); // high bytes
+    // BEL terminates OSC (xterm extension, used by fish/bash/zsh)
+    t[OSC_STRING as usize][19] = pack(ACTION_OSC_END, GROUND);
 
     // ── SOS_PM_APC_STRING ──
     t[SOS_PM_APC_STRING as usize][0] = pack(ACTION_IGNORE, SOS_PM_APC_STRING);
@@ -314,6 +337,37 @@ const fn build_table() -> [[u8; NUM_CLASSES]; NUM_STATES] {
     t[SOS_PM_APC_STRING as usize][2] = pack(ACTION_NONE, GROUND);
     t[SOS_PM_APC_STRING as usize][3] = pack(ACTION_NONE, ESCAPE);
     t[SOS_PM_APC_STRING as usize][16] = pack(ACTION_NONE, GROUND);
+
+    // ── Propagate new classes from their base classes ──
+    // Class 19 (BEL) inherits C0 behavior (class 0) for states not explicitly set.
+    // Classes 20-23 (P/X^_/[/]) inherit class 9 behavior for states not explicitly set.
+    // Only ESCAPE and OSC_STRING differ (handled above with explicit overrides).
+    let mut s = 0;
+    while s < NUM_STATES {
+        let dflt = pack(ACTION_NONE, GROUND);
+
+        // BEL (class 19) ← C0 (class 0)
+        let c0 = t[s][0];
+        if t[s][19] == dflt && c0 != dflt {
+            t[s][19] = c0;
+        }
+
+        // P (20), X^_ (21), [ (22), ] (23) ← class 9
+        let base = t[s][9];
+        if t[s][20] == dflt && base != dflt {
+            t[s][20] = base;
+        }
+        if t[s][21] == dflt && base != dflt {
+            t[s][21] = base;
+        }
+        if t[s][22] == dflt && base != dflt {
+            t[s][22] = base;
+        }
+        if t[s][23] == dflt && base != dflt {
+            t[s][23] = base;
+        }
+        s += 1;
+    }
 
     t
 }

@@ -164,16 +164,4 @@ impl Atlas {
         min_slot
     }
 
-    /// Call once per frame to advance the LRU counter.
-    pub fn tick(&mut self) {
-        self.frame += 1;
-    }
-
-    /// Clear the atlas (e.g., on DPI change). Keeps the texture, clears all mappings.
-    pub fn clear(&mut self) {
-        self.map.clear();
-        self.next_slot = 0;
-        self.ascii_end = 0;
-        self.usage.fill(0);
-    }
 }

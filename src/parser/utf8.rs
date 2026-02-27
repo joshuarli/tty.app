@@ -1,19 +1,10 @@
 /// UTF-8 codepoint assembler.
 /// Decodes multi-byte sequences from a byte slice.
-pub struct Utf8Assembler {
-    // For handling incomplete sequences across buffer boundaries
-    buf: [u8; 4],
-    buf_len: usize,
-    expected_len: usize,
-}
+pub struct Utf8Assembler;
 
 impl Utf8Assembler {
     pub fn new() -> Self {
-        Self {
-            buf: [0; 4],
-            buf_len: 0,
-            expected_len: 0,
-        }
+        Self
     }
 
     /// Attempt to decode a UTF-8 codepoint from the start of the slice.
@@ -38,22 +29,22 @@ impl Utf8Assembler {
         }
 
         // Validate continuation bytes
-        for i in 1..expected {
-            if data[i] & 0xC0 != 0x80 {
+        for byte in data.iter().take(expected).skip(1) {
+            if byte & 0xC0 != 0x80 {
                 return Some(('\u{FFFD}', 1)); // Invalid continuation
             }
         }
 
         let mut cp: u32 = (first & mask) as u32;
-        for i in 1..expected {
-            cp = (cp << 6) | (data[i] & 0x3F) as u32;
+        for byte in data.iter().take(expected).skip(1) {
+            cp = (cp << 6) | (byte & 0x3F) as u32;
         }
 
         // Reject overlong encodings and surrogates
         let valid = match expected {
             2 => cp >= 0x80,
             3 => cp >= 0x800 && !(0xD800..=0xDFFF).contains(&cp),
-            4 => cp >= 0x10000 && cp <= 0x10FFFF,
+            4 => (0x10000..=0x10FFFF).contains(&cp),
             _ => false,
         };
 

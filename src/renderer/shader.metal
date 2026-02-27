@@ -35,6 +35,8 @@ constant ushort FLAG_STRIKE     = 0x0008;
 constant ushort FLAG_INVERSE    = 0x0010;
 constant ushort FLAG_CURSOR     = 0x0020;
 constant ushort FLAG_SELECTED   = 0x0040;
+constant ushort FLAG_BOLD       = 0x0080;
+constant ushort FLAG_HIDDEN     = 0x0400;
 
 // ── Box drawing lookup ──────────────────────────────────────────────
 // Each entry encodes edge connectivity for U+2500..U+257F
@@ -200,23 +202,37 @@ kernel void render(
     if (cell.flags & FLAG_WIDE_CONT) {
         // Look at the cell to the left for background color
         CellData owner = (col > 0) ? cells[row * uni.cols + col - 1] : cell;
+        uchar owner_fg_idx = owner.fg_index;
+        if ((owner.flags & FLAG_BOLD) && owner_fg_idx < 8) owner_fg_idx += 8;
         half4 bg = resolve_color(owner.bg_index, owner.bg_rgb, palette);
-        if (owner.flags & FLAG_INVERSE) bg = resolve_color(owner.fg_index, owner.fg_rgb, palette);
+        if (owner.flags & FLAG_INVERSE) bg = resolve_color(owner_fg_idx, owner.fg_rgb, palette);
         // For wide chars, offset px to sample the right half of the glyph
         px += uni.cell_width;
         uint atlas_px = uint(owner.atlas_x) * uni.atlas_cell_width + px;
         uint atlas_py = uint(owner.atlas_y) * uni.atlas_cell_height + py;
         half alpha = atlas.read(uint2(atlas_px, atlas_py)).r;
-        half4 fg = resolve_color(owner.fg_index, owner.fg_rgb, palette);
+        half4 fg = resolve_color(owner_fg_idx, owner.fg_rgb, palette);
         if (owner.flags & FLAG_INVERSE) fg = resolve_color(owner.bg_index, owner.bg_rgb, palette);
+        if (owner.flags & FLAG_HIDDEN) fg = bg;
         half4 color = mix(bg, fg, alpha);
         output.write(color, gid);
         return;
     }
 
+    // Bold: map palette 0-7 → 8-15 for bright colors
+    uchar fg_idx = cell.fg_index;
+    if ((cell.flags & FLAG_BOLD) && fg_idx < 8) {
+        fg_idx += 8;
+    }
+
     // Resolve fg/bg
-    half4 fg = resolve_color(cell.fg_index, cell.fg_rgb, palette);
+    half4 fg = resolve_color(fg_idx, cell.fg_rgb, palette);
     half4 bg = resolve_color(cell.bg_index, cell.bg_rgb, palette);
+
+    // Hidden: make fg match bg
+    if (cell.flags & FLAG_HIDDEN) {
+        fg = bg;
+    }
 
     // Inverse
     if (cell.flags & FLAG_INVERSE) {

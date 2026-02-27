@@ -5,7 +5,7 @@
 pub const FONT_FAMILY: &str = "Menlo";
 
 /// Font size in points
-pub const FONT_SIZE: f64 = 13.0;
+pub const FONT_SIZE: f64 = 16.0;
 
 /// Padding in logical pixels between window edge and cell grid
 pub const PADDING: u32 = 8;
@@ -17,7 +17,7 @@ pub const SCROLLBACK_LINES: usize = 10_000;
 pub const DEFAULT_FG: u32 = 0x00c5c8c6;
 
 /// Default background color (palette index 0)
-pub const DEFAULT_BG: u32 = 0x001d1f21;
+pub const DEFAULT_BG: u32 = 0x00000000;
 
 /// Cursor blink interval in milliseconds
 pub const CURSOR_BLINK_MS: u64 = 500;
@@ -27,7 +27,7 @@ pub const PALETTE: [u32; 256] = {
     let mut p = [0u32; 256];
 
     // ANSI 0-7 (normal)
-    p[0] = 0x001d1f21; // black
+    p[0] = 0x00000000; // black
     p[1] = 0x00cc6666; // red
     p[2] = 0x00b5bd68; // green
     p[3] = 0x00f0c674; // yellow

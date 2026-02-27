@@ -1,4 +1,4 @@
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
@@ -34,10 +34,8 @@ impl Pty {
         }
 
         if pid == 0 {
-            // Child process
+            // Child process — exec_shell never returns
             Self::exec_shell();
-            // exec_shell never returns
-            unreachable!();
         }
 
         // Parent: set master to non-blocking
@@ -79,12 +77,9 @@ impl Pty {
         }
     }
 
-    pub fn master_fd(&self) -> RawFd {
-        self.master.as_raw_fd()
-    }
-
     /// Read from the PTY master. Returns bytes read, or Err for actual errors.
-    /// Returns Ok(0) on EAGAIN (no data available).
+    /// Returns Ok(0) on true EOF (shell exited).
+    /// Returns Err(WouldBlock) when no data is available.
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         let n = unsafe {
             libc::read(
@@ -94,11 +89,7 @@ impl Pty {
             )
         };
         if n < 0 {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::WouldBlock {
-                return Ok(0);
-            }
-            return Err(err);
+            return Err(io::Error::last_os_error());
         }
         Ok(n as usize)
     }
@@ -131,14 +122,6 @@ impl Pty {
         }
     }
 
-    /// Check if the child process is still alive.
-    pub fn is_alive(&self) -> bool {
-        unsafe {
-            let mut status: libc::c_int = 0;
-            let result = libc::waitpid(self.child_pid, &mut status, libc::WNOHANG);
-            result == 0
-        }
-    }
 }
 
 impl Drop for Pty {
@@ -147,45 +130,5 @@ impl Drop for Pty {
         unsafe {
             libc::kill(self.child_pid, libc::SIGHUP);
         }
-    }
-}
-
-/// Wait for PTY to be readable using kqueue.
-pub fn wait_readable(fd: RawFd, timeout_ms: i64) -> io::Result<bool> {
-    unsafe {
-        let kq = libc::kqueue();
-        if kq < 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        let mut change = libc::kevent {
-            ident: fd as usize,
-            filter: libc::EVFILT_READ,
-            flags: libc::EV_ADD | libc::EV_ONESHOT,
-            fflags: 0,
-            data: 0,
-            udata: std::ptr::null_mut(),
-        };
-
-        let timeout = libc::timespec {
-            tv_sec: timeout_ms / 1000,
-            tv_nsec: (timeout_ms % 1000) * 1_000_000,
-        };
-
-        let mut event: libc::kevent = std::mem::zeroed();
-        let n = libc::kevent(
-            kq,
-            &change,
-            1,
-            &mut event,
-            1,
-            &timeout,
-        );
-        libc::close(kq);
-
-        if n < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(n > 0)
     }
 }

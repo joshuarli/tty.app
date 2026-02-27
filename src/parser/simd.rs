@@ -77,7 +77,7 @@ impl SimdScanner {
         // Scalar tail
         while pos < len {
             let b = buf[pos];
-            if b < 0x20 || b >= 0x7F {
+            if !(0x20..0x7F).contains(&b) {
                 return (pos, pos);
             }
             pos += 1;

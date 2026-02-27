@@ -1,4 +1,3 @@
-use winit::event::{ElementState, Modifiers};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 use crate::terminal::grid::TermMode;
@@ -172,15 +171,3 @@ fn modifier_param(shift: bool, alt: bool, ctrl: bool) -> u8 {
     m
 }
 
-/// Build mouse event bytes in SGR format.
-/// button: 0=left, 1=middle, 2=right, 64=scroll-up, 65=scroll-down
-/// pressed: true for press, false for release
-pub fn mouse_sgr(button: u8, col: u16, row: u16, pressed: bool, shift: bool, alt: bool, ctrl: bool) -> Vec<u8> {
-    let mut cb = button as u16;
-    if shift { cb |= 4; }
-    if alt { cb |= 8; }
-    if ctrl { cb |= 16; }
-
-    let suffix = if pressed { 'M' } else { 'm' };
-    format!("\x1B[<{};{};{}{}", cb, col + 1, row + 1, suffix).into_bytes()
-}

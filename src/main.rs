@@ -1,6 +1,3 @@
-#[macro_use]
-extern crate objc;
-
 mod config;
 mod input;
 mod parser;
@@ -8,13 +5,11 @@ mod pty;
 mod renderer;
 mod terminal;
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
-use cocoa::appkit::NSPasteboard;
-use cocoa::base::{id, nil};
-use cocoa::foundation::{NSArray, NSString};
+use objc2_app_kit::NSPasteboard;
+use objc2_foundation::{ns_string, NSArray, NSString};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -25,7 +20,7 @@ use crate::parser::Parser;
 use crate::parser::perform::Perform;
 use crate::parser::charset::translate_dec_special;
 use crate::pty::Pty;
-use crate::renderer::atlas::{Atlas, GlyphKey};
+use crate::renderer::atlas::Atlas;
 use crate::renderer::font::FontRasterizer;
 use crate::renderer::metal::MetalRenderer;
 use crate::terminal::cell::{Cell, CellFlags};
@@ -57,7 +52,7 @@ impl<'a> Perform for TermPerformer<'a> {
             || (self.grid.active_charset == 1 && self.grid.charset_g1 == 1);
 
         for &b in bytes {
-            let ch = if use_dec && b >= 0x60 && b <= 0x7E {
+            let ch = if use_dec && (0x60..=0x7E).contains(&b) {
                 translate_dec_special(b)
             } else {
                 b as char
@@ -113,7 +108,7 @@ impl<'a> Perform for TermPerformer<'a> {
                 self.grid.cursor_col = next.min(cols - 1);
                 self.grid.cursor_pending_wrap = false;
             }
-            0x0A | 0x0B | 0x0C => {
+            0x0A..=0x0C => {
                 // LF, VT, FF
                 if self.grid.cursor_row == self.grid.scroll_bottom {
                     let evicted = self.grid.scroll_up(1);
@@ -252,8 +247,9 @@ impl<'a> Perform for TermPerformer<'a> {
             self.grid.cells[row_start + c as usize] =
                 self.grid.cells[row_start + (c - n) as usize];
         }
+        let attr = self.grid.attr;
         for c in col..col + n {
-            self.grid.cells[row_start + c as usize].reset();
+            self.grid.cells[row_start + c as usize].erase(&attr);
         }
         self.grid.mark_dirty(row);
     }
@@ -269,8 +265,9 @@ impl<'a> Perform for TermPerformer<'a> {
             self.grid.cells[row_start + c as usize] =
                 self.grid.cells[row_start + (c + n) as usize];
         }
+        let attr = self.grid.attr;
         for c in cols - n..cols {
-            self.grid.cells[row_start + c as usize].reset();
+            self.grid.cells[row_start + c as usize].erase(&attr);
         }
         self.grid.mark_dirty(row);
     }
@@ -526,7 +523,6 @@ impl<'a> Perform for TermPerformer<'a> {
             ([], b'c') => {
                 // RIS
                 let rows = self.grid.rows;
-                let cols = self.grid.cols;
                 self.grid.clear_rows(0, rows);
                 self.grid.cursor_row = 0;
                 self.grid.cursor_col = 0;
@@ -622,9 +618,17 @@ struct App {
     last_blink: Instant,
 
     // Selection state
-    selection_start: Option<(u16, u16)>,
-    selection_end: Option<(u16, u16)>,
+    selection_start: Option<(u16, u16)>, // (col, row)
+    selection_end: Option<(u16, u16)>,   // (col, row)
     mouse_pressed: bool,
+    cursor_pos: (f64, f64), // Physical pixel position of mouse cursor
+
+    // Previous cursor position for clearing stale cursor flags
+    prev_cursor_row: u16,
+    prev_cursor_col: u16,
+
+    // Timestamp when synchronized output (Mode 2026) was last enabled
+    sync_start: Instant,
 }
 
 impl App {
@@ -643,6 +647,10 @@ impl App {
             selection_start: None,
             selection_end: None,
             mouse_pressed: false,
+            cursor_pos: (0.0, 0.0),
+            prev_cursor_row: 0,
+            prev_cursor_col: 0,
+            sync_start: Instant::now(),
         }
     }
 
@@ -656,12 +664,19 @@ impl App {
 
         loop {
             match pty.read(&mut buf) {
-                Ok(0) => break,
+                Ok(0) => {
+                    // EOF — shell exited
+                    if let Some(state) = self.shared.as_mut() {
+                        state.alive = false;
+                    }
+                    break;
+                }
                 Ok(n) => {
                     let state = self.shared.as_mut().unwrap();
                     let atlas = self.atlas.as_mut().unwrap();
                     let rasterizer = self.rasterizer.as_ref().unwrap();
 
+                    let was_syncing = state.grid.mode.contains(TermMode::SYNC_OUTPUT);
                     let mut response_buf = std::mem::take(&mut state.response_buf);
                     {
                         let mut performer = TermPerformer {
@@ -674,6 +689,11 @@ impl App {
                         self.parser.parse(&buf[..n], &mut performer);
                     }
                     state.response_buf = response_buf;
+
+                    // Record when synchronized output begins
+                    if !was_syncing && state.grid.mode.contains(TermMode::SYNC_OUTPUT) {
+                        self.sync_start = Instant::now();
+                    }
 
                     if n < buf.len() {
                         break;
@@ -759,6 +779,19 @@ impl App {
             None => return,
         };
 
+        // Synchronized output (Mode 2026): defer rendering while the application
+        // is mid-update. Dirty bits accumulate and get flushed on the first frame
+        // after sync ends. Timeout after 100ms to prevent a stuck application from
+        // freezing the display.
+        if state.grid.mode.contains(TermMode::SYNC_OUTPUT) {
+            let elapsed = Instant::now().duration_since(self.sync_start);
+            if elapsed.as_millis() < 100 {
+                return;
+            }
+            // Timeout — render anyway and clear the flag
+            state.grid.mode.remove(TermMode::SYNC_OUTPUT);
+        }
+
         // Cursor blink
         let now = Instant::now();
         if now.duration_since(self.last_blink).as_millis() >= config::CURSOR_BLINK_MS as u128 {
@@ -767,17 +800,24 @@ impl App {
             state.grid.mark_dirty(state.grid.cursor_row);
         }
 
-        // Update cursor cell flag
+        // Update cursor cell flag — clear old position first
         let cursor_row = state.grid.cursor_row;
         let cursor_col = state.grid.cursor_col;
-        let cols = state.grid.cols;
+        let prev_row = self.prev_cursor_row;
+        let prev_col = self.prev_cursor_col;
 
-        // Clear old cursor flags on cursor row
-        for col in 0..cols {
-            state.grid.cell_mut(cursor_row, col).flags.remove(CellFlags::CURSOR);
+        // Clear CURSOR flag from previous position
+        if prev_row < state.grid.rows && prev_col < state.grid.cols {
+            state.grid.cell_mut(prev_row, prev_col).flags.remove(CellFlags::CURSOR);
+            state.grid.mark_dirty(prev_row);
         }
+
+        // Set CURSOR flag at new position
         state.grid.cell_mut(cursor_row, cursor_col).flags.insert(CellFlags::CURSOR);
         state.grid.mark_dirty(cursor_row);
+
+        self.prev_cursor_row = cursor_row;
+        self.prev_cursor_col = cursor_col;
 
         renderer.render_frame(&mut state.grid, self.cursor_visible);
     }
@@ -833,6 +873,55 @@ impl App {
                 } else {
                     let _ = pty.write(text.as_bytes());
                 }
+            }
+        }
+    }
+
+    /// Convert pixel position to (col, row) cell coordinates.
+    /// winit CursorMoved gives physical pixels on macOS.
+    fn pixel_to_cell(&self, x: f64, y: f64) -> Option<(u16, u16)> {
+        let renderer = self.renderer.as_ref()?;
+        let state = self.shared.as_ref()?;
+        let scale = renderer.scale_factor;
+        let padding = config::PADDING as f64 * scale;
+        // x, y are already in physical pixels — don't multiply by scale
+        let px = x - padding;
+        let py = y - padding;
+        if px < 0.0 || py < 0.0 {
+            return Some((0, 0));
+        }
+        let col = (px / renderer.cell_width as f64) as u16;
+        let row = (py / renderer.cell_height as f64) as u16;
+        let col = col.min(state.grid.cols.saturating_sub(1));
+        let row = row.min(state.grid.rows.saturating_sub(1));
+        Some((col, row))
+    }
+
+    fn update_selection(&mut self) {
+        if let (Some(start), Some(end), Some(state)) =
+            (self.selection_start, self.selection_end, &mut self.shared)
+        {
+            // Normalize start/end
+            let (start, end) = if start.1 < end.1 || (start.1 == end.1 && start.0 <= end.0) {
+                (start, end)
+            } else {
+                (end, start)
+            };
+
+            // Clear old selection
+            let total = state.grid.cols as usize * state.grid.rows as usize;
+            for i in 0..total {
+                state.grid.cells[i].flags.remove(CellFlags::SELECTED);
+            }
+
+            // Set new selection
+            for row in start.1..=end.1 {
+                let from_col = if row == start.1 { start.0 } else { 0 };
+                let to_col = if row == end.1 { end.0 } else { state.grid.cols - 1 };
+                for col in from_col..=to_col {
+                    state.grid.cell_mut(row, col).flags.insert(CellFlags::SELECTED);
+                }
+                state.grid.mark_dirty(row);
             }
         }
     }
@@ -998,12 +1087,26 @@ impl ApplicationHandler for App {
                 }
             }
 
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_pos = (position.x, position.y);
+                if self.mouse_pressed {
+                    if let Some(cell) = self.pixel_to_cell(position.x, position.y) {
+                        self.selection_end = Some(cell);
+                        self.update_selection();
+                    }
+                }
+            }
+
             WindowEvent::MouseInput { state: btn_state, button, .. } => {
                 if button == MouseButton::Left {
                     match btn_state {
                         ElementState::Pressed => {
-                            self.mouse_pressed = true;
                             self.clear_selection();
+                            self.mouse_pressed = true;
+                            if let Some(cell) = self.pixel_to_cell(self.cursor_pos.0, self.cursor_pos.1) {
+                                self.selection_start = Some(cell);
+                                self.selection_end = Some(cell);
+                            }
                         }
                         ElementState::Released => {
                             self.mouse_pressed = false;
@@ -1027,30 +1130,19 @@ impl ApplicationHandler for App {
 // ── Clipboard helpers ──
 
 fn set_clipboard(text: &str) {
-    unsafe {
-        let pb: id = NSPasteboard::generalPasteboard(nil);
-        let _: () = msg_send![pb, clearContents];
-        let ns_string = cocoa::foundation::NSString::alloc(nil).init_str(text);
-        let types = NSArray::arrayWithObject(nil, cocoa::appkit::NSPasteboardTypeString);
-        let _: () = msg_send![pb, declareTypes:types owner:nil];
-        let _: () = msg_send![pb, setString:ns_string forType:cocoa::appkit::NSPasteboardTypeString];
-    }
+    let pb = NSPasteboard::generalPasteboard();
+    pb.clearContents();
+    let pasteboard_type = ns_string!("public.utf8-plain-text");
+    let types = NSArray::from_slice(&[pasteboard_type]);
+    unsafe { pb.declareTypes_owner(&types, None) };
+    let ns_text = NSString::from_str(text);
+    pb.setString_forType(&ns_text, pasteboard_type);
 }
 
 fn get_clipboard() -> Option<String> {
-    unsafe {
-        let pb: id = NSPasteboard::generalPasteboard(nil);
-        let ns_string: id = msg_send![pb, stringForType: cocoa::appkit::NSPasteboardTypeString];
-        if ns_string == nil {
-            return None;
-        }
-        let bytes: *const u8 = msg_send![ns_string, UTF8String];
-        if bytes.is_null() {
-            return None;
-        }
-        let cstr = std::ffi::CStr::from_ptr(bytes as *const _);
-        cstr.to_str().ok().map(|s| s.to_string())
-    }
+    let pb = NSPasteboard::generalPasteboard();
+    let pasteboard_type = ns_string!("public.utf8-plain-text");
+    pb.stringForType(pasteboard_type).map(|s| s.to_string())
 }
 
 fn base64_decode(input: &[u8]) -> Result<Vec<u8>, ()> {

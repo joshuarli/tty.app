@@ -1,13 +1,15 @@
 use std::ffi::c_void;
 use std::mem;
-use std::sync::{Arc, Mutex};
+use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
-use cocoa::appkit::NSView;
-use cocoa::base::id as cocoa_id;
+use block::ConcreteBlock;
 use core_graphics_types::geometry::CGSize;
+use metal::foreign_types::ForeignType;
 use metal::*;
-use objc::rc::autoreleasepool;
-use objc::runtime::YES;
+use objc2::rc::Retained;
+use objc2_app_kit::NSView;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::config;
@@ -48,7 +50,11 @@ pub struct CellData {
 const CELL_DATA_SIZE: usize = mem::size_of::<CellData>();
 const _: () = assert!(CELL_DATA_SIZE == 16, "CellData must be 16 bytes");
 
-const TRIPLE_BUFFER_COUNT: usize = 3;
+// Cell and CellData must have identical layout for bulk memcpy.
+const _: () = assert!(mem::size_of::<Cell>() == CELL_DATA_SIZE, "Cell and CellData size mismatch");
+
+/// Number of cell buffers for pipelining (CPU uploads to one while GPU reads the other).
+const NUM_BUFFERS: usize = 2;
 
 pub struct MetalRenderer {
     device: Device,
@@ -56,9 +62,10 @@ pub struct MetalRenderer {
     pipeline: ComputePipelineState,
     layer: MetalLayer,
 
-    // Triple-buffered cell data
-    cell_buffers: [Buffer; TRIPLE_BUFFER_COUNT],
-    frame_index: usize,
+    // Double-buffered cell data — CPU writes to one while GPU reads the other
+    cell_buffers: [Buffer; NUM_BUFFERS],
+    current_buffer: usize,
+    buffer_ready: [Arc<AtomicBool>; NUM_BUFFERS],
 
     // Palette buffer (256 × float4)
     palette_buffer: Buffer,
@@ -75,6 +82,9 @@ pub struct MetalRenderer {
     pub cell_width: u32,
     pub cell_height: u32,
     pub scale_factor: f64,
+
+    // Track whether we need to render
+    needs_render: bool,
 }
 
 impl MetalRenderer {
@@ -93,11 +103,14 @@ impl MetalRenderer {
 
         // Attach layer to NSView
         let scale_factor = window.scale_factor();
-        unsafe {
-            if let RawWindowHandle::AppKit(handle) = window.window_handle().unwrap().as_raw() {
-                let view = handle.ns_view.as_ptr() as cocoa_id;
-                view.setWantsLayer(YES);
-                let _: () = msg_send![view, setLayer: layer.as_ref()];
+        if let RawWindowHandle::AppKit(handle) = window.window_handle().unwrap().as_raw() {
+            let view: Retained<NSView> = unsafe {
+                Retained::retain(handle.ns_view.as_ptr().cast::<NSView>())
+            }.expect("NSView pointer was null");
+            view.setWantsLayer(true);
+            unsafe {
+                let layer_obj: *mut objc2::runtime::AnyObject = layer.as_ptr().cast();
+                let _: () = objc2::msg_send![&*view, setLayer: layer_obj];
             }
         }
         layer.set_contents_scale(scale_factor);
@@ -117,12 +130,16 @@ impl MetalRenderer {
             .new_compute_pipeline_state_with_function(&function)
             .expect("failed to create compute pipeline");
 
-        // Allocate triple-buffered cell buffers
-        let max_cells = (cols * rows) as usize;
-        let buffer_size = max_cells * CELL_DATA_SIZE;
-        let cell_buffers = std::array::from_fn(|_| {
-            device.new_buffer(buffer_size as u64, MTLResourceOptions::StorageModeShared)
-        });
+        // Double-buffered cell data
+        let buffer_size = (cols as usize * rows as usize * CELL_DATA_SIZE) as u64;
+        let cell_buffers = [
+            device.new_buffer(buffer_size, MTLResourceOptions::StorageModeShared),
+            device.new_buffer(buffer_size, MTLResourceOptions::StorageModeShared),
+        ];
+        let buffer_ready = [
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(true)),
+        ];
 
         // Palette buffer (256 × [f32; 4])
         let palette_data = Self::build_palette_buffer();
@@ -153,7 +170,8 @@ impl MetalRenderer {
             pipeline,
             layer,
             cell_buffers,
-            frame_index: 0,
+            current_buffer: 0,
+            buffer_ready,
             palette_buffer,
             uniform_buffer,
             atlas_texture,
@@ -162,6 +180,7 @@ impl MetalRenderer {
             cell_width,
             cell_height,
             scale_factor,
+            needs_render: true,
         }
     }
 
@@ -179,46 +198,36 @@ impl MetalRenderer {
         data
     }
 
-    /// Upload dirty rows from the grid to the current frame's cell buffer.
-    /// Returns true if anything was dirty.
-    pub fn upload_dirty_rows(&mut self, grid: &Grid) -> bool {
-        let dirty = &grid.dirty;
-        let mut any_dirty = false;
-
-        let buf = &self.cell_buffers[self.frame_index % TRIPLE_BUFFER_COUNT];
-        let buf_ptr = buf.contents() as *mut CellData;
-
-        for row in 0..self.rows.min(grid.rows as u32) {
-            if !dirty[row as usize] {
-                continue;
-            }
-            any_dirty = true;
-            let row_offset = (row * self.cols) as usize;
-            let src_offset = (row as u16 * grid.cols) as usize;
-            let copy_cols = self.cols.min(grid.cols as u32) as usize;
-
-            unsafe {
-                let dst = buf_ptr.add(row_offset);
-                for col in 0..copy_cols {
-                    let cell = &grid.cells[src_offset + col];
-                    *dst.add(col) = cell.to_cell_data();
-                }
-            }
-        }
-
-        any_dirty
-    }
-
-    /// Render a frame. Returns false if no drawable was available.
+    /// Render a frame. Only dispatches GPU work if content changed.
+    /// Cell data is bulk-copied from the grid (Cell and CellData share identical repr(C) layout).
+    /// Bold brightness and hidden attribute are handled in the shader.
     pub fn render_frame(&mut self, grid: &mut Grid, cursor_visible: bool) -> bool {
-        let has_dirty = self.upload_dirty_rows(grid);
+        let any_dirty = grid.dirty.any();
         grid.clear_dirty();
 
-        if !has_dirty {
+        if !any_dirty && !self.needs_render {
             return true;
         }
+        self.needs_render = false;
 
-        autoreleasepool(|| {
+        // Wait for the target buffer to be free (GPU finished reading it).
+        // In practice this rarely spins — the GPU is at most 1 frame behind.
+        while !self.buffer_ready[self.current_buffer].load(Ordering::Acquire) {
+            std::hint::spin_loop();
+        }
+
+        // Bulk-copy the entire grid into the current cell buffer.
+        // Cell is #[repr(C)] with identical layout to CellData — this is a plain memcpy.
+        let grid_cells = grid.cols as usize * grid.rows as usize;
+        let copy_cells = grid_cells.min(self.cols as usize * self.rows as usize);
+        let byte_count = copy_cells * CELL_DATA_SIZE;
+        unsafe {
+            let src = grid.cells.as_ptr() as *const u8;
+            let dst = self.cell_buffers[self.current_buffer].contents() as *mut u8;
+            ptr::copy_nonoverlapping(src, dst, byte_count);
+        }
+
+        objc2::rc::autoreleasepool(|_| {
             let drawable = match self.layer.next_drawable() {
                 Some(d) => d,
                 None => return false,
@@ -249,13 +258,9 @@ impl MetalRenderer {
             let encoder = command_buffer.new_compute_command_encoder();
 
             encoder.set_compute_pipeline_state(&self.pipeline);
-            encoder.set_texture(0, Some(&texture));
+            encoder.set_texture(0, Some(texture));
             encoder.set_texture(1, Some(&self.atlas_texture));
-            encoder.set_buffer(
-                0,
-                Some(&self.cell_buffers[self.frame_index % TRIPLE_BUFFER_COUNT]),
-                0,
-            );
+            encoder.set_buffer(0, Some(&self.cell_buffers[self.current_buffer]), 0);
             encoder.set_buffer(1, Some(&self.palette_buffer), 0);
             encoder.set_buffer(2, Some(&self.uniform_buffer), 0);
 
@@ -267,36 +272,56 @@ impl MetalRenderer {
             encoder.dispatch_threads(grid_size, threadgroup_size);
             encoder.end_encoding();
 
-            command_buffer.present_drawable(&drawable);
-            command_buffer.commit();
+            // Mark buffer as in-flight before commit
+            self.buffer_ready[self.current_buffer].store(false, Ordering::Release);
 
-            self.frame_index += 1;
+            // Signal buffer availability when GPU finishes
+            let ready_flag = self.buffer_ready[self.current_buffer].clone();
+            let handler = ConcreteBlock::new(move |_cb: &CommandBufferRef| {
+                ready_flag.store(true, Ordering::Release);
+            });
+            let handler = handler.copy();
+            command_buffer.add_completed_handler(&handler);
+
+            command_buffer.present_drawable(drawable);
+            command_buffer.commit();
+            // No wait — CPU is free to read PTY / parse while GPU renders
+
+            // Swap to the other buffer for next frame
+            self.current_buffer = (self.current_buffer + 1) % NUM_BUFFERS;
+
             true
         })
     }
 
     /// Resize the Metal layer and reallocate buffers.
+    /// NOTE: width/height are already in physical pixels (from winit).
     pub fn resize(&mut self, width: u32, height: u32, scale: f64) {
         self.scale_factor = scale;
-        let physical_w = (width as f64 * scale) as u64;
-        let physical_h = (height as f64 * scale) as u64;
-        self.layer.set_drawable_size(CGSize::new(physical_w as f64, physical_h as f64));
+        self.layer.set_drawable_size(CGSize::new(width as f64, height as f64));
         self.layer.set_contents_scale(scale);
 
-        // Recalculate grid dimensions
+        // Recalculate grid dimensions (all in physical pixels already)
         let padding_px = (config::PADDING as f64 * scale) as u32;
-        let usable_w = physical_w as u32 - padding_px * 2;
-        let usable_h = physical_h as u32 - padding_px * 2;
+        let usable_w = width - padding_px * 2;
+        let usable_h = height - padding_px * 2;
         self.cols = usable_w / self.cell_width;
         self.rows = usable_h / self.cell_height;
 
-        // Reallocate cell buffers
-        let max_cells = (self.cols * self.rows) as usize;
-        let buffer_size = max_cells * CELL_DATA_SIZE;
-        for i in 0..TRIPLE_BUFFER_COUNT {
-            self.cell_buffers[i] =
-                self.device.new_buffer(buffer_size as u64, MTLResourceOptions::StorageModeShared);
+        // Wait for any in-flight GPU work before reallocating
+        for i in 0..NUM_BUFFERS {
+            while !self.buffer_ready[i].load(Ordering::Acquire) {
+                std::hint::spin_loop();
+            }
         }
+
+        // Reallocate both cell buffers
+        let buffer_size = (self.cols as usize * self.rows as usize * CELL_DATA_SIZE) as u64;
+        self.cell_buffers = [
+            self.device.new_buffer(buffer_size, MTLResourceOptions::StorageModeShared),
+            self.device.new_buffer(buffer_size, MTLResourceOptions::StorageModeShared),
+        ];
+        self.needs_render = true;
     }
 
     pub fn device(&self) -> &Device {

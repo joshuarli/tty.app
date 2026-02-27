@@ -45,11 +45,25 @@ impl Parser {
 
         // Main SIMD-accelerated loop
         while pos < len {
+            // If state machine is in a non-ground state, keep feeding it
+            // until it returns to ground before trying any fast paths.
+            if !self.state_machine.is_ground() {
+                while pos < len {
+                    let byte = data[pos];
+                    pos += 1;
+                    self.state_machine.advance(byte, performer);
+                    if self.state_machine.is_ground() {
+                        break;
+                    }
+                }
+                continue;
+            }
+
             // Try SIMD scanner: find the next run of printable ASCII
             let remaining = &data[pos..];
 
             if remaining.len() >= 16 {
-                let (ascii_end, special_pos) = SimdScanner::scan(remaining);
+                let (ascii_end, _special_pos) = SimdScanner::scan(remaining);
 
                 if ascii_end > 0 {
                     // Bulk ASCII run
@@ -83,7 +97,7 @@ impl Parser {
             }
 
             // Printable ASCII (scalar fallback for short runs / when not aligned)
-            if byte >= 0x20 && byte < 0x7F {
+            if (0x20..0x7F).contains(&byte) {
                 // Scan forward for a short ASCII run
                 let start = pos;
                 while pos < len && data[pos] >= 0x20 && data[pos] < 0x7F {
@@ -94,7 +108,7 @@ impl Parser {
             }
 
             // UTF-8 multi-byte sequence
-            if byte >= 0x80 && byte < 0xC0 {
+            if (0x80..0xC0).contains(&byte) {
                 // Unexpected continuation byte — emit replacement
                 performer.print('\u{FFFD}');
                 pos += 1;

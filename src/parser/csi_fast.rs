@@ -33,7 +33,7 @@ impl CsiFastParser {
         let mut param_count = 0;
         let mut current_param: u32 = 0;
         let mut has_digit = false;
-        let mut has_colon = false;
+        let mut _has_colon = false;
 
         while pos < len {
             let b = buf[pos];
@@ -54,7 +54,7 @@ impl CsiFastParser {
                 }
                 b':' => {
                     // Colon sub-parameters — bail to state machine
-                    has_colon = true;
+                    _has_colon = true;
                     return None;
                 }
                 b' '..=b'/' => {
@@ -63,12 +63,11 @@ impl CsiFastParser {
                 }
                 0x40..=0x7E => {
                     // Final byte — dispatch
-                    if has_digit || param_count > 0 {
-                        if param_count < 16 {
+                    if (has_digit || param_count > 0)
+                        && param_count < 16 {
                             params[param_count] = current_param.min(u16::MAX as u32) as u16;
                             param_count += 1;
                         }
-                    }
                     pos += 1; // consume final byte
 
                     Self::dispatch(b, &params[..param_count], private, performer);
