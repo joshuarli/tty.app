@@ -37,6 +37,14 @@ impl Parser {
         let len = data.len();
         let mut pos = 0;
 
+        // Complete any buffered UTF-8 sequence from the previous parse() call.
+        // This must happen before the state machine check — UTF-8 is only buffered
+        // when the state machine is in ground state.
+        if let Some((ch, consumed)) = self.utf8.try_complete(&data[pos..]) {
+            performer.print(ch);
+            pos += consumed;
+        }
+
         // If we're in the middle of a state machine sequence, finish it first
         if !self.state_machine.is_ground() {
             while pos < len {
@@ -121,14 +129,15 @@ impl Parser {
                 continue;
             }
             if byte >= 0xC0 {
-                // Start of multi-byte UTF-8
-                if let Some((ch, consumed)) = self.utf8.decode(&data[pos..]) {
-                    performer.print(ch);
-                    pos += consumed;
-                } else {
-                    // Incomplete — need more data. For now, emit replacement.
-                    performer.print('\u{FFFD}');
-                    pos += 1;
+                match self.utf8.decode(&data[pos..]) {
+                    Some((ch, consumed)) => {
+                        performer.print(ch);
+                        pos += consumed;
+                    }
+                    None => {
+                        // Incomplete — bytes buffered by assembler for next parse() call
+                        break;
+                    }
                 }
                 continue;
             }

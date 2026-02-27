@@ -1,6 +1,9 @@
 /// UTF-8 codepoint assembler.
-/// Decodes multi-byte sequences from a byte slice.
-pub struct Utf8Assembler;
+/// Buffers incomplete multi-byte sequences across parse() calls.
+pub struct Utf8Assembler {
+    buf: [u8; 4],
+    len: u8,
+}
 
 impl Default for Utf8Assembler {
     fn default() -> Self {
@@ -10,39 +13,103 @@ impl Default for Utf8Assembler {
 
 impl Utf8Assembler {
     pub fn new() -> Self {
-        Self
+        Self {
+            buf: [0; 4],
+            len: 0,
+        }
+    }
+
+    /// If there are buffered bytes from a previous parse() call, try to
+    /// complete the sequence using new data.
+    /// Returns Some((char, new_bytes_consumed)) or None if still incomplete / nothing buffered.
+    pub fn try_complete(&mut self, data: &[u8]) -> Option<(char, usize)> {
+        if self.len == 0 {
+            return None;
+        }
+
+        let expected = match self.buf[0] {
+            0xC0..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF7 => 4,
+            _ => {
+                // Invalid start byte somehow buffered — discard
+                self.len = 0;
+                return Some(('\u{FFFD}', 0));
+            }
+        };
+
+        let need = expected - self.len as usize;
+        let available = data.len().min(need);
+
+        // Validate and copy new continuation bytes
+        for (i, &byte) in data.iter().enumerate().take(available) {
+            if byte & 0xC0 != 0x80 {
+                // Invalid continuation — emit replacement for the buffered bytes,
+                // don't consume the invalid byte (caller will handle it)
+                self.len = 0;
+                return Some(('\u{FFFD}', i));
+            }
+            self.buf[self.len as usize + i] = byte;
+        }
+        self.len += available as u8;
+
+        if (self.len as usize) < expected {
+            // Still incomplete — need more data (very rare: tiny reads)
+            return None;
+        }
+
+        // We have all bytes — decode
+        let ch = Self::decode_buf(&self.buf, expected);
+        self.len = 0;
+        Some((ch, available))
     }
 
     /// Attempt to decode a UTF-8 codepoint from the start of the slice.
-    /// Returns Some((char, bytes_consumed)) or None if the sequence is incomplete.
+    /// Returns Some((char, bytes_consumed)) on success, None if the sequence
+    /// is incomplete (bytes are buffered internally for the next call).
     pub fn decode(&mut self, data: &[u8]) -> Option<(char, usize)> {
         if data.is_empty() {
             return None;
         }
 
         let first = data[0];
-        let (expected, mask) = match first {
-            0xC0..=0xDF => (2, 0x1F),
-            0xE0..=0xEF => (3, 0x0F),
-            0xF0..=0xF7 => (4, 0x07),
-            _ => return None, // Not a valid start byte
+        let expected = match first {
+            0xC0..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF7 => 4,
+            _ => return Some(('\u{FFFD}', 1)), // Not a valid start byte
         };
 
         if data.len() < expected {
-            // Incomplete sequence — return replacement for now
-            // (proper cross-buffer handling would buffer the bytes)
-            return Some(('\u{FFFD}', data.len()));
+            // Incomplete — buffer for next parse() call
+            let n = data.len().min(4);
+            self.buf[..n].copy_from_slice(&data[..n]);
+            self.len = n as u8;
+            return None;
         }
 
         // Validate continuation bytes
-        for byte in data.iter().take(expected).skip(1) {
+        for &byte in data.iter().take(expected).skip(1) {
             if byte & 0xC0 != 0x80 {
                 return Some(('\u{FFFD}', 1)); // Invalid continuation
             }
         }
 
-        let mut cp: u32 = (first & mask) as u32;
-        for byte in data.iter().take(expected).skip(1) {
+        let ch = Self::decode_buf(data, expected);
+        Some((ch, expected))
+    }
+
+    fn decode_buf(buf: &[u8], expected: usize) -> char {
+        let first = buf[0];
+        let mask: u8 = match expected {
+            2 => 0x1F,
+            3 => 0x0F,
+            4 => 0x07,
+            _ => return '\u{FFFD}',
+        };
+
+        let mut cp = (first & mask) as u32;
+        for byte in buf.iter().take(expected).skip(1) {
             cp = (cp << 6) | (byte & 0x3F) as u32;
         }
 
@@ -55,9 +122,9 @@ impl Utf8Assembler {
         };
 
         if valid {
-            Some((unsafe { char::from_u32_unchecked(cp) }, expected))
+            unsafe { char::from_u32_unchecked(cp) }
         } else {
-            Some(('\u{FFFD}', expected))
+            '\u{FFFD}'
         }
     }
 }

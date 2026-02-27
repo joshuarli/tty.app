@@ -219,7 +219,6 @@ impl MetalRenderer {
         if !any_dirty && !self.needs_render {
             return false;
         }
-        self.needs_render = false;
 
         // Wait for the target buffer to be free (GPU finished reading it).
         // In practice this rarely spins — the GPU is at most 1 frame behind.
@@ -241,7 +240,11 @@ impl MetalRenderer {
         objc2::rc::autoreleasepool(|_| {
             let drawable = match self.layer.next_drawable() {
                 Some(d) => d,
-                None => return false,
+                None => {
+                    // No drawable available — retry next frame
+                    self.needs_render = true;
+                    return false;
+                }
             };
 
             let texture = drawable.texture();
@@ -302,6 +305,7 @@ impl MetalRenderer {
 
             // Swap to the other buffer for next frame
             self.current_buffer = (self.current_buffer + 1) % NUM_BUFFERS;
+            self.needs_render = false;
 
             true
         })
