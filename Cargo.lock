@@ -300,6 +300,7 @@ dependencies = [
  "bitvec",
  "block",
  "bytemuck",
+ "core-foundation",
  "core-graphics",
  "core-graphics-types",
  "core-text",
