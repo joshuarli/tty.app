@@ -7,7 +7,7 @@ mod terminal;
 mod window;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use objc2_app_kit::NSPasteboard;
 use objc2_foundation::{NSArray, NSString, ns_string};
@@ -1469,6 +1469,22 @@ fn main() {
     let mut win = NativeWindow::new();
     let mut app = App::new(&win);
 
+    // Create a kqueue and register the PTY fd for read-readiness.
+    // This replaces the fixed sleep(8ms) with an immediate wake when shell
+    // output arrives, while keeping an 8ms fallback for AppKit event polling.
+    let kq = unsafe { libc::kqueue() };
+    assert!(kq >= 0, "kqueue() failed");
+    let ev_reg = libc::kevent {
+        ident: app.pty.fd() as libc::uintptr_t,
+        filter: libc::EVFILT_READ,
+        flags: libc::EV_ADD | libc::EV_ENABLE,
+        fflags: 0,
+        data: 0,
+        udata: std::ptr::null_mut(),
+    };
+    let ret = unsafe { libc::kevent(kq, &ev_reg, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
+    assert!(ret >= 0, "kevent register failed");
+
     loop {
         let idle = objc2::rc::autoreleasepool(|_| {
             let got_pty_data = app.process_pty_output(&win);
@@ -1487,10 +1503,20 @@ fn main() {
             break;
         }
 
-        // When nothing happened this frame, sleep briefly to avoid busy-spinning.
-        // Vsync already throttles active frames; this covers the truly idle case.
+        // When idle, block until the PTY has data or 8ms elapses.
+        // This gives near-zero latency for shell output while still polling
+        // AppKit events at the same 8ms cadence as before.
         if idle {
-            std::thread::sleep(Duration::from_millis(8));
+            let timeout = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 8_000_000, // 8ms
+            };
+            let mut ev_out = std::mem::MaybeUninit::<libc::kevent>::uninit();
+            unsafe {
+                libc::kevent(kq, std::ptr::null(), 0, ev_out.as_mut_ptr(), 1, &timeout);
+            }
         }
     }
+
+    unsafe { libc::close(kq) };
 }

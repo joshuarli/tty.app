@@ -82,6 +82,11 @@ impl Pty {
         }
     }
 
+    /// The raw file descriptor for the PTY master (for kqueue registration, etc.)
+    pub fn fd(&self) -> std::os::fd::RawFd {
+        self.master.as_raw_fd()
+    }
+
     /// Read from the PTY master. Returns bytes read, or Err for actual errors.
     /// Returns Ok(0) on true EOF (shell exited).
     /// Returns Err(WouldBlock) when no data is available.
