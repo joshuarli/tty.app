@@ -27,6 +27,6 @@ cargo check
 
 # Commit, tag, push
 git add Cargo.toml Cargo.lock Info.plist
-git commit -m "Release v$VERSION"
+git commit -m "v$VERSION"
 git tag "v$VERSION"
 git push --follow-tags

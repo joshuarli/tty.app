@@ -11,19 +11,12 @@ release:
       -Z build-std-features= \
       --target {{ target }}
 
-# assemble tty.app bundle
-app: release
-    rm -rf {{ app }}
-    mkdir -p {{ app }}/Contents/MacOS
-    cp Info.plist {{ app }}/Contents/
-    cp target/{{ target }}/release/tty {{ app }}/Contents/MacOS/
-    codesign --force --sign - {{ app }}
-    @echo "Built {{ app }} ($(du -sh {{ app }} | awk '{print $1}'))"
-
 # install to /Applications
-install: app
-    rm -rf /Applications/{{ app }}
-    cp -r {{ app }} /Applications/
+install: release
+    install -d /Applications/{{ app }}/Contents/MacOS
+    install -m 644 Info.plist /Applications/{{ app }}/Contents/
+    install -m 755 target/{{ target }}/release/tty /Applications/{{ app }}/Contents/MacOS/
+    codesign --force --sign - /Applications/{{ app }}
     @echo "Installed to /Applications/{{ app }}"
 
 run *ARGS:
