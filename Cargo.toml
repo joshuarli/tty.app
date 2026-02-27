@@ -8,7 +8,7 @@ build = "build.rs"
 metal = "0.32"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSArray"] }
-objc2-app-kit = { version = "0.3", features = ["NSView", "NSResponder", "NSPasteboard"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSView", "NSResponder", "NSPasteboard"] }
 winit = "0.30"
 bytemuck = { version = "1", features = ["derive"] }
 bitflags = "2"
