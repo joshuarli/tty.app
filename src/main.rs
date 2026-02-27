@@ -57,6 +57,7 @@ impl<'a> Perform for TermPerformer<'a> {
             let cp = ch as u16;
             let pos = self.atlas.get_or_insert(cp, false, self.rasterizer);
             self.grid.write_char(ch, pos.x, pos.y);
+            self.grid.last_char = ch;
         }
     }
 
@@ -65,6 +66,7 @@ impl<'a> Perform for TermPerformer<'a> {
         if cp > 0xFFFF {
             let pos = self.atlas.get_or_insert(0xFFFD, false, self.rasterizer);
             self.grid.write_char('\u{FFFD}', pos.x, pos.y);
+            self.grid.last_char = '\u{FFFD}';
             return;
         }
 
@@ -73,11 +75,13 @@ impl<'a> Perform for TermPerformer<'a> {
         if wide {
             let pos = self.atlas.get_or_insert(cp as u16, true, self.rasterizer);
             self.grid.write_wide_char(c, pos.x, pos.y);
+            self.grid.last_char = c;
         } else if is_zero_width(cp) {
             // Zero-width combining marks — ignore for v1
         } else {
             let pos = self.atlas.get_or_insert(cp as u16, false, self.rasterizer);
             self.grid.write_char(c, pos.x, pos.y);
+            self.grid.last_char = c;
         }
     }
 
@@ -129,15 +133,25 @@ impl<'a> Perform for TermPerformer<'a> {
     }
 
     fn cursor_up(&mut self, n: u16) {
-        let top = self.grid.scroll_top;
-        self.grid.cursor_row = self.grid.cursor_row.saturating_sub(n).max(top);
+        let row = self.grid.cursor_row;
+        let top = if row >= self.grid.scroll_top && row <= self.grid.scroll_bottom {
+            self.grid.scroll_top
+        } else {
+            0
+        };
+        self.grid.cursor_row = row.saturating_sub(n).max(top);
         self.grid.cursor_pending_wrap = false;
         self.grid.mark_dirty(self.grid.cursor_row);
     }
 
     fn cursor_down(&mut self, n: u16) {
-        let bottom = self.grid.scroll_bottom;
-        self.grid.cursor_row = (self.grid.cursor_row + n).min(bottom);
+        let row = self.grid.cursor_row;
+        let bottom = if row >= self.grid.scroll_top && row <= self.grid.scroll_bottom {
+            self.grid.scroll_bottom
+        } else {
+            self.grid.rows - 1
+        };
+        self.grid.cursor_row = (row + n).min(bottom);
         self.grid.cursor_pending_wrap = false;
         self.grid.mark_dirty(self.grid.cursor_row);
     }
@@ -153,7 +167,14 @@ impl<'a> Perform for TermPerformer<'a> {
     }
 
     fn cursor_position(&mut self, row: u16, col: u16) {
-        self.grid.cursor_row = (row.saturating_sub(1)).min(self.grid.rows - 1);
+        if self.grid.mode.contains(TermMode::ORIGIN_MODE) {
+            // DECOM: coordinates are relative to scroll region, clamped within it
+            let top = self.grid.scroll_top;
+            let bottom = self.grid.scroll_bottom;
+            self.grid.cursor_row = (top + row.saturating_sub(1)).min(bottom);
+        } else {
+            self.grid.cursor_row = (row.saturating_sub(1)).min(self.grid.rows - 1);
+        }
         self.grid.cursor_col = (col.saturating_sub(1)).min(self.grid.cols - 1);
         self.grid.cursor_pending_wrap = false;
     }
@@ -164,7 +185,13 @@ impl<'a> Perform for TermPerformer<'a> {
     }
 
     fn cursor_vertical_absolute(&mut self, row: u16) {
-        self.grid.cursor_row = (row.saturating_sub(1)).min(self.grid.rows - 1);
+        if self.grid.mode.contains(TermMode::ORIGIN_MODE) {
+            let top = self.grid.scroll_top;
+            let bottom = self.grid.scroll_bottom;
+            self.grid.cursor_row = (top + row.saturating_sub(1)).min(bottom);
+        } else {
+            self.grid.cursor_row = (row.saturating_sub(1)).min(self.grid.rows - 1);
+        }
         self.grid.cursor_pending_wrap = false;
     }
 
@@ -180,8 +207,12 @@ impl<'a> Perform for TermPerformer<'a> {
                 self.grid.clear_rows(0, row);
                 self.grid.clear_cols(row, 0, col + 1);
             }
-            2 | 3 => {
+            2 => {
                 self.grid.clear_rows(0, self.grid.rows);
+            }
+            3 => {
+                self.grid.clear_rows(0, self.grid.rows);
+                self.scrollback.clear();
             }
             _ => {}
         }
@@ -265,6 +296,13 @@ impl<'a> Perform for TermPerformer<'a> {
             self.grid.cells[row_start + c as usize].erase(&attr);
         }
         self.grid.mark_dirty(row);
+    }
+
+    fn erase_chars(&mut self, n: u16) {
+        let row = self.grid.cursor_row;
+        let col = self.grid.cursor_col;
+        self.grid
+            .clear_cols(row, col, (col + n).min(self.grid.cols));
     }
 
     fn sgr(&mut self, params: &[u16]) {
@@ -360,11 +398,95 @@ impl<'a> Perform for TermPerformer<'a> {
         }
     }
 
+    fn sgr_colon(&mut self, raw: &[u8]) {
+        // Split on ';' into independent SGR attributes, then split each on ':'
+        for attr_bytes in raw.split(|&b| b == b';') {
+            let subs: Vec<u16> = attr_bytes
+                .split(|&b| b == b':')
+                .map(|s| {
+                    s.iter().fold(0u32, |acc, &b| {
+                        if b.is_ascii_digit() {
+                            acc * 10 + (b - b'0') as u32
+                        } else {
+                            acc
+                        }
+                    }) as u16
+                })
+                .collect();
+
+            if subs.is_empty() {
+                continue;
+            }
+
+            match subs[0] {
+                4 => {
+                    // Underline style: 4:0=off, 4:1=single, 4:2=double, 4:3=curly, etc.
+                    if subs.len() > 1 {
+                        if subs[1] == 0 {
+                            self.grid.attr.flags.remove(CellFlags::UNDERLINE);
+                        } else {
+                            // All underline variants → set UNDERLINE (we don't distinguish styles yet)
+                            self.grid.attr.flags.insert(CellFlags::UNDERLINE);
+                        }
+                    } else {
+                        self.grid.attr.flags.insert(CellFlags::UNDERLINE);
+                    }
+                }
+                38 => {
+                    // Foreground color: 38:5:N or 38:2:[CS]:R:G:B
+                    if subs.len() >= 3 && subs[1] == 5 {
+                        self.grid.attr.fg_index = subs[2] as u8;
+                    } else if subs.len() >= 5 && subs[1] == 2 {
+                        // 38:2:CS:R:G:B or 38:2::R:G:B (empty CS = 0)
+                        let (r, g, b) = if subs.len() >= 6 {
+                            (subs[3] as u32, subs[4] as u32, subs[5] as u32)
+                        } else {
+                            (subs[2] as u32, subs[3] as u32, subs[4] as u32)
+                        };
+                        self.grid.attr.fg_rgb = (r << 16) | (g << 8) | b;
+                        self.grid.attr.fg_index = 0xFF;
+                    }
+                }
+                48 => {
+                    // Background color: 48:5:N or 48:2:[CS]:R:G:B
+                    if subs.len() >= 3 && subs[1] == 5 {
+                        self.grid.attr.bg_index = subs[2] as u8;
+                    } else if subs.len() >= 5 && subs[1] == 2 {
+                        let (r, g, b) = if subs.len() >= 6 {
+                            (subs[3] as u32, subs[4] as u32, subs[5] as u32)
+                        } else {
+                            (subs[2] as u32, subs[3] as u32, subs[4] as u32)
+                        };
+                        self.grid.attr.bg_rgb = (r << 16) | (g << 8) | b;
+                        self.grid.attr.bg_index = 0xFF;
+                    }
+                }
+                58 => {
+                    // Underline color — we don't render it separately, ignore
+                }
+                59 => {
+                    // Reset underline color — ignore
+                }
+                _ => {
+                    // Single-value attribute that happens to be in a colon sequence,
+                    // e.g. "1" in "1;4:3" — dispatch through normal sgr
+                    self.sgr(&subs[..1]);
+                }
+            }
+        }
+    }
+
     fn set_mode(&mut self, params: &[u16], private: bool) {
         for &p in params {
             if private {
                 match p {
                     1 => self.grid.mode.insert(TermMode::CURSOR_KEYS),
+                    6 => {
+                        self.grid.mode.insert(TermMode::ORIGIN_MODE);
+                        self.grid.cursor_row = self.grid.scroll_top;
+                        self.grid.cursor_col = 0;
+                        self.grid.cursor_pending_wrap = false;
+                    }
                     7 => self.grid.mode.insert(TermMode::AUTO_WRAP),
                     25 => self.grid.mode.insert(TermMode::CURSOR_VISIBLE),
                     47 | 1047 => self.grid.enter_alt_screen(),
@@ -390,6 +512,12 @@ impl<'a> Perform for TermPerformer<'a> {
             if private {
                 match p {
                     1 => self.grid.mode.remove(TermMode::CURSOR_KEYS),
+                    6 => {
+                        self.grid.mode.remove(TermMode::ORIGIN_MODE);
+                        self.grid.cursor_row = 0;
+                        self.grid.cursor_col = 0;
+                        self.grid.cursor_pending_wrap = false;
+                    }
                     7 => self.grid.mode.remove(TermMode::AUTO_WRAP),
                     25 => self.grid.mode.remove(TermMode::CURSOR_VISIBLE),
                     47 | 1047 => self.grid.exit_alt_screen(),
@@ -420,10 +548,19 @@ impl<'a> Perform for TermPerformer<'a> {
         if top < bottom {
             self.grid.scroll_top = top;
             self.grid.scroll_bottom = bottom;
-            self.grid.cursor_row = 0;
-            self.grid.cursor_col = 0;
-            self.grid.cursor_pending_wrap = false;
+        } else {
+            // Invalid region — reset to full screen
+            self.grid.scroll_top = 0;
+            self.grid.scroll_bottom = self.grid.rows - 1;
         }
+        // DECSTBM homes cursor to (1,1). With DECOM, that's top of scroll region.
+        if self.grid.mode.contains(TermMode::ORIGIN_MODE) {
+            self.grid.cursor_row = self.grid.scroll_top;
+        } else {
+            self.grid.cursor_row = 0;
+        }
+        self.grid.cursor_col = 0;
+        self.grid.cursor_pending_wrap = false;
     }
 
     fn tab_clear(&mut self, mode: u16) {
@@ -537,23 +674,68 @@ impl<'a> Perform for TermPerformer<'a> {
         }
     }
 
+    fn repeat_char(&mut self, n: u16) {
+        let c = self.grid.last_char;
+        for _ in 0..n {
+            self.print(c);
+        }
+    }
+
     fn csi_dispatch(&mut self, params: &[u16], intermediates: &[u8], _ignore: bool, byte: u8) {
         match (intermediates, byte) {
+            ([], b'm') => {
+                // SGR via state machine (colon sub-params flattened to ';')
+                // The state machine treats ':' as ';', so params are already flattened.
+                // This is imperfect for colon sub-params but better than dropping them.
+                if params.is_empty() {
+                    self.sgr(&[0]);
+                } else {
+                    self.sgr(params);
+                }
+            }
             ([], b'X') => {
                 // ECH
-                let n = params.first().copied().unwrap_or(1).max(1);
-                let row = self.grid.cursor_row;
-                let col = self.grid.cursor_col;
-                self.grid
-                    .clear_cols(row, col, (col + n).min(self.grid.cols));
+                self.erase_chars(params.first().copied().unwrap_or(1).max(1));
             }
             ([], b'c') => {
-                // DA — report as VT220
-                self.response_buf.extend_from_slice(b"\x1B[?62;c");
+                // DA1 — report as VT100 with no extensions (like Alacritty)
+                self.response_buf.extend_from_slice(b"\x1B[?6c");
             }
             ([b'>'], b'c') => {
                 // DA2
                 self.response_buf.extend_from_slice(b"\x1B[>0;0;0c");
+            }
+            ([b'?', b'$'], b'p') => {
+                // DECRQM (DEC private mode query) → respond with DECRPM
+                // Format: CSI ? Ps ; Pm $ y
+                // Pm: 0=not recognized, 1=set, 2=reset
+                if let Some(&mode) = params.first() {
+                    let pm = match mode {
+                        1 | 6 | 7 | 25 | 47 | 1000 | 1002 | 1003 | 1004 | 1006 | 1047 | 1049
+                        | 2004 | 2026 => {
+                            // Recognized mode — check if currently set
+                            let flag = match mode {
+                                1 => TermMode::CURSOR_KEYS,
+                                6 => TermMode::ORIGIN_MODE,
+                                7 => TermMode::AUTO_WRAP,
+                                25 => TermMode::CURSOR_VISIBLE,
+                                47 | 1047 | 1049 => TermMode::ALT_SCREEN,
+                                1000 => TermMode::MOUSE_BUTTON,
+                                1002 => TermMode::MOUSE_MOTION,
+                                1003 => TermMode::MOUSE_ALL,
+                                1004 => TermMode::FOCUS_EVENTS,
+                                1006 => TermMode::MOUSE_SGR,
+                                2004 => TermMode::BRACKETED_PASTE,
+                                2026 => TermMode::SYNC_OUTPUT,
+                                _ => unreachable!(),
+                            };
+                            if self.grid.mode.contains(flag) { 1 } else { 2 }
+                        }
+                        _ => 0, // not recognized
+                    };
+                    let resp = format!("\x1B[?{};{}$y", mode, pm);
+                    self.response_buf.extend_from_slice(resp.as_bytes());
+                }
             }
             _ => {}
         }
@@ -625,6 +807,9 @@ struct App {
 
     // Timestamp when synchronized output (Mode 2026) was last enabled
     sync_start: Instant,
+
+    // Accumulated scroll delta (in logical points) for fractional accumulation
+    scroll_accumulator: f64,
 }
 
 impl App {
@@ -692,6 +877,7 @@ impl App {
             prev_cursor_row: 0,
             prev_cursor_col: 0,
             sync_start: Instant::now(),
+            scroll_accumulator: 0.0,
         }
     }
 
@@ -1092,6 +1278,64 @@ impl App {
                     let cell = self.pixel_to_cell(*x, *y);
                     self.selection_end = Some(cell);
                     self.update_selection();
+                }
+            }
+
+            Event::FocusIn => {
+                if self.shared.grid.mode.contains(TermMode::FOCUS_EVENTS) {
+                    let _ = self.pty.write(b"\x1B[I");
+                }
+            }
+
+            Event::FocusOut => {
+                if self.shared.grid.mode.contains(TermMode::FOCUS_EVENTS) {
+                    let _ = self.pty.write(b"\x1B[O");
+                }
+            }
+
+            Event::ScrollWheel { x, y, delta_y } => {
+                self.cursor_pos = (*x, *y);
+                let cell = self.pixel_to_cell(*x, *y);
+                let mouse_mode = self.shared.grid.mode.intersects(
+                    TermMode::MOUSE_BUTTON | TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL,
+                );
+
+                // Accumulate delta in logical points and convert to discrete lines.
+                // cell_height is in physical pixels; convert to points for correct scaling.
+                let cell_height_pts = self.renderer.cell_height as f64 / self.renderer.scale_factor;
+                self.scroll_accumulator += *delta_y;
+
+                // Extract whole lines from the accumulator
+                let lines = (self.scroll_accumulator / cell_height_pts) as i32;
+                if lines == 0 {
+                    // Not enough delta accumulated for a full line yet
+                } else {
+                    self.scroll_accumulator -= lines as f64 * cell_height_pts;
+                    let count = lines.unsigned_abs().min(5); // cap to prevent flooding
+
+                    if mouse_mode {
+                        // Mouse mode: send scroll button events (64=up, 65=down)
+                        let sgr = self.shared.grid.mode.contains(TermMode::MOUSE_SGR);
+                        let button = if lines > 0 { 64u8 } else { 65u8 };
+                        for _ in 0..count {
+                            let bytes =
+                                input::mouse_to_bytes(button, cell.0 + 1, cell.1 + 1, true, sgr);
+                            let _ = self.pty.write(&bytes);
+                        }
+                    } else {
+                        // No mouse mode: send arrow up/down for shell scrolling
+                        let app_cursor = self.shared.grid.mode.contains(TermMode::CURSOR_KEYS);
+                        let seq = if lines > 0 {
+                            if app_cursor { b"\x1BOA" } else { b"\x1B[A" }
+                        } else if app_cursor {
+                            b"\x1BOB"
+                        } else {
+                            b"\x1B[B"
+                        };
+                        for _ in 0..count {
+                            let _ = self.pty.write(seq.as_slice());
+                        }
+                    }
                 }
             }
         }

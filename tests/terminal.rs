@@ -77,15 +77,25 @@ impl<'a> Perform for TestPerformer<'a> {
     }
 
     fn cursor_up(&mut self, n: u16) {
-        let top = self.grid.scroll_top;
-        self.grid.cursor_row = self.grid.cursor_row.saturating_sub(n).max(top);
+        let row = self.grid.cursor_row;
+        let top = if row >= self.grid.scroll_top && row <= self.grid.scroll_bottom {
+            self.grid.scroll_top
+        } else {
+            0
+        };
+        self.grid.cursor_row = row.saturating_sub(n).max(top);
         self.grid.cursor_pending_wrap = false;
         self.grid.mark_dirty(self.grid.cursor_row);
     }
 
     fn cursor_down(&mut self, n: u16) {
-        let bottom = self.grid.scroll_bottom;
-        self.grid.cursor_row = (self.grid.cursor_row + n).min(bottom);
+        let row = self.grid.cursor_row;
+        let bottom = if row >= self.grid.scroll_top && row <= self.grid.scroll_bottom {
+            self.grid.scroll_bottom
+        } else {
+            self.grid.rows - 1
+        };
+        self.grid.cursor_row = (row + n).min(bottom);
         self.grid.cursor_pending_wrap = false;
         self.grid.mark_dirty(self.grid.cursor_row);
     }
@@ -211,6 +221,30 @@ impl<'a> Perform for TestPerformer<'a> {
             self.grid.cells[row_start + c as usize].erase(&attr);
         }
         self.grid.mark_dirty(row);
+    }
+
+    fn erase_chars(&mut self, n: u16) {
+        let row = self.grid.cursor_row;
+        let col = self.grid.cursor_col;
+        let cols = self.grid.cols;
+        let n = n.min(cols - col);
+        let attr = self.grid.attr;
+        let row_start = row as usize * cols as usize;
+        for c in col..col + n {
+            self.grid.cells[row_start + c as usize].erase(&attr);
+        }
+        self.grid.mark_dirty(row);
+    }
+
+    fn repeat_char(&mut self, n: u16) {
+        let c = self.grid.last_char;
+        for _ in 0..n {
+            self.grid.write_char(c, 0, 0);
+        }
+    }
+
+    fn sgr_colon(&mut self, _raw: &[u8]) {
+        // Minimal stub — colon sub-params not tested yet
     }
 
     fn sgr(&mut self, params: &[u16]) {

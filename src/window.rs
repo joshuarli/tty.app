@@ -30,11 +30,18 @@ pub enum Event {
         x: f64,
         y: f64,
     },
+    ScrollWheel {
+        x: f64,
+        y: f64,
+        delta_y: f64,
+    },
     Resized {
         w: u32,
         h: u32,
         scale: f64,
     },
+    FocusIn,
+    FocusOut,
     #[allow(dead_code)]
     Closed,
 }
@@ -152,6 +159,7 @@ pub struct NativeWindow {
     events: Vec<Event>,
     last_frame: NSRect,
     last_scale: f64,
+    last_focused: bool,
     safe_area_top: u32,
     _mtm: MainThreadMarker,
 }
@@ -234,6 +242,7 @@ impl NativeWindow {
             events: Vec::with_capacity(32),
             last_frame,
             last_scale: scale,
+            last_focused: true,
             safe_area_top,
             _mtm: mtm,
         }
@@ -274,6 +283,12 @@ impl NativeWindow {
             } else if event_type == NSEventType::LeftMouseDragged {
                 let (x, y) = self.mouse_position(&event);
                 self.events.push(Event::MouseDragged { x, y });
+            } else if event_type == NSEventType::ScrollWheel {
+                let (x, y) = self.mouse_position(&event);
+                let delta_y = event.scrollingDeltaY();
+                if delta_y != 0.0 {
+                    self.events.push(Event::ScrollWheel { x, y, delta_y });
+                }
             }
 
             self.app.sendEvent(&event);
@@ -298,6 +313,17 @@ impl NativeWindow {
                 w: phys_w,
                 h: phys_h,
                 scale,
+            });
+        }
+
+        // Check for focus change
+        let focused = self.window.isKeyWindow();
+        if focused != self.last_focused {
+            self.last_focused = focused;
+            self.events.push(if focused {
+                Event::FocusIn
+            } else {
+                Event::FocusOut
             });
         }
 

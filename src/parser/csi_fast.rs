@@ -35,7 +35,8 @@ impl CsiFastParser {
         let mut param_count = 0;
         let mut current_param: u32 = 0;
         let mut has_digit = false;
-        let mut _has_colon = false;
+        let mut has_colon = false;
+        let param_start = pos;
 
         while pos < len {
             let b = buf[pos];
@@ -55,9 +56,16 @@ impl CsiFastParser {
                     pos += 1;
                 }
                 b':' => {
-                    // Colon sub-parameters — bail to state machine
-                    _has_colon = true;
-                    return None;
+                    // Colon sub-parameter — treat like ';' for flat params,
+                    // but flag so SGR can reparse the raw bytes with colon awareness
+                    has_colon = true;
+                    if param_count < 16 {
+                        params[param_count] = current_param.min(u16::MAX as u32) as u16;
+                        param_count += 1;
+                    }
+                    current_param = 0;
+                    has_digit = false;
+                    pos += 1;
                 }
                 b' '..=b'/' => {
                     // Intermediate bytes — bail to state machine
@@ -69,9 +77,15 @@ impl CsiFastParser {
                         params[param_count] = current_param.min(u16::MAX as u32) as u16;
                         param_count += 1;
                     }
+                    let param_end = pos;
                     pos += 1; // consume final byte
 
-                    Self::dispatch(b, &params[..param_count], private, performer);
+                    if has_colon && b == b'm' && !private {
+                        // SGR with colon sub-params — parse raw bytes for proper grouping
+                        performer.sgr_colon(&buf[param_start..param_end]);
+                    } else {
+                        Self::dispatch(b, &params[..param_count], private, performer);
+                    }
                     return Some(pos);
                 }
                 _ => {
@@ -94,8 +108,9 @@ impl CsiFastParser {
                 b'h' => performer.set_mode(params, true),
                 b'l' => performer.reset_mode(params, true),
                 _ => {
-                    // Unknown private CSI — dispatch generically
-                    performer.csi_dispatch(params, &[], false, final_byte);
+                    // Unknown private CSI — pass '?' as intermediate so csi_dispatch
+                    // can distinguish CSI ? Ps X from CSI Ps X
+                    performer.csi_dispatch(params, b"?", false, final_byte);
                 }
             }
             return;
@@ -116,6 +131,16 @@ impl CsiFastParser {
             b'B' | b'e' => performer.cursor_down(p0.max(1)),
             b'C' | b'a' => performer.cursor_forward(p0.max(1)),
             b'D' => performer.cursor_backward(p0.max(1)),
+            b'E' => {
+                // CNL — cursor next line
+                performer.cursor_down(p0.max(1));
+                performer.cursor_horizontal_absolute(1);
+            }
+            b'F' => {
+                // CPL — cursor previous line
+                performer.cursor_up(p0.max(1));
+                performer.cursor_horizontal_absolute(1);
+            }
 
             // Cursor position
             b'H' | b'f' => {
@@ -140,12 +165,8 @@ impl CsiFastParser {
             b'@' => performer.insert_chars(p0.max(1)),
             b'P' => performer.delete_chars(p0.max(1)),
 
-            // Erase characters
-            b'X' => {
-                // ECH — erase n characters from cursor
-                performer.insert_chars(0); // reuse for now, handled in csi_dispatch
-                performer.csi_dispatch(params, &[], false, final_byte);
-            }
+            // Erase characters (ECH)
+            b'X' => performer.erase_chars(p0.max(1)),
 
             // Set/reset mode (non-private)
             b'h' => performer.set_mode(params, false),
@@ -168,6 +189,9 @@ impl CsiFastParser {
             // Note: this has an intermediate space, so it won't hit this path
             // (the space causes a bail to state machine). That's fine.
             b'q' => performer.set_cursor_style(p0),
+
+            // REP — repeat last character
+            b'b' => performer.repeat_char(p0.max(1)),
 
             // Save/restore cursor (ANSI.SYS-style)
             b's' => performer.save_cursor(),

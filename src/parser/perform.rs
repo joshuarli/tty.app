@@ -32,6 +32,7 @@ pub trait Perform {
     fn delete_lines(&mut self, n: u16);
     fn insert_chars(&mut self, n: u16);
     fn delete_chars(&mut self, n: u16);
+    fn erase_chars(&mut self, n: u16);
 
     /// SGR (Select Graphic Rendition) with raw params
     fn sgr(&mut self, params: &[u16]);
@@ -65,4 +66,10 @@ pub trait Perform {
 
     /// Cursor style (DECSCUSR) — we only support block, so this is a no-op
     fn set_cursor_style(&mut self, _style: u16) {}
+
+    /// REP (CSI Ps b) — repeat the last printed character Ps times
+    fn repeat_char(&mut self, n: u16);
+
+    /// SGR with colon sub-parameters (raw param bytes, e.g. "4:3" or "38:2::255:0:0;1")
+    fn sgr_colon(&mut self, raw: &[u8]);
 }

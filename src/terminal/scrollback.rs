@@ -29,6 +29,13 @@ impl Scrollback {
         self.len == 0
     }
 
+    /// Clear all scrollback content.
+    pub fn clear(&mut self) {
+        self.buf.clear();
+        self.head = 0;
+        self.len = 0;
+    }
+
     /// Push a row into the scrollback. Overwrites oldest if full.
     pub fn push(&mut self, row: Vec<Cell>) {
         if self.capacity == 0 {

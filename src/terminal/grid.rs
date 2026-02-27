@@ -67,6 +67,9 @@ pub struct Grid {
     // Saved cursor
     pub saved_cursor: SavedCursor,
 
+    // Last printed character (for REP / CSI b)
+    pub last_char: char,
+
     // Alternate screen buffer
     alt_cells: Vec<Cell>,
     main_cursor: SavedCursor,
@@ -105,6 +108,7 @@ impl Grid {
             charset_g1: 0,
             active_charset: 0,
             tab_stops,
+            last_char: ' ',
             saved_cursor: SavedCursor::default(),
             alt_cells: Vec::new(),
             main_cursor: SavedCursor::default(),
@@ -341,7 +345,7 @@ impl Grid {
                 self.cursor_col = 0;
                 if self.cursor_row == self.scroll_bottom {
                     self.scroll_up(1);
-                } else if self.cursor_row < self.rows - 1 {
+                } else if self.cursor_row < self.scroll_bottom {
                     self.cursor_row += 1;
                 }
             }
@@ -379,7 +383,7 @@ impl Grid {
                 self.cursor_col = 0;
                 if self.cursor_row == self.scroll_bottom {
                     self.scroll_up(1);
-                } else if self.cursor_row < self.rows - 1 {
+                } else if self.cursor_row < self.scroll_bottom {
                     self.cursor_row += 1;
                 }
             }
@@ -394,7 +398,7 @@ impl Grid {
                 self.cursor_col = 0;
                 if self.cursor_row == self.scroll_bottom {
                     self.scroll_up(1);
-                } else if self.cursor_row < self.rows - 1 {
+                } else if self.cursor_row < self.scroll_bottom {
                     self.cursor_row += 1;
                 }
             } else {
