@@ -2,7 +2,7 @@
 // Change values here and recompile — no runtime config parsing.
 
 /// Font family name (must be installed on the system)
-pub const FONT_FAMILY: &str = "Menlo";
+pub const FONT_FAMILY: &str = "Hack";
 
 /// Font size in points
 pub const FONT_SIZE: f64 = 16.0;
@@ -14,7 +14,7 @@ pub const PADDING: u32 = 8;
 pub const SCROLLBACK_LINES: usize = 10_000;
 
 /// Default foreground color (palette index 7)
-pub const DEFAULT_FG: u32 = 0x00c5c8c6;
+pub const DEFAULT_FG: u32 = 0x00ffffff;
 
 /// Default background color (palette index 0)
 pub const DEFAULT_BG: u32 = 0x00000000;
@@ -26,24 +26,24 @@ pub const CURSOR_BLINK_MS: u64 = 500;
 pub const PALETTE: [u32; 256] = {
     let mut p = [0u32; 256];
 
-    // ANSI 0-7 (normal)
-    p[0] = 0x00000000; // black
-    p[1] = 0x00cc6666; // red
-    p[2] = 0x00b5bd68; // green
-    p[3] = 0x00f0c674; // yellow
-    p[4] = 0x0081a2be; // blue
-    p[5] = 0x00b294bb; // magenta
-    p[6] = 0x008abeb7; // cyan
-    p[7] = 0x00c5c8c6; // white
+    // ANSI 0-7 (normal) — Dracula-inspired
+    p[0] = 0x00000000; // black (= background)
+    p[1] = 0x00ff5555; // red
+    p[2] = 0x0050fa7b; // green
+    p[3] = 0x00f1fa8c; // yellow
+    p[4] = 0x00caa9fa; // blue
+    p[5] = 0x00ff79c6; // magenta
+    p[6] = 0x008be9fd; // cyan
+    p[7] = 0x00ffffff; // white (= foreground)
 
     // ANSI 8-15 (bright)
-    p[8] = 0x00969896;  // bright black
-    p[9] = 0x00cc6666;  // bright red
-    p[10] = 0x00b5bd68; // bright green
-    p[11] = 0x00f0c674; // bright yellow
-    p[12] = 0x0081a2be; // bright blue
-    p[13] = 0x00b294bb; // bright magenta
-    p[14] = 0x008abeb7; // bright cyan
+    p[8] = 0x00666666;  // bright black
+    p[9] = 0x00ff6e6e;  // bright red
+    p[10] = 0x0069ff94; // bright green
+    p[11] = 0x00ffffa5; // bright yellow
+    p[12] = 0x00d6bfff; // bright blue
+    p[13] = 0x00ff92df; // bright magenta
+    p[14] = 0x00a4ffff; // bright cyan
     p[15] = 0x00ffffff; // bright white
 
     // 216 color cube (indices 16-231)

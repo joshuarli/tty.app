@@ -115,7 +115,7 @@ impl FontRasterizer {
         // Draw glyph in white
         ctx.set_rgb_fill_color(1.0, 1.0, 1.0, 1.0);
         ctx.set_allows_font_smoothing(true);
-        ctx.set_should_smooth_fonts(false); // grayscale AA only
+        ctx.set_should_smooth_fonts(true);
         ctx.set_allows_antialiasing(true);
         ctx.set_should_antialias(true);
 
@@ -129,9 +129,19 @@ impl FontRasterizer {
             ctx.clone(),
         );
 
-        // Extract red channel as alpha (since we drew white on black)
+        // With font smoothing enabled, CoreText renders slightly different
+        // values per RGB channel (subpixel AA). We collapse to grayscale
+        // by taking the max of R/G/B — this preserves the smoothing's
+        // stem-broadening effect without actual subpixel color fringing.
         let rgba_data = ctx.data();
-        let alpha_data: Vec<u8> = (0..w * h).map(|i| rgba_data[i * 4]).collect();
+        let alpha_data: Vec<u8> = (0..w * h)
+            .map(|i| {
+                let r = rgba_data[i * 4];
+                let g = rgba_data[i * 4 + 1];
+                let b = rgba_data[i * 4 + 2];
+                ((r as u16 + g as u16 + b as u16) / 3) as u8
+            })
+            .collect();
 
         Some(RasterizedGlyph {
             data: alpha_data,
@@ -180,7 +190,7 @@ impl FontRasterizer {
 
         ctx.set_rgb_fill_color(1.0, 1.0, 1.0, 1.0);
         ctx.set_allows_font_smoothing(true);
-        ctx.set_should_smooth_fonts(false);
+        ctx.set_should_smooth_fonts(true);
         ctx.set_allows_antialiasing(true);
         ctx.set_should_antialias(true);
 
@@ -193,7 +203,10 @@ impl FontRasterizer {
         let rgba_data = ctx.data();
         let mut alpha_data = vec![0u8; w * h];
         for i in 0..w * h {
-            alpha_data[i] = rgba_data[i * 4];
+            let r = rgba_data[i * 4];
+            let g = rgba_data[i * 4 + 1];
+            let b = rgba_data[i * 4 + 2];
+            alpha_data[i] = ((r as u16 + g as u16 + b as u16) / 3) as u8;
         }
 
         Some(RasterizedGlyph {

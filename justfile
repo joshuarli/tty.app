@@ -17,6 +17,7 @@ app: release
     mkdir -p {{ app }}/Contents/MacOS
     cp Info.plist {{ app }}/Contents/
     cp target/{{ target }}/release/etch {{ app }}/Contents/MacOS/
+    codesign --force --sign - {{ app }}
     @echo "Built {{ app }} ($(du -sh {{ app }} | awk '{print $1}'))"
 
 # install to /Applications
