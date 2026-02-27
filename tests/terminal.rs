@@ -513,20 +513,94 @@ impl<'a> Perform for TestPerformer<'a> {
     }
 
     fn csi_dispatch(&mut self, params: &[u16], intermediates: &[u8], _ignore: bool, byte: u8) {
+        let p0 = params.first().copied().unwrap_or(0);
+        let p1 = if params.len() > 1 { params[1] } else { 0 };
+
         match (intermediates, byte) {
-            ([], b'X') => {
-                let n = params.first().copied().unwrap_or(1).max(1);
-                let row = self.grid.cursor_row;
-                let col = self.grid.cursor_col;
-                self.grid
-                    .clear_cols(row, col, (col + n).min(self.grid.cols));
+            // Private mode sequences (CSI ? ...)
+            ([b'?'], b'h') => self.set_mode(params, true),
+            ([b'?'], b'l') => self.reset_mode(params, true),
+
+            // SGR
+            ([], b'm') => {
+                if params.is_empty() {
+                    self.sgr(&[0]);
+                } else {
+                    self.sgr(params);
+                }
             }
+
+            // Cursor movement
+            ([], b'A') => self.cursor_up(p0.max(1)),
+            ([], b'B') | ([], b'e') => self.cursor_down(p0.max(1)),
+            ([], b'C') | ([], b'a') => self.cursor_forward(p0.max(1)),
+            ([], b'D') => self.cursor_backward(p0.max(1)),
+            ([], b'E') => {
+                self.cursor_down(p0.max(1));
+                self.cursor_horizontal_absolute(1);
+            }
+            ([], b'F') => {
+                self.cursor_up(p0.max(1));
+                self.cursor_horizontal_absolute(1);
+            }
+
+            // Cursor position
+            ([], b'H') | ([], b'f') => {
+                let row = p0.max(1);
+                let col = if params.len() > 1 { p1.max(1) } else { 1 };
+                self.cursor_position(row, col);
+            }
+            ([], b'G') | ([], b'`') => self.cursor_horizontal_absolute(p0.max(1)),
+            ([], b'd') => self.cursor_vertical_absolute(p0.max(1)),
+
+            // Erase
+            ([], b'J') => self.erase_in_display(p0),
+            ([], b'K') => self.erase_in_line(p0),
+
+            // Scroll
+            ([], b'S') => self.scroll_up(p0.max(1)),
+            ([], b'T') => self.scroll_down(p0.max(1)),
+
+            // Insert/delete
+            ([], b'L') => self.insert_lines(p0.max(1)),
+            ([], b'M') => self.delete_lines(p0.max(1)),
+            ([], b'@') => self.insert_chars(p0.max(1)),
+            ([], b'P') => self.delete_chars(p0.max(1)),
+            ([], b'X') => self.erase_chars(p0.max(1)),
+
+            // Set/reset mode (non-private)
+            ([], b'h') => self.set_mode(params, false),
+            ([], b'l') => self.reset_mode(params, false),
+
+            // DECSTBM
+            ([], b'r') => {
+                let top = p0.max(1);
+                let bottom = if params.len() > 1 && p1 > 0 { p1 } else { 0 };
+                self.set_scroll_region(top, bottom);
+            }
+
+            // Tab clear
+            ([], b'g') => self.tab_clear(p0),
+
+            // DSR
+            ([], b'n') => self.device_status_report(p0),
+
+            // REP
+            ([], b'b') => self.repeat_char(p0.max(1)),
+
+            // Save/restore cursor
+            ([], b's') => self.save_cursor(),
+            ([], b'u') => self.restore_cursor(),
+
+            // DA1
             ([], b'c') => {
                 self.response_buf.extend_from_slice(b"\x1B[?62;c");
             }
+            // DA2
             ([b'>'], b'c') => {
                 self.response_buf.extend_from_slice(b"\x1B[>0;0;0c");
             }
+
             _ => {}
         }
     }
@@ -1217,4 +1291,328 @@ fn ris_full_reset() {
     assert_eq!(t.grid.attr.fg_index, 7);
     assert_eq!(t.grid.attr.bg_index, 0);
     assert!(t.grid.attr.flags.is_empty());
+}
+
+// -- CSI sequences split across feed() boundaries --
+// These tests verify that when a CSI sequence is split across two PTY reads
+// (and thus two feed() calls), the state machine correctly accumulates bytes
+// and dispatches the full sequence via csi_dispatch().
+
+#[test]
+fn split_csi_cup_across_feeds() {
+    // CUP (cursor position) split at various points
+    let mut t = Term::new(80, 24);
+
+    // Split between ESC and [
+    t.feed(b"\x1B");
+    t.feed(b"[5;10H");
+    assert_eq!(t.cursor(), (4, 9));
+
+    // Split between [ and params
+    t.feed(b"\x1B[");
+    t.feed(b"1;1H");
+    assert_eq!(t.cursor(), (0, 0));
+
+    // Split in the middle of params
+    t.feed(b"\x1B[12");
+    t.feed(b";20H");
+    assert_eq!(t.cursor(), (11, 19));
+
+    // Split between params and final byte
+    t.feed(b"\x1B[3;7");
+    t.feed(b"H");
+    assert_eq!(t.cursor(), (2, 6));
+}
+
+#[test]
+fn split_csi_erase_across_feeds() {
+    // Erase sequences split across feed boundaries
+    let mut t = Term::new(10, 3);
+    t.feed_str("ABCDEFGHIJ");
+    t.feed(b"\x1B[1;1H"); // home
+
+    // Split EL (erase in line) across feeds
+    t.feed(b"\x1B[");
+    t.feed(b"K");
+    assert_eq!(t.row_text(0), "");
+
+    // Repopulate and test ED (erase in display) split
+    t.feed(b"\x1B[1;1H");
+    t.feed_str("XXXXXXXXXX\r\nYYYYYYYYYY\r\nZZZZZZZZZZ");
+    t.feed(b"\x1B[1;1H");
+    t.feed(b"\x1B[2");
+    t.feed(b"J"); // ED 2 — erase all
+    assert_eq!(t.row_text(0), "");
+    assert_eq!(t.row_text(1), "");
+    assert_eq!(t.row_text(2), "");
+}
+
+#[test]
+fn split_csi_decstbm_across_feeds() {
+    // DECSTBM (set scroll region) split across feeds — this is the exact
+    // scenario that caused tmux pane corruption before the csi_dispatch fix.
+    let mut t = Term::new(10, 10);
+    t.feed_str("row0\r\nrow1\r\nrow2\r\nrow3\r\nrow4");
+
+    // Split DECSTBM at various points
+    t.feed(b"\x1B[2;");
+    t.feed(b"4r");
+    assert_eq!(t.grid.scroll_top, 1);
+    assert_eq!(t.grid.scroll_bottom, 3);
+
+    // Scroll within region to verify it's respected
+    t.feed(b"\x1B[1S");
+    assert_eq!(t.row_text(0), "row0");
+    assert_eq!(t.row_text(1), "row2");
+    assert_eq!(t.row_text(2), "row3");
+    assert_eq!(t.row_text(3), "");
+    assert_eq!(t.row_text(4), "row4");
+}
+
+#[test]
+fn split_csi_decset_across_feeds() {
+    // Private mode set/reset split across feeds
+    let mut t = Term::new(10, 3);
+
+    // DECSET ?2004h (bracketed paste) split after ?
+    t.feed(b"\x1B[?");
+    t.feed(b"2004h");
+    assert!(t.grid.mode.contains(TermMode::BRACKETED_PASTE));
+
+    // DECRST ?2004l split between params and final byte
+    t.feed(b"\x1B[?2004");
+    t.feed(b"l");
+    assert!(!t.grid.mode.contains(TermMode::BRACKETED_PASTE));
+}
+
+#[test]
+fn split_csi_sgr_across_feeds() {
+    // SGR (color/attribute) split across feeds
+    let mut t = Term::new(20, 3);
+
+    // Bold + red split in the middle
+    t.feed(b"\x1B[1;3");
+    t.feed(b"1mX\x1B[0m");
+    assert!(t.cell(0, 0).flags.contains(CellFlags::BOLD));
+    assert_eq!(t.cell(0, 0).fg_index, 1); // red
+
+    // 256-color split across feeds
+    t.feed(b"\x1B[38;5;");
+    t.feed(b"200mY\x1B[0m");
+    assert_eq!(t.cell(0, 1).fg_index, 200);
+}
+
+#[test]
+fn split_csi_cursor_movement_across_feeds() {
+    // Various cursor movement sequences split across feeds
+    let mut t = Term::new(80, 24);
+    t.feed(b"\x1B[10;10H"); // start at row 10, col 10
+
+    // CUU (cursor up) split
+    t.feed(b"\x1B[3");
+    t.feed(b"A");
+    assert_eq!(t.cursor(), (6, 9));
+
+    // CUD (cursor down) split
+    t.feed(b"\x1B[");
+    t.feed(b"5B");
+    assert_eq!(t.cursor(), (11, 9));
+
+    // CUF (cursor forward) split
+    t.feed(b"\x1B[10");
+    t.feed(b"C");
+    assert_eq!(t.cursor(), (11, 19));
+
+    // CUB (cursor backward) split
+    t.feed(b"\x1B[");
+    t.feed(b"7D");
+    assert_eq!(t.cursor(), (11, 12));
+}
+
+#[test]
+fn split_csi_insert_delete_across_feeds() {
+    // IL/DL split across feeds
+    let mut t = Term::new(10, 5);
+    t.feed_str("AAA\r\nBBB\r\nCCC\r\nDDD\r\nEEE");
+
+    // Insert lines — split
+    t.feed(b"\x1B[2;1H");
+    t.feed(b"\x1B[1");
+    t.feed(b"L");
+    assert_eq!(t.row_text(0), "AAA");
+    assert_eq!(t.row_text(1), "");
+    assert_eq!(t.row_text(2), "BBB");
+
+    // Delete lines — split
+    t.feed(b"\x1B[2;1H");
+    t.feed(b"\x1B[");
+    t.feed(b"1M");
+    assert_eq!(t.row_text(0), "AAA");
+    assert_eq!(t.row_text(1), "BBB");
+}
+
+#[test]
+fn split_csi_scroll_across_feeds() {
+    // SU/SD split across feeds
+    let mut t = Term::new(10, 3);
+    t.feed_str("AAA\r\nBBB\r\nCCC");
+
+    // Scroll up split
+    t.feed(b"\x1B[1");
+    t.feed(b"S");
+    assert_eq!(t.row_text(0), "BBB");
+    assert_eq!(t.row_text(1), "CCC");
+    assert_eq!(t.row_text(2), "");
+}
+
+#[test]
+fn split_csi_followed_by_text() {
+    // Verify that text after a split CSI sequence renders correctly
+    let mut t = Term::new(20, 3);
+    t.feed(b"\x1B[1;");
+    t.feed(b"1HHello");
+    assert_eq!(t.cursor(), (0, 5));
+    assert_eq!(t.row_text(0), "Hello");
+}
+
+#[test]
+fn multiple_split_csi_in_sequence() {
+    // Multiple CSI sequences, each split differently, in rapid succession
+    let mut t = Term::new(80, 24);
+
+    // CUP split + erase split + text
+    t.feed(b"\x1B[5;"); // CUP start
+    t.feed(b"10H"); // CUP end → cursor at (4, 9)
+    t.feed(b"Hello"); // text
+    t.feed(b"\x1B["); // erase start
+    t.feed(b"K"); // EL → erase to end of line
+    t.feed(b"\x1B[5;"); // CUP start
+    t.feed(b"10H"); // CUP end
+    assert_eq!(t.cursor(), (4, 9));
+    assert_eq!(t.row_text(4), "         Hello");
+}
+
+// -- UTF-8 sequences split across feed() boundaries --
+// These tests verify that multi-byte UTF-8 characters split across PTY reads
+// are correctly reassembled by the Utf8Assembler.
+
+#[test]
+fn split_utf8_two_byte() {
+    // é = U+00E9 = 0xC3 0xA9 (2-byte UTF-8)
+    let mut t = Term::new(20, 3);
+    t.feed(b"\xC3");
+    t.feed(b"\xA9");
+    assert_eq!(t.cell(0, 0).codepoint, 0x00E9);
+}
+
+#[test]
+fn split_utf8_three_byte() {
+    // │ (box drawing) = U+2502 = 0xE2 0x94 0x82 (3-byte UTF-8)
+    let mut t = Term::new(20, 3);
+
+    // Split after first byte
+    t.feed(b"\xE2");
+    t.feed(b"\x94\x82");
+    assert_eq!(t.cell(0, 0).codepoint, 0x2502);
+
+    // Split after second byte
+    t.feed(b"\xE2\x94");
+    t.feed(b"\x82");
+    assert_eq!(t.cell(0, 1).codepoint, 0x2502);
+}
+
+#[test]
+fn split_utf8_four_byte() {
+    // 😀 = U+1F600 = 0xF0 0x9F 0x98 0x80 (4-byte UTF-8)
+    let mut t = Term::new(20, 3);
+
+    // Split after first byte
+    t.feed(b"\xF0");
+    t.feed(b"\x9F\x98\x80");
+
+    // U+1F600 = 128512 which exceeds u16 range, so it wraps to 62976 (0xF600).
+    // The important thing is it doesn't crash or emit FFFD (0xFFFD).
+    assert_ne!(t.cell(0, 0).codepoint, 0xFFFD);
+}
+
+#[test]
+fn split_utf8_three_byte_one_at_a_time() {
+    // ─ (box drawing horizontal) = U+2500 = 0xE2 0x94 0x80
+    // Feed one byte per call — worst case for the assembler
+    let mut t = Term::new(20, 3);
+    t.feed(b"\xE2");
+    t.feed(b"\x94");
+    t.feed(b"\x80");
+    assert_eq!(t.cell(0, 0).codepoint, 0x2500);
+}
+
+#[test]
+fn split_utf8_mixed_with_ascii() {
+    // ASCII, then split UTF-8, then more ASCII
+    let mut t = Term::new(20, 3);
+    t.feed(b"Hi ");
+    t.feed(b"\xC3"); // first byte of é
+    t.feed(b"\xA9 there"); // completes é, then ASCII
+    assert_eq!(t.row_text(0), "Hi \u{00E9} there");
+}
+
+#[test]
+fn split_utf8_between_csi_sequences() {
+    // A UTF-8 char split across feeds, surrounded by CSI sequences
+    let mut t = Term::new(20, 3);
+    t.feed(b"\x1B[1;1H"); // home
+    t.feed(b"A");
+    t.feed(b"\xE2\x94"); // first 2 bytes of │ (U+2502)
+    t.feed(b"\x82"); // final byte
+    t.feed(b"B");
+    assert_eq!(t.cell(0, 0).codepoint, b'A' as u16);
+    assert_eq!(t.cell(0, 1).codepoint, 0x2502);
+    assert_eq!(t.cell(0, 2).codepoint, b'B' as u16);
+}
+
+#[test]
+fn split_utf8_does_not_emit_replacement() {
+    // Before the fix, split UTF-8 would emit U+FFFD (replacement character).
+    // Verify that correctly split sequences never produce FFFD.
+    let mut t = Term::new(20, 3);
+
+    // 2-byte split
+    t.feed(b"\xC3");
+    t.feed(b"\xA9");
+    assert_ne!(t.cell(0, 0).codepoint, 0xFFFD);
+
+    // 3-byte split after byte 1
+    t.feed(b"\xE2");
+    t.feed(b"\x94\x82");
+    assert_ne!(t.cell(0, 1).codepoint, 0xFFFD);
+
+    // 3-byte split after byte 2
+    t.feed(b"\xE2\x94");
+    t.feed(b"\x82");
+    assert_ne!(t.cell(0, 2).codepoint, 0xFFFD);
+}
+
+// -- Wrap outside scroll region --
+
+#[test]
+fn wrap_outside_scroll_region_advances_cursor() {
+    // When the cursor is below the scroll region, auto-wrap should still
+    // advance the cursor row (up to screen bottom), not get stuck.
+    // This was the root cause of tmux pane B corruption.
+    let mut t = Term::new(5, 10);
+
+    // Set scroll region to rows 1-5 (0-indexed: 0-4)
+    t.feed(b"\x1B[1;5r");
+    assert_eq!(t.grid.scroll_top, 0);
+    assert_eq!(t.grid.scroll_bottom, 4);
+
+    // Move cursor to row 7 (below scroll region)
+    t.feed(b"\x1B[8;1H");
+    assert_eq!(t.cursor(), (7, 0));
+
+    // Write enough to trigger wrap — cursor should advance to row 8
+    t.feed_str("abcdefgh");
+    assert_eq!(t.row_text(7), "abcde");
+    assert_eq!(t.row_text(8), "fgh");
+    assert_eq!(t.cursor(), (8, 3));
 }

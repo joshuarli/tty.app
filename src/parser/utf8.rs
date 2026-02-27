@@ -19,6 +19,11 @@ impl Utf8Assembler {
         }
     }
 
+    /// Returns true if there are buffered bytes awaiting completion.
+    pub fn has_pending(&self) -> bool {
+        self.len > 0
+    }
+
     /// If there are buffered bytes from a previous parse() call, try to
     /// complete the sequence using new data.
     /// Returns Some((char, new_bytes_consumed)) or None if still incomplete / nothing buffered.

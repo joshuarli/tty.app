@@ -17,7 +17,7 @@ src/
 │   ├── table.rs            # Byte classification + state transition lookup table
 │   ├── perform.rs          # Perform trait — parser-to-grid interface
 │   ├── charset.rs          # DEC Special Graphics character mapping
-│   └── utf8.rs             # Multi-byte UTF-8 decoder
+│   └── utf8.rs             # Multi-byte UTF-8 decoder with cross-boundary buffering
 ├── pty/
 │   └── mod.rs              # forkpty, non-blocking read/write, TIOCSWINSZ resize
 ├── renderer/
@@ -45,7 +45,7 @@ Parser.parse()
   ├─ Layer 2: CSI fast path — handles ESC[ sequences inline, no state machine
   │   Returns None on anything unusual → falls through to layer 3
   └─ Layer 3: State machine — full VT500 (table.rs transition table)
-      Handles DCS, OSC, ESC dispatch, general CSI fallback
+      Handles DCS, OSC, ESC dispatch, CSI fallback (csi_dispatch mirrors fast path)
   │
   ▼
 TermPerformer (implements Perform trait)
@@ -61,10 +61,11 @@ MetalRenderer.render_frame()
   1. Check dirty.any() — skip frame if nothing changed
   2. Spin-wait for GPU to release current buffer (AtomicBool)
   3. ptr::copy_nonoverlapping(grid.cells → cell_buffer)  ← bulk memcpy, ~5μs
-  4. Dispatch compute shader (one thread per output pixel, 16×16 threadgroups)
-  5. add_completed_handler → set buffer_ready = true
-  6. commit() — returns immediately, GPU works async
-  7. Swap to other cell buffer for next frame
+  4. Acquire next drawable (retry next frame if None — dirty bits preserved)
+  5. Dispatch compute shader (one thread per output pixel, 16×16 threadgroups)
+  6. add_completed_handler → set buffer_ready = true
+  7. commit() — returns immediately, GPU works async
+  8. Swap to other cell buffer for next frame
 ```
 
 ## Key Design Decisions
@@ -97,7 +98,9 @@ When an application sets Mode 2026 (e.g., tmux during pane switch), `render()` r
 
 ### Parser layering
 
-The three layers are a performance hierarchy. Layer 1 (SIMD) handles bulk text at ~16 GB/s on Apple Silicon. Layer 2 (CSI fast) avoids state machine overhead for the ~15 sequences that account for >95% of CSI traffic. Layer 3 (state machine) handles everything else faithfully. The parser maintains state across `parse()` calls — partial sequences at buffer boundaries resume correctly.
+The three layers are a performance hierarchy. Layer 1 (SIMD) handles bulk text at ~16 GB/s on Apple Silicon. Layer 2 (CSI fast) avoids state machine overhead for the ~15 sequences that account for >95% of CSI traffic. Layer 3 (state machine) handles everything else faithfully.
+
+**Cross-boundary correctness**: The parser maintains state across `parse()` calls. When a CSI sequence spans two PTY reads (e.g., `ESC[` arrives in one read, `5;10H` in the next), the fast path cannot parse it (returns None). The state machine accumulates the bytes and dispatches the complete sequence via `csi_dispatch()`. This means `csi_dispatch()` must handle **every** CSI sequence the fast path handles — a mismatch causes silent drops. The UTF-8 assembler similarly buffers incomplete multi-byte sequences (2-4 bytes) across parse() boundaries and completes them on the next call.
 
 ### Pending wrap (DECAWM)
 
@@ -138,6 +141,8 @@ The `Perform` trait implementation in `TermPerformer` covers:
 ### parser/csi_fast.rs
 
 Parses CSI parameters inline (up to 16 semicolon-separated u16 values). Bails to state machine on: colon sub-parameters, intermediate bytes, unrecognized final bytes. The `?` prefix for private modes is detected and passed through.
+
+**Invariant**: Every sequence handled by `csi_fast.rs` must also be handled in `TermPerformer::csi_dispatch()` (main.rs). The fast path handles complete sequences in a single buffer. When a sequence spans buffers, the state machine dispatches it to `csi_dispatch()` instead. If `csi_dispatch()` doesn't handle a sequence, it is silently dropped.
 
 ### terminal/grid.rs
 

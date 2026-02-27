@@ -43,6 +43,10 @@ impl Parser {
         if let Some((ch, consumed)) = self.utf8.try_complete(&data[pos..]) {
             performer.print(ch);
             pos += consumed;
+        } else if self.utf8.has_pending() {
+            // try_complete consumed all remaining bytes into its buffer but the
+            // sequence is still incomplete. Don't reprocess those bytes.
+            return;
         }
 
         // If we're in the middle of a state machine sequence, finish it first
