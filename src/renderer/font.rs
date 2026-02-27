@@ -1,3 +1,4 @@
+use crate::config;
 use core_graphics::base::kCGImageAlphaNoneSkipLast;
 use core_graphics::color_space::CGColorSpace;
 use core_graphics::context::CGContext;
@@ -130,16 +131,19 @@ impl FontRasterizer {
         );
 
         // With font smoothing enabled, CoreText renders slightly different
-        // values per RGB channel (subpixel AA). We collapse to grayscale
-        // by taking the max of R/G/B — this preserves the smoothing's
-        // stem-broadening effect without actual subpixel color fringing.
+        // values per RGB channel (subpixel AA). We blend between the min
+        // channel (thinnest) and average (medium) to control stem weight.
+        // FONT_SMOOTH_WEIGHT 0.0 = thinnest, 1.0 = full average.
         let rgba_data = ctx.data();
+        let w_f = config::FONT_SMOOTH_WEIGHT;
         let alpha_data: Vec<u8> = (0..w * h)
             .map(|i| {
-                let r = rgba_data[i * 4];
-                let g = rgba_data[i * 4 + 1];
-                let b = rgba_data[i * 4 + 2];
-                ((r as u16 + g as u16 + b as u16) / 3) as u8
+                let r = rgba_data[i * 4] as f32;
+                let g = rgba_data[i * 4 + 1] as f32;
+                let b = rgba_data[i * 4 + 2] as f32;
+                let thin = r.min(g).min(b);
+                let avg = (r + g + b) / 3.0;
+                (thin + w_f * (avg - thin)) as u8
             })
             .collect();
 
@@ -201,12 +205,15 @@ impl FontRasterizer {
         self.ct_font.draw_glyphs(&glyphs_cg, &positions, ctx.clone());
 
         let rgba_data = ctx.data();
+        let w_f = config::FONT_SMOOTH_WEIGHT;
         let mut alpha_data = vec![0u8; w * h];
         for i in 0..w * h {
-            let r = rgba_data[i * 4];
-            let g = rgba_data[i * 4 + 1];
-            let b = rgba_data[i * 4 + 2];
-            alpha_data[i] = ((r as u16 + g as u16 + b as u16) / 3) as u8;
+            let r = rgba_data[i * 4] as f32;
+            let g = rgba_data[i * 4 + 1] as f32;
+            let b = rgba_data[i * 4 + 2] as f32;
+            let thin = r.min(g).min(b);
+            let avg = (r + g + b) / 3.0;
+            alpha_data[i] = (thin + w_f * (avg - thin)) as u8;
         }
 
         Some(RasterizedGlyph {

@@ -7,6 +7,9 @@ pub const FONT_FAMILY: &str = "Hack";
 /// Font size in points
 pub const FONT_SIZE: f64 = 16.0;
 
+/// Font smoothing weight: 0.0 = thinnest (min channel), 1.0 = medium (avg channel)
+pub const FONT_SMOOTH_WEIGHT: f32 = 0.3;
+
 /// Padding in logical pixels between window edge and cell grid
 pub const PADDING: u32 = 8;
 
