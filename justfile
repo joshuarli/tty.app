@@ -25,6 +25,9 @@ run *ARGS:
 run-release *ARGS:
     cargo run --release -- {{ ARGS }}
 
+stats *ARGS:
+    cargo run -- --stats {{ ARGS }}
+
 setup:
   prek install --install-hooks
 

@@ -1,4 +1,4 @@
-# Etch: Detailed Implementation Plan
+# tty.app: Detailed Implementation Plan
 
 ## Overview
 
@@ -72,7 +72,7 @@ Minimalist terminal emulator for macOS. Compute-shader-only Metal renderer (no v
 ## Project Structure
 
 ```
-etch/
+tty.app/
 ├── Cargo.toml
 ├── build.rs                    # Metal shader compilation
 ├── src/
@@ -695,7 +695,7 @@ Bold text: palette colors 0–7 brightened to 8–15. No font weight change.
 
 ```bash
 cargo build --release
-./target/release/etch
+./target/release/tty
 ```
 
 Environment: inherits parent env, sets `TERM=xterm-256color`.

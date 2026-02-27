@@ -1,4 +1,4 @@
-# Etch: A Minimalist Terminal Emulator for macOS
+# tty.app: A Minimalist Terminal Emulator for macOS
 
 ## Context
 
@@ -46,7 +46,7 @@ Build a terminal emulator that outperforms Alacritty on all three axes: input la
 ## Project Structure
 
 ```
-etch/
+tty.app/
 ├── Cargo.toml
 ├── build.rs                    # Metal shader compilation + width table generation
 ├── src/
