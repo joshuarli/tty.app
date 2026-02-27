@@ -53,6 +53,11 @@ impl Pty {
     }
 
     fn exec_shell() -> ! {
+        // Start in the user's home directory
+        if let Some(home) = std::env::var_os("HOME") {
+            let _ = std::env::set_current_dir(home);
+        }
+
         // Set TERM
         let term = CString::new("TERM=xterm-256color").unwrap();
         unsafe { libc::putenv(term.as_ptr() as *mut _) };
