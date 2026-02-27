@@ -167,3 +167,32 @@ fn modifier_param(shift: bool, alt: bool, ctrl: bool) -> u8 {
     }
     m
 }
+
+/// Encode a mouse event as bytes to send to the PTY.
+///
+/// `button`: 0=left, 1=middle, 2=right, 3=release (normal mode only), 64=scroll-up, 65=scroll-down.
+///           Add 32 for motion events.
+/// `col`, `row`: 1-based cell coordinates.
+/// `pressed`: true for press/motion, false for release.
+/// `sgr`: true to use SGR (mode 1006) encoding, false for X10/normal encoding.
+pub fn mouse_to_bytes(button: u8, col: u16, row: u16, pressed: bool, sgr: bool) -> Vec<u8> {
+    if sgr {
+        // SGR encoding: ESC [ < button ; col ; row M/m
+        let suffix = if pressed { 'M' } else { 'm' };
+        format!("\x1B[<{};{};{}{}", button, col, row, suffix).into_bytes()
+    } else {
+        // X10/Normal encoding: ESC [ M cb cx cy (each + 32)
+        let cb = button.wrapping_add(32);
+        let cx = if col > 223 {
+            255
+        } else {
+            (col as u8).wrapping_add(32)
+        };
+        let cy = if row > 223 {
+            255
+        } else {
+            (row as u8).wrapping_add(32)
+        };
+        vec![0x1B, b'[', b'M', cb, cx, cy]
+    }
+}

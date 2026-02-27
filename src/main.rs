@@ -7,7 +7,7 @@ mod terminal;
 mod window;
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use objc2_app_kit::NSPasteboard;
 use objc2_foundation::{NSArray, NSString, ns_string};
@@ -695,9 +695,11 @@ impl App {
         }
     }
 
-    fn process_pty_output(&mut self, win: &NativeWindow) {
+    /// Returns true if any PTY data was read.
+    fn process_pty_output(&mut self, win: &NativeWindow) -> bool {
         let pty = self.pty.clone();
         let mut buf = [0u8; 65536];
+        let mut got_data = false;
 
         loop {
             match pty.read(&mut buf) {
@@ -707,6 +709,7 @@ impl App {
                     break;
                 }
                 Ok(n) => {
+                    got_data = true;
                     let was_syncing = self.shared.grid.mode.contains(TermMode::SYNC_OUTPUT);
                     let mut response_buf = std::mem::take(&mut self.shared.response_buf);
                     {
@@ -741,6 +744,8 @@ impl App {
         if !responses.is_empty() {
             self.handle_responses(&responses, win);
         }
+
+        got_data
     }
 
     fn handle_responses(&self, data: &[u8], win: &NativeWindow) {
@@ -785,7 +790,8 @@ impl App {
         }
     }
 
-    fn render(&mut self, win: &NativeWindow) {
+    /// Returns true if the frame was idle (no GPU work dispatched).
+    fn render(&mut self, win: &NativeWindow) -> bool {
         // Drain any PTY data that arrived since last poll.
         self.process_pty_output(win);
 
@@ -796,49 +802,63 @@ impl App {
         if self.shared.grid.mode.contains(TermMode::SYNC_OUTPUT) {
             let elapsed = Instant::now().duration_since(self.sync_start);
             if elapsed.as_millis() < 100 {
-                return;
+                return true; // deferred — idle for now
             }
             // Timeout — render anyway and clear the flag
             self.shared.grid.mode.remove(TermMode::SYNC_OUTPUT);
         }
 
-        // Cursor blink
+        // Cursor blink — only when DECTCEM (CURSOR_VISIBLE mode) is set
+        let dectcem = self.shared.grid.mode.contains(TermMode::CURSOR_VISIBLE);
         let now = Instant::now();
-        if now.duration_since(self.last_blink).as_millis() >= config::CURSOR_BLINK_MS as u128 {
+        let prev_visible = self.cursor_visible;
+
+        if !dectcem {
+            self.cursor_visible = false;
+        } else if now.duration_since(self.last_blink).as_millis() >= config::CURSOR_BLINK_MS as u128
+        {
             self.cursor_visible = !self.cursor_visible;
             self.last_blink = now;
-            self.shared.grid.mark_dirty(self.shared.grid.cursor_row);
         }
 
-        // Update cursor cell flag — clear old position first
+        // Update cursor cell flag — only if position or visibility changed
         let cursor_row = self.shared.grid.cursor_row;
         let cursor_col = self.shared.grid.cursor_col;
         let prev_row = self.prev_cursor_row;
         let prev_col = self.prev_cursor_col;
+        let cursor_moved = cursor_row != prev_row || cursor_col != prev_col;
+        let blink_changed = self.cursor_visible != prev_visible;
 
-        // Clear CURSOR flag from previous position
-        if prev_row < self.shared.grid.rows && prev_col < self.shared.grid.cols {
-            self.shared
-                .grid
-                .cell_mut(prev_row, prev_col)
-                .flags
-                .remove(CellFlags::CURSOR);
-            self.shared.grid.mark_dirty(prev_row);
+        if cursor_moved || blink_changed {
+            // Clear CURSOR flag from previous position
+            if prev_row < self.shared.grid.rows && prev_col < self.shared.grid.cols {
+                self.shared
+                    .grid
+                    .cell_mut(prev_row, prev_col)
+                    .flags
+                    .remove(CellFlags::CURSOR);
+                self.shared.grid.mark_dirty(prev_row);
+            }
+
+            // Set CURSOR flag at new position (only if visible)
+            if self.cursor_visible {
+                self.shared
+                    .grid
+                    .cell_mut(cursor_row, cursor_col)
+                    .flags
+                    .insert(CellFlags::CURSOR);
+            }
+            self.shared.grid.mark_dirty(cursor_row);
+
+            self.prev_cursor_row = cursor_row;
+            self.prev_cursor_col = cursor_col;
         }
 
-        // Set CURSOR flag at new position
-        self.shared
-            .grid
-            .cell_mut(cursor_row, cursor_col)
-            .flags
-            .insert(CellFlags::CURSOR);
-        self.shared.grid.mark_dirty(cursor_row);
-
-        self.prev_cursor_row = cursor_row;
-        self.prev_cursor_col = cursor_col;
-
-        self.renderer
+        // render_frame returns true when GPU work was dispatched, false when idle
+        let dispatched = self
+            .renderer
             .render_frame(&mut self.shared.grid, self.cursor_visible);
+        !dispatched
     }
 
     fn copy_selection(&self) {
@@ -897,8 +917,9 @@ impl App {
     fn pixel_to_cell(&self, x: f64, y: f64) -> (u16, u16) {
         let scale = self.renderer.scale_factor;
         let padding = config::PADDING as f64 * scale;
+        let padding_top = (self.renderer.notch_px as f64).max(padding);
         let px = x - padding;
-        let py = y - padding;
+        let py = y - padding_top;
         if px < 0.0 || py < 0.0 {
             return (0, 0);
         }
@@ -1014,22 +1035,60 @@ impl App {
             }
 
             Event::MouseDown { x, y } => {
-                self.clear_selection();
-                self.mouse_pressed = true;
-                let cell = self.pixel_to_cell(*x, *y);
                 self.cursor_pos = (*x, *y);
-                self.selection_start = Some(cell);
-                self.selection_end = Some(cell);
+                let cell = self.pixel_to_cell(*x, *y);
+                let mouse_mode = self.shared.grid.mode.intersects(
+                    TermMode::MOUSE_BUTTON | TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL,
+                );
+                if mouse_mode {
+                    let sgr = self.shared.grid.mode.contains(TermMode::MOUSE_SGR);
+                    let bytes = input::mouse_to_bytes(0, cell.0 + 1, cell.1 + 1, true, sgr);
+                    let _ = self.pty.write(&bytes);
+                    self.mouse_pressed = true;
+                } else {
+                    self.clear_selection();
+                    self.mouse_pressed = true;
+                    self.selection_start = Some(cell);
+                    self.selection_end = Some(cell);
+                }
             }
 
             Event::MouseUp { x, y } => {
                 self.cursor_pos = (*x, *y);
+                let cell = self.pixel_to_cell(*x, *y);
+                let mouse_mode = self.shared.grid.mode.intersects(
+                    TermMode::MOUSE_BUTTON | TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL,
+                );
+                if mouse_mode {
+                    let sgr = self.shared.grid.mode.contains(TermMode::MOUSE_SGR);
+                    if sgr {
+                        let bytes = input::mouse_to_bytes(0, cell.0 + 1, cell.1 + 1, false, true);
+                        let _ = self.pty.write(&bytes);
+                    } else {
+                        let bytes = input::mouse_to_bytes(3, cell.0 + 1, cell.1 + 1, true, false);
+                        let _ = self.pty.write(&bytes);
+                    }
+                }
                 self.mouse_pressed = false;
             }
 
             Event::MouseDragged { x, y } => {
                 self.cursor_pos = (*x, *y);
-                if self.mouse_pressed {
+                let motion_mode = self
+                    .shared
+                    .grid
+                    .mode
+                    .intersects(TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL);
+                if motion_mode && self.mouse_pressed {
+                    let cell = self.pixel_to_cell(*x, *y);
+                    let sgr = self.shared.grid.mode.contains(TermMode::MOUSE_SGR);
+                    // button 0 + 32 = motion flag
+                    let bytes = input::mouse_to_bytes(32, cell.0 + 1, cell.1 + 1, true, sgr);
+                    let _ = self.pty.write(&bytes);
+                } else if !self.shared.grid.mode.intersects(
+                    TermMode::MOUSE_BUTTON | TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL,
+                ) && self.mouse_pressed
+                {
                     let cell = self.pixel_to_cell(*x, *y);
                     self.selection_end = Some(cell);
                     self.update_selection();
@@ -1097,18 +1156,27 @@ fn main() {
     let mut app = App::new(&win);
 
     loop {
-        objc2::rc::autoreleasepool(|_| {
-            app.process_pty_output(&win);
+        let idle = objc2::rc::autoreleasepool(|_| {
+            let got_pty_data = app.process_pty_output(&win);
 
-            for event in &win.poll_events() {
+            let events = win.poll_events();
+            let got_events = !events.is_empty();
+            for event in &events {
                 app.handle_event(event, &win);
             }
 
-            app.render(&win);
+            let frame_idle = app.render(&win);
+            !got_pty_data && !got_events && frame_idle
         });
 
         if !app.alive || !app.shared.alive {
             break;
+        }
+
+        // When nothing happened this frame, sleep briefly to avoid busy-spinning.
+        // Vsync already throttles active frames; this covers the truly idle case.
+        if idle {
+            std::thread::sleep(Duration::from_millis(8));
         }
     }
 }

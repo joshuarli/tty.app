@@ -111,7 +111,7 @@ impl MetalRenderer {
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
         layer.set_presents_with_transaction(true);
-        layer.set_display_sync_enabled(false);
+        layer.set_display_sync_enabled(true);
         layer.set_opaque(true);
         layer.set_framebuffer_only(false); // compute shader writes to texture
 
@@ -209,6 +209,7 @@ impl MetalRenderer {
     }
 
     /// Render a frame. Only dispatches GPU work if content changed.
+    /// Returns true if GPU work was dispatched, false if the frame was idle.
     /// Cell data is bulk-copied from the grid (Cell and CellData share identical repr(C) layout).
     /// Bold brightness and hidden attribute are handled in the shader.
     pub fn render_frame(&mut self, grid: &mut Grid, cursor_visible: bool) -> bool {
@@ -216,7 +217,7 @@ impl MetalRenderer {
         grid.clear_dirty();
 
         if !any_dirty && !self.needs_render {
-            return true;
+            return false;
         }
         self.needs_render = false;
 
