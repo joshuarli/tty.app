@@ -35,8 +35,8 @@ impl Default for Cell {
         Self {
             codepoint: b' ' as u16,
             flags: CellFlags::empty(),
-            fg_index: 7,  // default fg = palette 7
-            bg_index: 0,  // default bg = palette 0
+            fg_index: 7, // default fg = palette 7
+            bg_index: 0, // default bg = palette 0
             atlas_x: 0,
             atlas_y: 0,
             fg_rgb: config::DEFAULT_FG,

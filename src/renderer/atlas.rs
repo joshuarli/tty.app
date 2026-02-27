@@ -16,8 +16,8 @@ pub struct GlyphKey {
 /// Position of a glyph in the atlas grid.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AtlasPos {
-    pub x: u8,  // grid column
-    pub y: u8,  // grid row
+    pub x: u8, // grid column
+    pub y: u8, // grid row
 }
 
 /// Glyph texture atlas with grid-based packing.
@@ -68,7 +68,10 @@ impl Atlas {
     /// Pre-rasterize ASCII range and pin those slots.
     pub fn preload_ascii(&mut self, rasterizer: &FontRasterizer) {
         for cp in 0x20u16..=0x7E {
-            let key = GlyphKey { codepoint: cp, wide: false };
+            let key = GlyphKey {
+                codepoint: cp,
+                wide: false,
+            };
             if let Some(glyph) = rasterizer.rasterize(cp) {
                 self.insert(key, &glyph);
             }
@@ -99,9 +102,7 @@ impl Atlas {
         };
 
         match glyph {
-            Some(g) => {
-                self.insert(key, &g)
-            }
+            Some(g) => self.insert(key, &g),
             None => AtlasPos::default(), // missing glyph → slot (0,0) which is space
         }
     }
@@ -122,7 +123,9 @@ impl Atlas {
         let region = MTLRegion::new_2d(
             (grid_x * self.cell_width) as u64,
             (grid_y * self.cell_height) as u64,
-            glyph.width.min(self.cell_width * if key.wide { 2 } else { 1 }) as u64,
+            glyph
+                .width
+                .min(self.cell_width * if key.wide { 2 } else { 1 }) as u64,
             glyph.height.min(self.cell_height) as u64,
         );
 
@@ -130,7 +133,7 @@ impl Atlas {
             region,
             0,
             glyph.data.as_ptr() as *const _,
-            glyph.width as u64,  // bytes per row (R8 = 1 byte per pixel)
+            glyph.width as u64, // bytes per row (R8 = 1 byte per pixel)
         );
 
         let pos = AtlasPos {
@@ -157,11 +160,9 @@ impl Atlas {
         // Remove the old entry from the map
         let grid_x = min_slot % self.cols;
         let grid_y = min_slot / self.cols;
-        self.map.retain(|_, pos| {
-            !(pos.x == grid_x as u8 && pos.y == grid_y as u8)
-        });
+        self.map
+            .retain(|_, pos| !(pos.x == grid_x as u8 && pos.y == grid_y as u8));
 
         min_slot
     }
-
 }

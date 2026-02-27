@@ -5,8 +5,8 @@
 //! Metal, no windowing — pure terminal semantics.
 
 use tty::config;
-use tty::parser::perform::Perform;
 use tty::parser::Parser;
+use tty::parser::perform::Perform;
 use tty::terminal::cell::{Cell, CellFlags};
 use tty::terminal::grid::{Grid, TermMode};
 use tty::terminal::scrollback::Scrollback;
@@ -188,8 +188,7 @@ impl<'a> Perform for TestPerformer<'a> {
         let n = n.min(cols - col);
         let row_start = row as usize * cols as usize;
         for c in (col + n..cols).rev() {
-            self.grid.cells[row_start + c as usize] =
-                self.grid.cells[row_start + (c - n) as usize];
+            self.grid.cells[row_start + c as usize] = self.grid.cells[row_start + (c - n) as usize];
         }
         let attr = self.grid.attr;
         for c in col..col + n {
@@ -205,8 +204,7 @@ impl<'a> Perform for TestPerformer<'a> {
         let n = n.min(cols - col);
         let row_start = row as usize * cols as usize;
         for c in col..cols - n {
-            self.grid.cells[row_start + c as usize] =
-                self.grid.cells[row_start + (c + n) as usize];
+            self.grid.cells[row_start + c as usize] = self.grid.cells[row_start + (c + n) as usize];
         }
         let attr = self.grid.attr;
         for c in cols - n..cols {
@@ -486,7 +484,8 @@ impl<'a> Perform for TestPerformer<'a> {
                 let n = params.first().copied().unwrap_or(1).max(1);
                 let row = self.grid.cursor_row;
                 let col = self.grid.cursor_col;
-                self.grid.clear_cols(row, col, (col + n).min(self.grid.cols));
+                self.grid
+                    .clear_cols(row, col, (col + n).min(self.grid.cols));
             }
             ([], b'c') => {
                 self.response_buf.extend_from_slice(b"\x1B[?62;c");
@@ -1153,9 +1152,9 @@ fn grid_resize_preserves_content() {
     assert_eq!(t.grid.cols, 20);
     assert_eq!(t.grid.rows, 3);
     // Content preserved in the smaller of old/new dimensions
-    let row0: String = (0..5).map(|c| {
-        char::from_u32(t.grid.cell(0, c).codepoint as u32).unwrap_or(' ')
-    }).collect();
+    let row0: String = (0..5)
+        .map(|c| char::from_u32(t.grid.cell(0, c).codepoint as u32).unwrap_or(' '))
+        .collect();
     assert_eq!(row0, "Hello");
 }
 

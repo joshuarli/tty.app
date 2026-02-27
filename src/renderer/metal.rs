@@ -1,8 +1,8 @@
 use std::ffi::c_void;
 use std::mem;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use block::ConcreteBlock;
 use core_graphics_types::geometry::CGSize;
@@ -51,7 +51,10 @@ const CELL_DATA_SIZE: usize = mem::size_of::<CellData>();
 const _: () = assert!(CELL_DATA_SIZE == 16, "CellData must be 16 bytes");
 
 // Cell and CellData must have identical layout for bulk memcpy.
-const _: () = assert!(mem::size_of::<Cell>() == CELL_DATA_SIZE, "Cell and CellData size mismatch");
+const _: () = assert!(
+    mem::size_of::<Cell>() == CELL_DATA_SIZE,
+    "Cell and CellData size mismatch"
+);
 
 /// Number of cell buffers for pipelining (CPU uploads to one while GPU reads the other).
 const NUM_BUFFERS: usize = 2;
@@ -88,7 +91,13 @@ pub struct MetalRenderer {
 }
 
 impl MetalRenderer {
-    pub fn new(window: &winit::window::Window, cols: u32, rows: u32, cell_width: u32, cell_height: u32) -> Self {
+    pub fn new(
+        window: &winit::window::Window,
+        cols: u32,
+        rows: u32,
+        cell_width: u32,
+        cell_height: u32,
+    ) -> Self {
         let device = Device::system_default().expect("no Metal device found");
         let command_queue = device.new_command_queue();
 
@@ -104,9 +113,9 @@ impl MetalRenderer {
         // Attach layer to NSView
         let scale_factor = window.scale_factor();
         if let RawWindowHandle::AppKit(handle) = window.window_handle().unwrap().as_raw() {
-            let view: Retained<NSView> = unsafe {
-                Retained::retain(handle.ns_view.as_ptr().cast::<NSView>())
-            }.expect("NSView pointer was null");
+            let view: Retained<NSView> =
+                unsafe { Retained::retain(handle.ns_view.as_ptr().cast::<NSView>()) }
+                    .expect("NSView pointer was null");
             view.setWantsLayer(true);
             unsafe {
                 let layer_obj: *mut objc2::runtime::AnyObject = layer.as_ptr().cast();
@@ -116,7 +125,10 @@ impl MetalRenderer {
         layer.set_contents_scale(scale_factor);
 
         let window_size = window.inner_size();
-        layer.set_drawable_size(CGSize::new(window_size.width as f64, window_size.height as f64));
+        layer.set_drawable_size(CGSize::new(
+            window_size.width as f64,
+            window_size.height as f64,
+        ));
 
         // Compile shader from source at runtime
         let shader_source = include_str!("shader.metal");
@@ -125,7 +137,9 @@ impl MetalRenderer {
         let library = device
             .new_library_with_source(shader_source, &compile_options)
             .expect("failed to compile Metal shader");
-        let function = library.get_function("render", None).expect("shader function 'render' not found");
+        let function = library
+            .get_function("render", None)
+            .expect("shader function 'render' not found");
         let pipeline = device
             .new_compute_pipeline_state_with_function(&function)
             .expect("failed to create compute pipeline");
@@ -298,7 +312,8 @@ impl MetalRenderer {
     /// NOTE: width/height are already in physical pixels (from winit).
     pub fn resize(&mut self, width: u32, height: u32, scale: f64) {
         self.scale_factor = scale;
-        self.layer.set_drawable_size(CGSize::new(width as f64, height as f64));
+        self.layer
+            .set_drawable_size(CGSize::new(width as f64, height as f64));
         self.layer.set_contents_scale(scale);
 
         // Recalculate grid dimensions (all in physical pixels already)
@@ -318,8 +333,10 @@ impl MetalRenderer {
         // Reallocate both cell buffers
         let buffer_size = (self.cols as usize * self.rows as usize * CELL_DATA_SIZE) as u64;
         self.cell_buffers = [
-            self.device.new_buffer(buffer_size, MTLResourceOptions::StorageModeShared),
-            self.device.new_buffer(buffer_size, MTLResourceOptions::StorageModeShared),
+            self.device
+                .new_buffer(buffer_size, MTLResourceOptions::StorageModeShared),
+            self.device
+                .new_buffer(buffer_size, MTLResourceOptions::StorageModeShared),
         ];
         self.needs_render = true;
     }

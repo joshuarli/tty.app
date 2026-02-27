@@ -84,7 +84,10 @@ impl Grid {
             tab_stops.set(i, true);
         }
 
-        let attr = Cell { codepoint: b' ' as u16, ..Cell::default() };
+        let attr = Cell {
+            codepoint: b' ' as u16,
+            ..Cell::default()
+        };
 
         Grid {
             cells,
@@ -178,7 +181,8 @@ impl Grid {
         let src_start = (self.scroll_top + n) as usize * cols;
         let dst_start = self.scroll_top as usize * cols;
         let count = ((self.scroll_bottom - self.scroll_top + 1 - n) as usize) * cols;
-        self.cells.copy_within(src_start..src_start + count, dst_start);
+        self.cells
+            .copy_within(src_start..src_start + count, dst_start);
 
         // Clear new rows at bottom of scroll region (use current bg color)
         let attr = self.attr;
@@ -208,7 +212,8 @@ impl Grid {
         let src_start = self.scroll_top as usize * cols;
         let dst_start = (self.scroll_top + n) as usize * cols;
         let count = ((self.scroll_bottom - self.scroll_top + 1 - n) as usize) * cols;
-        self.cells.copy_within(src_start..src_start + count, dst_start);
+        self.cells
+            .copy_within(src_start..src_start + count, dst_start);
 
         // Clear new rows at top of scroll region (use current bg color)
         let attr = self.attr;

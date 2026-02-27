@@ -4,11 +4,7 @@ use crate::terminal::grid::TermMode;
 
 /// Translate a winit key event into VT byte sequence(s) to send to the PTY.
 /// Returns None if the key should not be sent (e.g., Cmd+C for copy).
-pub fn key_to_bytes(
-    key: &Key,
-    modifiers: &ModifiersState,
-    term_mode: TermMode,
-) -> Option<Vec<u8>> {
+pub fn key_to_bytes(key: &Key, modifiers: &ModifiersState, term_mode: TermMode) -> Option<Vec<u8>> {
     let app_cursor = term_mode.contains(TermMode::CURSOR_KEYS);
 
     // Cmd modifier — handle separately (Cmd+C, Cmd+V are intercepted by the caller)
@@ -165,9 +161,14 @@ fn fkey(num: u8, shift: bool, alt: bool, ctrl: bool) -> Vec<u8> {
 /// 1 = none, 2 = shift, 3 = alt, 4 = shift+alt, etc.
 fn modifier_param(shift: bool, alt: bool, ctrl: bool) -> u8 {
     let mut m = 1u8;
-    if shift { m += 1; }
-    if alt { m += 2; }
-    if ctrl { m += 4; }
+    if shift {
+        m += 1;
+    }
+    if alt {
+        m += 2;
+    }
+    if ctrl {
+        m += 4;
+    }
     m
 }
-

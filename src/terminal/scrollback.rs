@@ -37,5 +37,4 @@ impl Scrollback {
             self.len = self.capacity;
         }
     }
-
 }

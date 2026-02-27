@@ -40,8 +40,8 @@ pub const PALETTE: [u32; 256] = {
     p[7] = 0x00ffffff; // white (= foreground)
 
     // ANSI 8-15 (bright)
-    p[8] = 0x00666666;  // bright black
-    p[9] = 0x00ff6e6e;  // bright red
+    p[8] = 0x00666666; // bright black
+    p[9] = 0x00ff6e6e; // bright red
     p[10] = 0x0069ff94; // bright green
     p[11] = 0x00ffffa5; // bright yellow
     p[12] = 0x00d6bfff; // bright blue
@@ -58,9 +58,7 @@ pub const PALETTE: [u32; 256] = {
         while g < 6 {
             let mut b = 0usize;
             while b < 6 {
-                p[i] = ((levels[r] as u32) << 16)
-                    | ((levels[g] as u32) << 8)
-                    | (levels[b] as u32);
+                p[i] = ((levels[r] as u32) << 16) | ((levels[g] as u32) << 8) | (levels[b] as u32);
                 i += 1;
                 b += 1;
             }

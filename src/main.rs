@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use objc2_app_kit::NSPasteboard;
-use objc2_foundation::{ns_string, NSArray, NSString};
+use objc2_foundation::{NSArray, NSString, ns_string};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -17,8 +17,8 @@ use winit::keyboard::{Key, ModifiersState};
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId};
 
 use crate::parser::Parser;
-use crate::parser::perform::Perform;
 use crate::parser::charset::translate_dec_special;
+use crate::parser::perform::Perform;
 use crate::pty::Pty;
 use crate::renderer::atlas::Atlas;
 use crate::renderer::font::FontRasterizer;
@@ -244,8 +244,7 @@ impl<'a> Perform for TermPerformer<'a> {
 
         let row_start = row as usize * cols as usize;
         for c in (col + n..cols).rev() {
-            self.grid.cells[row_start + c as usize] =
-                self.grid.cells[row_start + (c - n) as usize];
+            self.grid.cells[row_start + c as usize] = self.grid.cells[row_start + (c - n) as usize];
         }
         let attr = self.grid.attr;
         for c in col..col + n {
@@ -262,8 +261,7 @@ impl<'a> Perform for TermPerformer<'a> {
 
         let row_start = row as usize * cols as usize;
         for c in col..cols - n {
-            self.grid.cells[row_start + c as usize] =
-                self.grid.cells[row_start + (c + n) as usize];
+            self.grid.cells[row_start + c as usize] = self.grid.cells[row_start + (c + n) as usize];
         }
         let attr = self.grid.attr;
         for c in cols - n..cols {
@@ -549,7 +547,8 @@ impl<'a> Perform for TermPerformer<'a> {
                 let n = params.first().copied().unwrap_or(1).max(1);
                 let row = self.grid.cursor_row;
                 let col = self.grid.cursor_col;
-                self.grid.clear_cols(row, col, (col + n).min(self.grid.cols));
+                self.grid
+                    .clear_cols(row, col, (col + n).min(self.grid.cols));
             }
             ([], b'c') => {
                 // DA — report as VT220
@@ -812,12 +811,20 @@ impl App {
 
         // Clear CURSOR flag from previous position
         if prev_row < state.grid.rows && prev_col < state.grid.cols {
-            state.grid.cell_mut(prev_row, prev_col).flags.remove(CellFlags::CURSOR);
+            state
+                .grid
+                .cell_mut(prev_row, prev_col)
+                .flags
+                .remove(CellFlags::CURSOR);
             state.grid.mark_dirty(prev_row);
         }
 
         // Set CURSOR flag at new position
-        state.grid.cell_mut(cursor_row, cursor_col).flags.insert(CellFlags::CURSOR);
+        state
+            .grid
+            .cell_mut(cursor_row, cursor_col)
+            .flags
+            .insert(CellFlags::CURSOR);
         state.grid.mark_dirty(cursor_row);
 
         self.prev_cursor_row = cursor_row;
@@ -839,7 +846,11 @@ impl App {
 
             for row in start.1..=end.1 {
                 let from_col = if row == start.1 { start.0 } else { 0 };
-                let to_col = if row == end.1 { end.0 + 1 } else { state.grid.cols };
+                let to_col = if row == end.1 {
+                    end.0 + 1
+                } else {
+                    state.grid.cols
+                };
 
                 for col in from_col..to_col {
                     let cell = state.grid.cell(row, col);
@@ -921,9 +932,17 @@ impl App {
             // Set new selection
             for row in start.1..=end.1 {
                 let from_col = if row == start.1 { start.0 } else { 0 };
-                let to_col = if row == end.1 { end.0 } else { state.grid.cols - 1 };
+                let to_col = if row == end.1 {
+                    end.0
+                } else {
+                    state.grid.cols - 1
+                };
                 for col in from_col..=to_col {
-                    state.grid.cell_mut(row, col).flags.insert(CellFlags::SELECTED);
+                    state
+                        .grid
+                        .cell_mut(row, col)
+                        .flags
+                        .insert(CellFlags::SELECTED);
                 }
                 state.grid.mark_dirty(row);
             }
@@ -954,7 +973,9 @@ impl ApplicationHandler for App {
         let attrs = WindowAttributes::default()
             .with_title("tty")
             .with_fullscreen(Some(Fullscreen::Borderless(None)));
-        let window = event_loop.create_window(attrs).expect("failed to create window");
+        let window = event_loop
+            .create_window(attrs)
+            .expect("failed to create window");
         let scale = window.scale_factor();
 
         let rasterizer = FontRasterizer::new(config::FONT_FAMILY, config::FONT_SIZE, scale);
@@ -975,8 +996,13 @@ impl ApplicationHandler for App {
         let grid = Grid::new(cols as u16, rows as u16);
         let scrollback = Scrollback::new(config::SCROLLBACK_LINES);
 
-        let pty = Pty::spawn(cols as u16, rows as u16, cell_width as u16, cell_height as u16)
-            .expect("failed to spawn PTY");
+        let pty = Pty::spawn(
+            cols as u16,
+            rows as u16,
+            cell_width as u16,
+            cell_height as u16,
+        )
+        .expect("failed to spawn PTY");
         let pty = Arc::new(pty);
 
         self.window = Some(window);
@@ -1031,7 +1057,12 @@ impl ApplicationHandler for App {
                         state.grid.resize(cols, rows);
                     }
                     if let Some(pty) = &self.pty {
-                        pty.resize(cols, rows, renderer.cell_width as u16, renderer.cell_height as u16);
+                        pty.resize(
+                            cols,
+                            rows,
+                            renderer.cell_width as u16,
+                            renderer.cell_height as u16,
+                        );
                     }
                 }
             }
@@ -1042,7 +1073,11 @@ impl ApplicationHandler for App {
                         FontRasterizer::new(config::FONT_FAMILY, config::FONT_SIZE, scale_factor);
                     renderer.cell_width = rasterizer.metrics.cell_width;
                     renderer.cell_height = rasterizer.metrics.cell_height;
-                    *atlas = Atlas::new(renderer.device(), rasterizer.metrics.cell_width, rasterizer.metrics.cell_height);
+                    *atlas = Atlas::new(
+                        renderer.device(),
+                        rasterizer.metrics.cell_width,
+                        rasterizer.metrics.cell_height,
+                    );
                     atlas.preload_ascii(&rasterizer);
                     renderer.atlas_texture = atlas.texture.clone();
                     self.rasterizer = Some(rasterizer);
@@ -1096,13 +1131,19 @@ impl ApplicationHandler for App {
                 }
             }
 
-            WindowEvent::MouseInput { state: btn_state, button, .. } => {
+            WindowEvent::MouseInput {
+                state: btn_state,
+                button,
+                ..
+            } => {
                 if button == MouseButton::Left {
                     match btn_state {
                         ElementState::Pressed => {
                             self.clear_selection();
                             self.mouse_pressed = true;
-                            if let Some(cell) = self.pixel_to_cell(self.cursor_pos.0, self.cursor_pos.1) {
+                            if let Some(cell) =
+                                self.pixel_to_cell(self.cursor_pos.0, self.cursor_pos.1)
+                            {
                                 self.selection_start = Some(cell);
                                 self.selection_end = Some(cell);
                             }
@@ -1170,6 +1211,12 @@ fn base64_decode(input: &[u8]) -> Result<Vec<u8>, ()> {
 }
 
 fn main() {
+    if std::env::args().any(|a| a == "-v" || a == "--version") {
+        let commit = &env!("TTY_RUSTC_COMMIT")[..7];
+        println!("tty {} (rustc nightly {commit})", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     let event_loop = EventLoop::new().expect("failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App::new();

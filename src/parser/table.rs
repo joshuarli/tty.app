@@ -158,7 +158,7 @@ const fn build_table() -> [[u8; NUM_CLASSES]; NUM_STATES] {
     t[ESCAPE as usize][0] = pack(ACTION_EXECUTE, ESCAPE);
     t[ESCAPE as usize][1] = pack(ACTION_EXECUTE, GROUND); // CAN
     t[ESCAPE as usize][2] = pack(ACTION_EXECUTE, GROUND); // SUB
-    t[ESCAPE as usize][3] = pack(ACTION_CLEAR, ESCAPE);   // ESC (re-enter)
+    t[ESCAPE as usize][3] = pack(ACTION_CLEAR, ESCAPE); // ESC (re-enter)
     // Intermediates → collect, enter escape_intermediate
     t[ESCAPE as usize][4] = pack(ACTION_COLLECT, ESCAPE_INTERMEDIATE);
     // 0x30-0x4F → esc_dispatch, ground (most ESC sequences)
@@ -181,10 +181,10 @@ const fn build_table() -> [[u8; NUM_CLASSES]; NUM_STATES] {
     // BEL in escape → execute, stay
     t[ESCAPE as usize][19] = pack(ACTION_EXECUTE, ESCAPE);
     // 7-bit C1 equivalents in ESCAPE state:
-    t[ESCAPE as usize][20] = pack(ACTION_CLEAR, DCS_ENTRY);         // ESC P → DCS
-    t[ESCAPE as usize][21] = pack(ACTION_NONE, SOS_PM_APC_STRING);  // ESC X/^/_ → SOS/PM/APC
-    t[ESCAPE as usize][22] = pack(ACTION_CLEAR, CSI_ENTRY);         // ESC [ → CSI
-    t[ESCAPE as usize][23] = pack(ACTION_OSC_START, OSC_STRING);    // ESC ] → OSC
+    t[ESCAPE as usize][20] = pack(ACTION_CLEAR, DCS_ENTRY); // ESC P → DCS
+    t[ESCAPE as usize][21] = pack(ACTION_NONE, SOS_PM_APC_STRING); // ESC X/^/_ → SOS/PM/APC
+    t[ESCAPE as usize][22] = pack(ACTION_CLEAR, CSI_ENTRY); // ESC [ → CSI
+    t[ESCAPE as usize][23] = pack(ACTION_OSC_START, OSC_STRING); // ESC ] → OSC
 
     // ── ESCAPE_INTERMEDIATE ──
     t[ESCAPE_INTERMEDIATE as usize][0] = pack(ACTION_EXECUTE, ESCAPE_INTERMEDIATE);

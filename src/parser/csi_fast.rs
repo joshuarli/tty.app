@@ -22,7 +22,9 @@ impl CsiFastParser {
         // Check for private mode prefix '?'
         let private = if buf[pos] == b'?' {
             pos += 1;
-            if pos >= len { return None; }
+            if pos >= len {
+                return None;
+            }
             true
         } else {
             false
@@ -63,11 +65,10 @@ impl CsiFastParser {
                 }
                 0x40..=0x7E => {
                     // Final byte — dispatch
-                    if (has_digit || param_count > 0)
-                        && param_count < 16 {
-                            params[param_count] = current_param.min(u16::MAX as u32) as u16;
-                            param_count += 1;
-                        }
+                    if (has_digit || param_count > 0) && param_count < 16 {
+                        params[param_count] = current_param.min(u16::MAX as u32) as u16;
+                        param_count += 1;
+                    }
                     pos += 1; // consume final byte
 
                     Self::dispatch(b, &params[..param_count], private, performer);

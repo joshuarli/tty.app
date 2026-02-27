@@ -40,11 +40,7 @@ impl FontRasterizer {
         let characters: [u16; 1] = [b'M' as u16];
         let mut glyphs: [CGGlyph; 1] = [0];
         unsafe {
-            ct_font.get_glyphs_for_characters(
-                characters.as_ptr(),
-                glyphs.as_mut_ptr(),
-                1,
-            );
+            ct_font.get_glyphs_for_characters(characters.as_ptr(), glyphs.as_mut_ptr(), 1);
         }
 
         let mut advances = [CGSize::new(0.0, 0.0)];
@@ -75,11 +71,8 @@ impl FontRasterizer {
         let characters = [codepoint];
         let mut glyphs: [CGGlyph; 1] = [0];
         let result = unsafe {
-            self.ct_font.get_glyphs_for_characters(
-                characters.as_ptr(),
-                glyphs.as_mut_ptr(),
-                1,
-            )
+            self.ct_font
+                .get_glyphs_for_characters(characters.as_ptr(), glyphs.as_mut_ptr(), 1)
         };
         if !result || glyphs[0] == 0 {
             return None;
@@ -124,11 +117,8 @@ impl FontRasterizer {
         let positions = [CGPoint::new(0.0, baseline_y)];
         let glyphs_cg = [glyph];
 
-        self.ct_font.draw_glyphs(
-            &glyphs_cg,
-            &positions,
-            ctx.clone(),
-        );
+        self.ct_font
+            .draw_glyphs(&glyphs_cg, &positions, ctx.clone());
 
         // With font smoothing enabled, CoreText renders slightly different
         // values per RGB channel (subpixel AA). We blend between the min
@@ -159,11 +149,8 @@ impl FontRasterizer {
         let characters = [codepoint];
         let mut glyphs: [CGGlyph; 1] = [0];
         let result = unsafe {
-            self.ct_font.get_glyphs_for_characters(
-                characters.as_ptr(),
-                glyphs.as_mut_ptr(),
-                1,
-            )
+            self.ct_font
+                .get_glyphs_for_characters(characters.as_ptr(), glyphs.as_mut_ptr(), 1)
         };
         if !result || glyphs[0] == 0 {
             return None;
@@ -202,7 +189,8 @@ impl FontRasterizer {
         let positions = [CGPoint::new(0.0, baseline_y)];
         let glyphs_cg = [glyph];
 
-        self.ct_font.draw_glyphs(&glyphs_cg, &positions, ctx.clone());
+        self.ct_font
+            .draw_glyphs(&glyphs_cg, &positions, ctx.clone());
 
         let rgba_data = ctx.data();
         let w_f = config::FONT_SMOOTH_WEIGHT;

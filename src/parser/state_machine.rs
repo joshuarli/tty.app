@@ -70,14 +70,16 @@ impl StateMachine {
             ACTION_PARAM => {
                 if byte == b';' {
                     if self.param_count < MAX_PARAMS {
-                        self.params[self.param_count] = self.current_param.min(u16::MAX as u32) as u16;
+                        self.params[self.param_count] =
+                            self.current_param.min(u16::MAX as u32) as u16;
                         self.param_count += 1;
                     }
                     self.current_param = 0;
                 } else if byte == b':' {
                     // Sub-parameter separator — treat like semicolon for now
                     if self.param_count < MAX_PARAMS {
-                        self.params[self.param_count] = self.current_param.min(u16::MAX as u32) as u16;
+                        self.params[self.param_count] =
+                            self.current_param.min(u16::MAX as u32) as u16;
                         self.param_count += 1;
                     }
                     self.current_param = 0;
@@ -86,10 +88,7 @@ impl StateMachine {
                 }
             }
             ACTION_ESC_DISPATCH => {
-                performer.esc_dispatch(
-                    &self.intermediates[..self.intermediate_count],
-                    byte,
-                );
+                performer.esc_dispatch(&self.intermediates[..self.intermediate_count], byte);
             }
             ACTION_CSI_DISPATCH => {
                 // Finalize last parameter

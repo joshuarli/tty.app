@@ -47,18 +47,30 @@ impl SimdScanner {
 
                 // Some byte needs attention — find which chunk and which byte
                 if vminvq_u8(ok0) != 0xFF {
-                    return (pos + Self::find_first_zero(ok0), pos + Self::find_first_zero(ok0));
+                    return (
+                        pos + Self::find_first_zero(ok0),
+                        pos + Self::find_first_zero(ok0),
+                    );
                 }
                 pos += 16;
                 if vminvq_u8(ok1) != 0xFF {
-                    return (pos + Self::find_first_zero(ok1), pos + Self::find_first_zero(ok1));
+                    return (
+                        pos + Self::find_first_zero(ok1),
+                        pos + Self::find_first_zero(ok1),
+                    );
                 }
                 pos += 16;
                 if vminvq_u8(ok2) != 0xFF {
-                    return (pos + Self::find_first_zero(ok2), pos + Self::find_first_zero(ok2));
+                    return (
+                        pos + Self::find_first_zero(ok2),
+                        pos + Self::find_first_zero(ok2),
+                    );
                 }
                 pos += 16;
-                return (pos + Self::find_first_zero(ok3), pos + Self::find_first_zero(ok3));
+                return (
+                    pos + Self::find_first_zero(ok3),
+                    pos + Self::find_first_zero(ok3),
+                );
             }
 
             // Process remaining 16-byte chunks

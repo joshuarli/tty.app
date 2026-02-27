@@ -126,7 +126,6 @@ impl Pty {
             libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &ws);
         }
     }
-
 }
 
 impl Drop for Pty {
