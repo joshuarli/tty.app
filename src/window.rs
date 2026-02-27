@@ -34,6 +34,7 @@ pub enum Event {
         x: f64,
         y: f64,
         delta_y: f64,
+        precise: bool, // true = trackpad (points), false = mouse wheel (lines)
     },
     Resized {
         w: u32,
@@ -286,8 +287,14 @@ impl NativeWindow {
             } else if event_type == NSEventType::ScrollWheel {
                 let (x, y) = self.mouse_position(&event);
                 let delta_y = event.scrollingDeltaY();
+                let precise = event.hasPreciseScrollingDeltas();
                 if delta_y != 0.0 {
-                    self.events.push(Event::ScrollWheel { x, y, delta_y });
+                    self.events.push(Event::ScrollWheel {
+                        x,
+                        y,
+                        delta_y,
+                        precise,
+                    });
                 }
             }
 

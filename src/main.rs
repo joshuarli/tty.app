@@ -500,7 +500,12 @@ impl<'a> Perform for TermPerformer<'a> {
                     1004 => self.grid.mode.insert(TermMode::FOCUS_EVENTS),
                     1006 => self.grid.mode.insert(TermMode::MOUSE_SGR),
                     2004 => self.grid.mode.insert(TermMode::BRACKETED_PASTE),
-                    2026 => self.grid.mode.insert(TermMode::SYNC_OUTPUT),
+                    2026 => {
+                        if !self.grid.mode.contains(TermMode::SYNC_OUTPUT) {
+                            self.grid.mode.insert(TermMode::SYNC_OUTPUT);
+                            self.grid.sync_start = Some(Instant::now());
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -531,7 +536,10 @@ impl<'a> Perform for TermPerformer<'a> {
                     1004 => self.grid.mode.remove(TermMode::FOCUS_EVENTS),
                     1006 => self.grid.mode.remove(TermMode::MOUSE_SGR),
                     2004 => self.grid.mode.remove(TermMode::BRACKETED_PASTE),
-                    2026 => self.grid.mode.remove(TermMode::SYNC_OUTPUT),
+                    2026 => {
+                        self.grid.mode.remove(TermMode::SYNC_OUTPUT);
+                        self.grid.sync_start = None;
+                    }
                     _ => {}
                 }
             }
@@ -682,38 +690,19 @@ impl<'a> Perform for TermPerformer<'a> {
     }
 
     fn csi_dispatch(&mut self, params: &[u16], intermediates: &[u8], _ignore: bool, byte: u8) {
+        let p0 = params.first().copied().unwrap_or(0);
+        let p1 = if params.len() > 1 { params[1] } else { 0 };
+
         match (intermediates, byte) {
-            ([], b'm') => {
-                // SGR via state machine (colon sub-params flattened to ';')
-                // The state machine treats ':' as ';', so params are already flattened.
-                // This is imperfect for colon sub-params but better than dropping them.
-                if params.is_empty() {
-                    self.sgr(&[0]);
-                } else {
-                    self.sgr(params);
-                }
-            }
-            ([], b'X') => {
-                // ECH
-                self.erase_chars(params.first().copied().unwrap_or(1).max(1));
-            }
-            ([], b'c') => {
-                // DA1 — report as VT100 with no extensions (like Alacritty)
-                self.response_buf.extend_from_slice(b"\x1B[?6c");
-            }
-            ([b'>'], b'c') => {
-                // DA2
-                self.response_buf.extend_from_slice(b"\x1B[>0;0;0c");
-            }
+            // ── Private mode sequences (CSI ? ...) ──
+            ([b'?'], b'h') => self.set_mode(params, true),
+            ([b'?'], b'l') => self.reset_mode(params, true),
             ([b'?', b'$'], b'p') => {
                 // DECRQM (DEC private mode query) → respond with DECRPM
-                // Format: CSI ? Ps ; Pm $ y
-                // Pm: 0=not recognized, 1=set, 2=reset
                 if let Some(&mode) = params.first() {
                     let pm = match mode {
                         1 | 6 | 7 | 25 | 47 | 1000 | 1002 | 1003 | 1004 | 1006 | 1047 | 1049
                         | 2004 | 2026 => {
-                            // Recognized mode — check if currently set
                             let flag = match mode {
                                 1 => TermMode::CURSOR_KEYS,
                                 6 => TermMode::ORIGIN_MODE,
@@ -731,12 +720,93 @@ impl<'a> Perform for TermPerformer<'a> {
                             };
                             if self.grid.mode.contains(flag) { 1 } else { 2 }
                         }
-                        _ => 0, // not recognized
+                        _ => 0,
                     };
                     let resp = format!("\x1B[?{};{}$y", mode, pm);
                     self.response_buf.extend_from_slice(resp.as_bytes());
                 }
             }
+
+            // ── SGR ──
+            ([], b'm') => {
+                if params.is_empty() {
+                    self.sgr(&[0]);
+                } else {
+                    self.sgr(params);
+                }
+            }
+
+            // ── Cursor movement ──
+            ([], b'A') => self.cursor_up(p0.max(1)),
+            ([], b'B') | ([], b'e') => self.cursor_down(p0.max(1)),
+            ([], b'C') | ([], b'a') => self.cursor_forward(p0.max(1)),
+            ([], b'D') => self.cursor_backward(p0.max(1)),
+            ([], b'E') => {
+                self.cursor_down(p0.max(1));
+                self.cursor_horizontal_absolute(1);
+            }
+            ([], b'F') => {
+                self.cursor_up(p0.max(1));
+                self.cursor_horizontal_absolute(1);
+            }
+
+            // ── Cursor position ──
+            ([], b'H') | ([], b'f') => {
+                let row = p0.max(1);
+                let col = if params.len() > 1 { p1.max(1) } else { 1 };
+                self.cursor_position(row, col);
+            }
+            ([], b'G') | ([], b'`') => self.cursor_horizontal_absolute(p0.max(1)),
+            ([], b'd') => self.cursor_vertical_absolute(p0.max(1)),
+
+            // ── Erase ──
+            ([], b'J') => self.erase_in_display(p0),
+            ([], b'K') => self.erase_in_line(p0),
+
+            // ── Scroll ──
+            ([], b'S') => self.scroll_up(p0.max(1)),
+            ([], b'T') => self.scroll_down(p0.max(1)),
+
+            // ── Insert/delete ──
+            ([], b'L') => self.insert_lines(p0.max(1)),
+            ([], b'M') => self.delete_lines(p0.max(1)),
+            ([], b'@') => self.insert_chars(p0.max(1)),
+            ([], b'P') => self.delete_chars(p0.max(1)),
+            ([], b'X') => self.erase_chars(p0.max(1)),
+
+            // ── Set/reset mode (non-private) ──
+            ([], b'h') => self.set_mode(params, false),
+            ([], b'l') => self.reset_mode(params, false),
+
+            // ── DECSTBM ──
+            ([], b'r') => {
+                let top = p0.max(1);
+                let bottom = if params.len() > 1 && p1 > 0 { p1 } else { 0 };
+                self.set_scroll_region(top, bottom);
+            }
+
+            // ── Tab clear ──
+            ([], b'g') => self.tab_clear(p0),
+
+            // ── Device status report ──
+            ([], b'n') => self.device_status_report(p0),
+
+            // ── REP ──
+            ([], b'b') => self.repeat_char(p0.max(1)),
+
+            // ── Save/restore cursor ──
+            ([], b's') => self.save_cursor(),
+            ([], b'u') => self.restore_cursor(),
+
+            // ── DA1 ──
+            ([], b'c') => {
+                self.response_buf.extend_from_slice(b"\x1B[?6c");
+            }
+            // ── DA2 ──
+            ([b'>'], b'c') => {
+                self.response_buf.extend_from_slice(b"\x1B[>0;0;0c");
+            }
+
             _ => {}
         }
     }
@@ -804,9 +874,6 @@ struct App {
     // Previous cursor position for clearing stale cursor flags
     prev_cursor_row: u16,
     prev_cursor_col: u16,
-
-    // Timestamp when synchronized output (Mode 2026) was last enabled
-    sync_start: Instant,
 
     // Accumulated scroll delta (in logical points) for fractional accumulation
     scroll_accumulator: f64,
@@ -876,7 +943,6 @@ impl App {
             cursor_pos: (0.0, 0.0),
             prev_cursor_row: 0,
             prev_cursor_col: 0,
-            sync_start: Instant::now(),
             scroll_accumulator: 0.0,
         }
     }
@@ -896,7 +962,6 @@ impl App {
                 }
                 Ok(n) => {
                     got_data = true;
-                    let was_syncing = self.shared.grid.mode.contains(TermMode::SYNC_OUTPUT);
                     let mut response_buf = std::mem::take(&mut self.shared.response_buf);
                     {
                         let mut performer = TermPerformer {
@@ -909,11 +974,6 @@ impl App {
                         self.parser.parse(&buf[..n], &mut performer);
                     }
                     self.shared.response_buf = response_buf;
-
-                    // Record when synchronized output begins
-                    if !was_syncing && self.shared.grid.mode.contains(TermMode::SYNC_OUTPUT) {
-                        self.sync_start = Instant::now();
-                    }
                 }
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::WouldBlock {
@@ -982,16 +1042,16 @@ impl App {
         self.process_pty_output(win);
 
         // Synchronized output (Mode 2026): defer rendering while the application
-        // is mid-update. Dirty bits accumulate and get flushed on the first frame
-        // after sync ends. Timeout after 100ms to prevent a stuck application from
-        // freezing the display.
-        if self.shared.grid.mode.contains(TermMode::SYNC_OUTPUT) {
-            let elapsed = Instant::now().duration_since(self.sync_start);
-            if elapsed.as_millis() < 100 {
+        // is mid-update. sync_start is set by the parser when mode 2026 is enabled
+        // and cleared when disabled, so it precisely tracks each sync block.
+        // Timeout after 100ms to prevent a stuck application from freezing the display.
+        if let Some(start) = self.shared.grid.sync_start {
+            if start.elapsed().as_millis() < 100 {
                 return true; // deferred — idle for now
             }
             // Timeout — render anyway and clear the flag
             self.shared.grid.mode.remove(TermMode::SYNC_OUTPUT);
+            self.shared.grid.sync_start = None;
         }
 
         // Cursor blink — only when DECTCEM (CURSOR_VISIBLE mode) is set
@@ -1293,25 +1353,35 @@ impl App {
                 }
             }
 
-            Event::ScrollWheel { x, y, delta_y } => {
+            Event::ScrollWheel {
+                x,
+                y,
+                delta_y,
+                precise,
+            } => {
                 self.cursor_pos = (*x, *y);
                 let cell = self.pixel_to_cell(*x, *y);
                 let mouse_mode = self.shared.grid.mode.intersects(
                     TermMode::MOUSE_BUTTON | TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL,
                 );
 
-                // Accumulate delta in logical points and convert to discrete lines.
-                // cell_height is in physical pixels; convert to points for correct scaling.
+                // Precise (trackpad): delta is in points — accumulate and convert to lines.
+                // Non-precise (mouse wheel): delta is already in lines.
                 let cell_height_pts = self.renderer.cell_height as f64 / self.renderer.scale_factor;
-                self.scroll_accumulator += *delta_y;
+                if *precise {
+                    self.scroll_accumulator += *delta_y;
+                } else {
+                    self.scroll_accumulator += *delta_y * cell_height_pts;
+                }
 
-                // Extract whole lines from the accumulator
+                // Extract whole lines from the accumulator, capped to prevent
+                // flooding the PTY with too many events per frame.
                 let lines = (self.scroll_accumulator / cell_height_pts) as i32;
                 if lines == 0 {
                     // Not enough delta accumulated for a full line yet
                 } else {
                     self.scroll_accumulator -= lines as f64 * cell_height_pts;
-                    let count = lines.unsigned_abs().min(5); // cap to prevent flooding
+                    let count = lines.unsigned_abs().min(5);
 
                     if mouse_mode {
                         // Mouse mode: send scroll button events (64=up, 65=down)

@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use bitvec::prelude::*;
 
 use crate::terminal::cell::{Cell, CellFlags};
@@ -70,6 +72,10 @@ pub struct Grid {
     // Last printed character (for REP / CSI b)
     pub last_char: char,
 
+    // Synchronized output (mode 2026): when the current sync block began.
+    // Set by the parser when 2026 is enabled, cleared when disabled.
+    pub sync_start: Option<Instant>,
+
     // Alternate screen buffer
     alt_cells: Vec<Cell>,
     main_cursor: SavedCursor,
@@ -109,6 +115,7 @@ impl Grid {
             active_charset: 0,
             tab_stops,
             last_char: ' ',
+            sync_start: None,
             saved_cursor: SavedCursor::default(),
             alt_cells: Vec::new(),
             main_cursor: SavedCursor::default(),
@@ -345,7 +352,7 @@ impl Grid {
                 self.cursor_col = 0;
                 if self.cursor_row == self.scroll_bottom {
                     self.scroll_up(1);
-                } else if self.cursor_row < self.scroll_bottom {
+                } else if self.cursor_row < self.rows - 1 {
                     self.cursor_row += 1;
                 }
             }
@@ -383,7 +390,7 @@ impl Grid {
                 self.cursor_col = 0;
                 if self.cursor_row == self.scroll_bottom {
                     self.scroll_up(1);
-                } else if self.cursor_row < self.scroll_bottom {
+                } else if self.cursor_row < self.rows - 1 {
                     self.cursor_row += 1;
                 }
             }
@@ -398,7 +405,7 @@ impl Grid {
                 self.cursor_col = 0;
                 if self.cursor_row == self.scroll_bottom {
                     self.scroll_up(1);
-                } else if self.cursor_row < self.scroll_bottom {
+                } else if self.cursor_row < self.rows - 1 {
                     self.cursor_row += 1;
                 }
             } else {
