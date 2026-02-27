@@ -1,9 +1,9 @@
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly, define_class};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationPresentationOptions,
-    NSBackingStoreType, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType,
-    NSMainMenuWindowLevel, NSScreen, NSView, NSWindow, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask,
+    NSEventModifierFlags, NSEventType, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString};
 
@@ -152,6 +152,7 @@ pub struct NativeWindow {
     events: Vec<Event>,
     last_frame: NSRect,
     last_scale: f64,
+    safe_area_top: u32,
     _mtm: MainThreadMarker,
 }
 
@@ -171,26 +172,53 @@ impl NativeWindow {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(mtm),
                 frame,
-                NSWindowStyleMask::Borderless,
+                NSWindowStyleMask::Titled
+                    | NSWindowStyleMask::Resizable
+                    | NSWindowStyleMask::FullSizeContentView,
                 NSBackingStoreType::Buffered,
                 false,
             )
         };
 
+        // Hide titlebar chrome — content fills the entire window
+        unsafe {
+            let _: () = objc2::msg_send![&window, setTitlebarAppearsTransparent: true];
+            // NSWindowTitleHidden = 1
+            let _: () = objc2::msg_send![&window, setTitleVisibility: 1isize];
+            // Black background to avoid bright flash during fullscreen transition
+            let black: *const objc2::runtime::AnyObject = objc2::msg_send![
+                objc2::runtime::AnyClass::get(c"NSColor").unwrap(),
+                blackColor
+            ];
+            let _: () = objc2::msg_send![&window, setBackgroundColor: black];
+        }
+
         let view = TtyView::new(frame, mtm);
         window.setContentView(Some(&view));
         window.setOpaque(true);
-        window.setMovable(false);
-        window.setLevel(NSMainMenuWindowLevel + 1);
+
+        // Enable native fullscreen
+        window.setCollectionBehavior(NSWindowCollectionBehavior::FullScreenPrimary);
         window.makeKeyAndOrderFront(None);
 
-        // Hide dock and menu bar for true fullscreen
-        app.setPresentationOptions(
-            NSApplicationPresentationOptions::AutoHideDock
-                | NSApplicationPresentationOptions::AutoHideMenuBar,
-        );
         #[allow(deprecated)]
         app.activateIgnoringOtherApps(true);
+
+        // Enter native fullscreen with suppressed animation
+        unsafe {
+            let ctx_cls = objc2::runtime::AnyClass::get(c"NSAnimationContext").unwrap();
+            let _: () = objc2::msg_send![ctx_cls, beginGrouping];
+            let ctx: *const objc2::runtime::AnyObject = objc2::msg_send![ctx_cls, currentContext];
+            let _: () = objc2::msg_send![ctx, setDuration: 0.0f64];
+            let _: () = objc2::msg_send![&window, toggleFullScreen: std::ptr::null::<objc2::runtime::AnyObject>()];
+            let _: () = objc2::msg_send![ctx_cls, endGrouping];
+        }
+
+        // Detect safe area inset for notch (physical pixels)
+        let safe_area_top = unsafe {
+            let insets: objc2_foundation::NSEdgeInsets = objc2::msg_send![&screen, safeAreaInsets];
+            (insets.top * scale) as u32
+        };
 
         let phys_w = (frame.size.width * scale) as u32;
         let phys_h = (frame.size.height * scale) as u32;
@@ -206,6 +234,7 @@ impl NativeWindow {
             events: Vec::with_capacity(32),
             last_frame,
             last_scale: scale,
+            safe_area_top,
             _mtm: mtm,
         }
     }
@@ -290,6 +319,10 @@ impl NativeWindow {
             (frame.size.width * scale) as u32,
             (frame.size.height * scale) as u32,
         )
+    }
+
+    pub fn safe_area_top(&self) -> u32 {
+        self.safe_area_top
     }
 
     pub fn set_title(&self, title: &str) {

@@ -637,8 +637,9 @@ impl App {
         let cell_height = rasterizer.metrics.cell_height;
 
         let padding_px = (config::PADDING as f64 * scale) as u32;
+        let padding_top_px = padding_px.max(win.safe_area_top());
         let cols = (phys_w - padding_px * 2) / cell_width;
-        let rows = (phys_h - padding_px * 2) / cell_height;
+        let rows = (phys_h - padding_top_px - padding_px) / cell_height;
 
         let mut renderer = MetalRenderer::new(
             win.view(),
@@ -649,6 +650,7 @@ impl App {
             rows,
             cell_width,
             cell_height,
+            win.safe_area_top(),
         );
 
         let mut atlas = Atlas::new(renderer.device(), cell_width, cell_height);
@@ -1085,6 +1087,10 @@ fn main() {
         let commit = &env!("TTY_RUSTC_COMMIT")[..7];
         println!("tty {} (rustc nightly {commit})", env!("CARGO_PKG_VERSION"));
         return;
+    }
+
+    if std::env::args().any(|a| a == "--stats") {
+        unsafe { std::env::set_var("MTL_HUD_ENABLED", "1") };
     }
 
     let mut win = NativeWindow::new();

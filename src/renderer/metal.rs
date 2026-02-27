@@ -25,6 +25,7 @@ pub struct Uniforms {
     pub atlas_cell_width: u32,
     pub atlas_cell_height: u32,
     pub padding: u32,
+    pub padding_top: u32,
     pub cursor_row: u32,
     pub cursor_col: u32,
     pub cursor_visible: u32,
@@ -83,6 +84,7 @@ pub struct MetalRenderer {
     pub cell_width: u32,
     pub cell_height: u32,
     pub scale_factor: f64,
+    pub notch_px: u32,
 
     // Track whether we need to render
     needs_render: bool,
@@ -99,6 +101,7 @@ impl MetalRenderer {
         rows: u32,
         cell_width: u32,
         cell_height: u32,
+        notch_px: u32,
     ) -> Self {
         let device = Device::system_default().expect("no Metal device found");
         let command_queue = device.new_command_queue();
@@ -186,6 +189,7 @@ impl MetalRenderer {
             cell_width,
             cell_height,
             scale_factor,
+            notch_px,
             needs_render: true,
         }
     }
@@ -242,6 +246,7 @@ impl MetalRenderer {
             let texture = drawable.texture();
 
             // Update uniforms
+            let padding = (config::PADDING as f64 * self.scale_factor) as u32;
             let uniforms = Uniforms {
                 cols: self.cols,
                 rows: self.rows,
@@ -249,7 +254,8 @@ impl MetalRenderer {
                 cell_height: self.cell_height,
                 atlas_cell_width: self.cell_width,
                 atlas_cell_height: self.cell_height,
-                padding: (config::PADDING as f64 * self.scale_factor) as u32,
+                padding,
+                padding_top: self.notch_px.max(padding),
                 cursor_row: grid.cursor_row as u32,
                 cursor_col: grid.cursor_col as u32,
                 cursor_visible: if cursor_visible { 1 } else { 0 },
@@ -310,8 +316,9 @@ impl MetalRenderer {
 
         // Recalculate grid dimensions (all in physical pixels already)
         let padding_px = (config::PADDING as f64 * scale) as u32;
+        let padding_top_px = self.notch_px.max(padding_px);
         let usable_w = width - padding_px * 2;
-        let usable_h = height - padding_px * 2;
+        let usable_h = height - padding_top_px - padding_px;
         self.cols = usable_w / self.cell_width;
         self.rows = usable_h / self.cell_height;
 

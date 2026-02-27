@@ -21,6 +21,7 @@ struct Uniforms {
     uint atlas_cell_width;
     uint atlas_cell_height;
     uint padding;
+    uint padding_top;
     uint cursor_row;
     uint cursor_col;
     uint cursor_visible;
@@ -178,7 +179,7 @@ kernel void render(
     half4 bg_default = unpack_rgb(uni.frame_bg);
 
     // Padding region
-    int2 pos = int2(gid) - int2(uni.padding, uni.padding);
+    int2 pos = int2(gid) - int2(uni.padding, uni.padding_top);
     if (pos.x < 0 || pos.y < 0 ||
         uint(pos.x) >= uni.cols * uni.cell_width ||
         uint(pos.y) >= uni.rows * uni.cell_height) {
