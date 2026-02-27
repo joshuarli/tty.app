@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>Etch</string>
+	<string>tty</string>
 	<key>CFBundleDisplayName</key>
-	<string>Etch</string>
+	<string>tty</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.etch.terminal</string>
+	<string>com.tty.terminal</string>
 	<key>CFBundleExecutable</key>
-	<string>etch</string>
+	<string>tty</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleVersion</key>

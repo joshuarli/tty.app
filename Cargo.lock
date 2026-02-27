@@ -388,25 +388,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "etch"
-version = "0.1.0"
-dependencies = [
- "bitflags 2.11.0",
- "bitvec",
- "block",
- "bytemuck",
- "core-graphics 0.25.0",
- "core-graphics-types 0.2.0",
- "core-text",
- "libc",
- "metal",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "winit",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1362,6 +1343,25 @@ name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
+
+[[package]]
+name = "tty"
+version = "0.1.0"
+dependencies = [
+ "bitflags 2.11.0",
+ "bitvec",
+ "block",
+ "bytemuck",
+ "core-graphics 0.25.0",
+ "core-graphics-types 0.2.0",
+ "core-text",
+ "libc",
+ "metal",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "winit",
+]
 
 [[package]]
 name = "unicode-ident"

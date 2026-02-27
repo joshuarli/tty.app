@@ -952,7 +952,7 @@ impl ApplicationHandler for App {
         }
 
         let attrs = WindowAttributes::default()
-            .with_title("etch")
+            .with_title("tty")
             .with_fullscreen(Some(Fullscreen::Borderless(None)));
         let window = event_loop.create_window(attrs).expect("failed to create window");
         let scale = window.scale_factor();

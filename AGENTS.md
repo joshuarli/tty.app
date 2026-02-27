@@ -1,4 +1,4 @@
-# Etch — Code Architecture
+# tty — Code Architecture
 
 A GPU-accelerated terminal emulator for macOS. Rust + Metal compute shaders, single-threaded event loop, SIMD-accelerated VT parser.
 

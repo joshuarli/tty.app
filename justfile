@@ -1,5 +1,5 @@
 target := arch() + "-apple-darwin"
-app    := "Etch.app"
+app    := "tty.app"
 
 build:
     cargo build
@@ -11,12 +11,12 @@ release:
       -Z build-std-features= \
       --target {{ target }}
 
-# assemble Etch.app bundle (run after `just release`)
+# assemble tty.app bundle
 app: release
     rm -rf {{ app }}
     mkdir -p {{ app }}/Contents/MacOS
     cp Info.plist {{ app }}/Contents/
-    cp target/{{ target }}/release/etch {{ app }}/Contents/MacOS/
+    cp target/{{ target }}/release/tty {{ app }}/Contents/MacOS/
     codesign --force --sign - {{ app }}
     @echo "Built {{ app }} ($(du -sh {{ app }} | awk '{print $1}'))"
 

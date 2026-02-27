@@ -1,15 +1,15 @@
-//! Integration tests for the etch terminal emulator.
+//! Integration tests for the tty terminal emulator.
 //!
 //! These tests drive raw byte sequences (including VT escape sequences) through the
 //! parser and into the grid, then assert on the resulting terminal state. No GPU, no
 //! Metal, no windowing — pure terminal semantics.
 
-use etch::config;
-use etch::parser::perform::Perform;
-use etch::parser::Parser;
-use etch::terminal::cell::{Cell, CellFlags};
-use etch::terminal::grid::{Grid, TermMode};
-use etch::terminal::scrollback::Scrollback;
+use tty::config;
+use tty::parser::perform::Perform;
+use tty::parser::Parser;
+use tty::terminal::cell::{Cell, CellFlags};
+use tty::terminal::grid::{Grid, TermMode};
+use tty::terminal::scrollback::Scrollback;
 
 // ── Test harness ────────────────────────────────────────────────────────────
 
