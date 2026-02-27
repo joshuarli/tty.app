@@ -31,3 +31,9 @@ run *ARGS:
 
 run-release *ARGS:
     cargo run --release -- {{ ARGS }}
+
+setup:
+  prek install --install-hooks
+
+pc:
+  prek run --all-files

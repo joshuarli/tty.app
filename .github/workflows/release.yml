@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  RUST_NIGHTLY: nightly-2026-02-23
+  TARGET: aarch64-apple-darwin
+
+jobs:
+  release:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        run: |
+          rustup toolchain install $RUST_NIGHTLY --profile minimal
+          rustup component add rust-src --toolchain $RUST_NIGHTLY
+
+      - name: Build release binary
+        run: |
+          RUSTFLAGS="-Zlocation-detail=none -Zunstable-options -Cpanic=immediate-abort" \
+          cargo +$RUST_NIGHTLY build --release \
+            -Z build-std=std \
+            -Z build-std-features= \
+            --target $TARGET
+
+      - name: Assemble tty.app
+        run: |
+          mkdir -p tty.app/Contents/MacOS
+          cp Info.plist tty.app/Contents/
+          cp target/$TARGET/release/tty tty.app/Contents/MacOS/
+          codesign --force --sign - tty.app
+          zip -r tty.app.zip tty.app
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" tty.app.zip --generate-notes
