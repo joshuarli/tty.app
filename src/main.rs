@@ -966,11 +966,6 @@ impl ApplicationHandler for App {
         let cols = (win_size.width - padding_px * 2) / cell_width;
         let rows = (win_size.height - padding_px * 2) / cell_height;
 
-        log::info!(
-            "Grid: {}x{} cells, cell: {}x{} px, window: {}x{}",
-            cols, rows, cell_width, cell_height, win_size.width, win_size.height
-        );
-
         let mut renderer = MetalRenderer::new(&window, cols, rows, cell_width, cell_height);
 
         let mut atlas = Atlas::new(renderer.device(), cell_width, cell_height);
@@ -1175,7 +1170,6 @@ fn base64_decode(input: &[u8]) -> Result<Vec<u8>, ()> {
 }
 
 fn main() {
-    env_logger::init();
     let event_loop = EventLoop::new().expect("failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App::new();
