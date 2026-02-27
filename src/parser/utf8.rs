@@ -2,6 +2,12 @@
 /// Decodes multi-byte sequences from a byte slice.
 pub struct Utf8Assembler;
 
+impl Default for Utf8Assembler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Utf8Assembler {
     pub fn new() -> Self {
         Self

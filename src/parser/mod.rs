@@ -18,6 +18,12 @@ pub struct Parser {
     utf8: Utf8Assembler,
 }
 
+impl Default for Parser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Parser {
     pub fn new() -> Self {
         Self {

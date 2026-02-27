@@ -18,6 +18,12 @@ pub struct StateMachine {
     ignoring: bool,
 }
 
+impl Default for StateMachine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StateMachine {
     pub fn new() -> Self {
         Self {

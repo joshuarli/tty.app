@@ -19,8 +19,14 @@ impl Scrollback {
     }
 
     /// Number of rows currently stored.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     /// Push a row into the scrollback. Overwrites oldest if full.

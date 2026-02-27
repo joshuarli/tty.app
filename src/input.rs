@@ -1,10 +1,9 @@
-use winit::keyboard::{Key, ModifiersState, NamedKey};
-
 use crate::terminal::grid::TermMode;
+use crate::window::{Key, Modifiers, NamedKey};
 
-/// Translate a winit key event into VT byte sequence(s) to send to the PTY.
+/// Translate a key event into VT byte sequence(s) to send to the PTY.
 /// Returns None if the key should not be sent (e.g., Cmd+C for copy).
-pub fn key_to_bytes(key: &Key, modifiers: &ModifiersState, term_mode: TermMode) -> Option<Vec<u8>> {
+pub fn key_to_bytes(key: &Key, modifiers: &Modifiers, term_mode: TermMode) -> Option<Vec<u8>> {
     let app_cursor = term_mode.contains(TermMode::CURSOR_KEYS);
 
     // Cmd modifier — handle separately (Cmd+C, Cmd+V are intercepted by the caller)
@@ -12,9 +11,9 @@ pub fn key_to_bytes(key: &Key, modifiers: &ModifiersState, term_mode: TermMode) 
         return None;
     }
 
-    let shift = modifiers.shift_key();
-    let ctrl = modifiers.control_key();
-    let alt = modifiers.alt_key(); // Option key = Meta = ESC prefix
+    let shift = modifiers.shift();
+    let ctrl = modifiers.control();
+    let alt = modifiers.alt(); // Option key = Meta = ESC prefix
 
     match key {
         Key::Character(s) => {
@@ -101,12 +100,8 @@ pub fn key_to_bytes(key: &Key, modifiers: &ModifiersState, term_mode: TermMode) 
                         Some(maybe_esc_prefix(alt, &[0x20]))
                     }
                 }
-
-                _ => None,
             }
         }
-
-        _ => None,
     }
 }
 

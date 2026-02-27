@@ -8,9 +8,7 @@ use block::ConcreteBlock;
 use core_graphics_types::geometry::CGSize;
 use metal::foreign_types::ForeignType;
 use metal::*;
-use objc2::rc::Retained;
 use objc2_app_kit::NSView;
-use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::config;
 use crate::terminal::cell::Cell;
@@ -91,8 +89,12 @@ pub struct MetalRenderer {
 }
 
 impl MetalRenderer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        window: &winit::window::Window,
+        view: &NSView,
+        scale_factor: f64,
+        width: u32,
+        height: u32,
         cols: u32,
         rows: u32,
         cell_width: u32,
@@ -101,34 +103,24 @@ impl MetalRenderer {
         let device = Device::system_default().expect("no Metal device found");
         let command_queue = device.new_command_queue();
 
-        // Set up CAMetalLayer (inline raw-window-metal logic)
+        // Set up CAMetalLayer
         let layer = MetalLayer::new();
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-        layer.set_presents_with_transaction(false);
-        layer.set_display_sync_enabled(true);
+        layer.set_presents_with_transaction(true);
+        layer.set_display_sync_enabled(false);
         layer.set_opaque(true);
         layer.set_framebuffer_only(false); // compute shader writes to texture
 
-        // Attach layer to NSView
-        let scale_factor = window.scale_factor();
-        if let RawWindowHandle::AppKit(handle) = window.window_handle().unwrap().as_raw() {
-            let view: Retained<NSView> =
-                unsafe { Retained::retain(handle.ns_view.as_ptr().cast::<NSView>()) }
-                    .expect("NSView pointer was null");
-            view.setWantsLayer(true);
-            unsafe {
-                let layer_obj: *mut objc2::runtime::AnyObject = layer.as_ptr().cast();
-                let _: () = objc2::msg_send![&*view, setLayer: layer_obj];
-            }
+        // Attach layer to NSView (layer-backed, then replace the layer)
+        view.setWantsLayer(true);
+        unsafe {
+            let layer_obj: *mut objc2::runtime::AnyObject = layer.as_ptr().cast();
+            let _: () = objc2::msg_send![view, setLayer: layer_obj];
         }
         layer.set_contents_scale(scale_factor);
 
-        let window_size = window.inner_size();
-        layer.set_drawable_size(CGSize::new(
-            window_size.width as f64,
-            window_size.height as f64,
-        ));
+        layer.set_drawable_size(CGSize::new(width as f64, height as f64));
 
         // Compile shader from source at runtime
         let shader_source = include_str!("shader.metal");
@@ -297,9 +289,9 @@ impl MetalRenderer {
             let handler = handler.copy();
             command_buffer.add_completed_handler(&handler);
 
-            command_buffer.present_drawable(drawable);
             command_buffer.commit();
-            // No wait — CPU is free to read PTY / parse while GPU renders
+            command_buffer.wait_until_scheduled();
+            drawable.present();
 
             // Swap to the other buffer for next frame
             self.current_buffer = (self.current_buffer + 1) % NUM_BUFFERS;

@@ -4,17 +4,13 @@ mod parser;
 mod pty;
 mod renderer;
 mod terminal;
+mod window;
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use objc2_app_kit::NSPasteboard;
 use objc2_foundation::{NSArray, NSString, ns_string};
-use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton, StartCause, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, ModifiersState};
-use winit::window::{Fullscreen, Window, WindowAttributes, WindowId};
 
 use crate::parser::Parser;
 use crate::parser::charset::translate_dec_special;
@@ -26,6 +22,7 @@ use crate::renderer::metal::MetalRenderer;
 use crate::terminal::cell::{Cell, CellFlags};
 use crate::terminal::grid::{Grid, TermMode};
 use crate::terminal::scrollback::Scrollback;
+use crate::window::{Event, Key, Modifiers, NativeWindow};
 
 /// Shared state between I/O thread and main thread.
 struct SharedState {
@@ -605,16 +602,16 @@ fn is_zero_width(cp: u32) -> bool {
 }
 
 struct App {
-    window: Option<Window>,
-    renderer: Option<MetalRenderer>,
-    rasterizer: Option<FontRasterizer>,
-    atlas: Option<Atlas>,
-    shared: Option<SharedState>,
-    pty: Option<Arc<Pty>>,
+    renderer: MetalRenderer,
+    rasterizer: FontRasterizer,
+    atlas: Atlas,
+    shared: SharedState,
+    pty: Arc<Pty>,
     parser: Parser,
-    modifiers: ModifiersState,
+    modifiers: Modifiers,
     cursor_visible: bool,
     last_blink: Instant,
+    alive: bool,
 
     // Selection state
     selection_start: Option<(u16, u16)>, // (col, row)
@@ -631,363 +628,28 @@ struct App {
 }
 
 impl App {
-    fn new() -> Self {
-        Self {
-            window: None,
-            renderer: None,
-            rasterizer: None,
-            atlas: None,
-            shared: None,
-            pty: None,
-            parser: Parser::new(),
-            modifiers: ModifiersState::empty(),
-            cursor_visible: true,
-            last_blink: Instant::now(),
-            selection_start: None,
-            selection_end: None,
-            mouse_pressed: false,
-            cursor_pos: (0.0, 0.0),
-            prev_cursor_row: 0,
-            prev_cursor_col: 0,
-            sync_start: Instant::now(),
-        }
-    }
-
-    fn process_pty_output(&mut self) {
-        let pty = match &self.pty {
-            Some(p) => p.clone(),
-            None => return,
-        };
-
-        let mut buf = [0u8; 65536];
-
-        loop {
-            match pty.read(&mut buf) {
-                Ok(0) => {
-                    // EOF — shell exited
-                    if let Some(state) = self.shared.as_mut() {
-                        state.alive = false;
-                    }
-                    break;
-                }
-                Ok(n) => {
-                    let state = self.shared.as_mut().unwrap();
-                    let atlas = self.atlas.as_mut().unwrap();
-                    let rasterizer = self.rasterizer.as_ref().unwrap();
-
-                    let was_syncing = state.grid.mode.contains(TermMode::SYNC_OUTPUT);
-                    let mut response_buf = std::mem::take(&mut state.response_buf);
-                    {
-                        let mut performer = TermPerformer {
-                            grid: &mut state.grid,
-                            scrollback: &mut state.scrollback,
-                            atlas,
-                            rasterizer,
-                            response_buf: &mut response_buf,
-                        };
-                        self.parser.parse(&buf[..n], &mut performer);
-                    }
-                    state.response_buf = response_buf;
-
-                    // Record when synchronized output begins
-                    if !was_syncing && state.grid.mode.contains(TermMode::SYNC_OUTPUT) {
-                        self.sync_start = Instant::now();
-                    }
-                    // Keep looping — only WouldBlock reliably indicates the
-                    // kernel buffer is empty. A short read doesn't guarantee it.
-                }
-                Err(e) => {
-                    if e.kind() == std::io::ErrorKind::WouldBlock {
-                        break;
-                    }
-                    if let Some(state) = &mut self.shared {
-                        state.alive = false;
-                    }
-                    break;
-                }
-            }
-        }
-
-        // Handle responses
-        if let Some(state) = &mut self.shared {
-            let responses = std::mem::take(&mut state.response_buf);
-            if !responses.is_empty() {
-                self.handle_responses(&responses);
-            }
-        }
-    }
-
-    fn handle_responses(&self, data: &[u8]) {
-        let mut pos = 0;
-        while pos < data.len() {
-            if data[pos..].starts_with(b"\x1B]title:") {
-                let start = pos + 8;
-                if let Some(end) = data[start..].iter().position(|&b| b == 0x07) {
-                    if let Ok(title) = std::str::from_utf8(&data[start..start + end]) {
-                        if let Some(w) = &self.window {
-                            w.set_title(title);
-                        }
-                    }
-                    pos = start + end + 1;
-                } else {
-                    break;
-                }
-            } else if data[pos..].starts_with(b"\x1B]52;set:") {
-                let start = pos + 9;
-                if let Some(end) = data[start..].iter().position(|&b| b == 0x07) {
-                    let b64 = &data[start..start + end];
-                    if let Ok(text_bytes) = base64_decode(b64) {
-                        if let Ok(text) = String::from_utf8(text_bytes) {
-                            set_clipboard(&text);
-                        }
-                    }
-                    pos = start + end + 1;
-                } else {
-                    break;
-                }
-            } else if data[pos..].starts_with(b"\x1B]52;query\x07") {
-                // TODO: respond with clipboard contents
-                pos += 11;
-            } else {
-                // Regular response — write to PTY
-                if let Some(pty) = &self.pty {
-                    // Find the end of this response (next marker or end)
-                    let end = data[pos + 1..]
-                        .windows(2)
-                        .position(|w| w == b"\x1B]")
-                        .map(|e| pos + 1 + e)
-                        .unwrap_or(data.len());
-                    let _ = pty.write(&data[pos..end]);
-                    pos = end;
-                } else {
-                    break;
-                }
-            }
-        }
-    }
-
-    fn render(&mut self) {
-        // Drain any PTY data that arrived since new_events().
-        // This is critical for apps that don't use synchronized updates (mode 2026)
-        // like htop and tmux — it gives the kernel buffer maximum time to accumulate
-        // the full screen update before we paint.
-        self.process_pty_output();
-
-        let renderer = match &mut self.renderer {
-            Some(r) => r,
-            None => return,
-        };
-        let state = match &mut self.shared {
-            Some(s) => s,
-            None => return,
-        };
-
-        // Synchronized output (Mode 2026): defer rendering while the application
-        // is mid-update. Dirty bits accumulate and get flushed on the first frame
-        // after sync ends. Timeout after 100ms to prevent a stuck application from
-        // freezing the display.
-        if state.grid.mode.contains(TermMode::SYNC_OUTPUT) {
-            let elapsed = Instant::now().duration_since(self.sync_start);
-            if elapsed.as_millis() < 100 {
-                return;
-            }
-            // Timeout — render anyway and clear the flag
-            state.grid.mode.remove(TermMode::SYNC_OUTPUT);
-        }
-
-        // Cursor blink
-        let now = Instant::now();
-        if now.duration_since(self.last_blink).as_millis() >= config::CURSOR_BLINK_MS as u128 {
-            self.cursor_visible = !self.cursor_visible;
-            self.last_blink = now;
-            state.grid.mark_dirty(state.grid.cursor_row);
-        }
-
-        // Update cursor cell flag — clear old position first
-        let cursor_row = state.grid.cursor_row;
-        let cursor_col = state.grid.cursor_col;
-        let prev_row = self.prev_cursor_row;
-        let prev_col = self.prev_cursor_col;
-
-        // Clear CURSOR flag from previous position
-        if prev_row < state.grid.rows && prev_col < state.grid.cols {
-            state
-                .grid
-                .cell_mut(prev_row, prev_col)
-                .flags
-                .remove(CellFlags::CURSOR);
-            state.grid.mark_dirty(prev_row);
-        }
-
-        // Set CURSOR flag at new position
-        state
-            .grid
-            .cell_mut(cursor_row, cursor_col)
-            .flags
-            .insert(CellFlags::CURSOR);
-        state.grid.mark_dirty(cursor_row);
-
-        self.prev_cursor_row = cursor_row;
-        self.prev_cursor_col = cursor_col;
-
-        renderer.render_frame(&mut state.grid, self.cursor_visible);
-    }
-
-    fn copy_selection(&self) {
-        if let (Some(start), Some(end), Some(state)) =
-            (self.selection_start, self.selection_end, &self.shared)
-        {
-            let mut text = String::new();
-            let (start, end) = if start.1 < end.1 || (start.1 == end.1 && start.0 <= end.0) {
-                (start, end)
-            } else {
-                (end, start)
-            };
-
-            for row in start.1..=end.1 {
-                let from_col = if row == start.1 { start.0 } else { 0 };
-                let to_col = if row == end.1 {
-                    end.0 + 1
-                } else {
-                    state.grid.cols
-                };
-
-                for col in from_col..to_col {
-                    let cell = state.grid.cell(row, col);
-                    if cell.flags.contains(CellFlags::WIDE_CONT) {
-                        continue;
-                    }
-                    if cell.codepoint >= 0x20 {
-                        if let Some(ch) = char::from_u32(cell.codepoint as u32) {
-                            text.push(ch);
-                        }
-                    }
-                }
-                if row < end.1 {
-                    text.push('\n');
-                }
-            }
-
-            set_clipboard(&text);
-        }
-    }
-
-    fn paste_clipboard(&self) {
-        if let Some(text) = get_clipboard() {
-            if let Some(pty) = &self.pty {
-                let bracketed = self
-                    .shared
-                    .as_ref()
-                    .map(|s| s.grid.mode.contains(TermMode::BRACKETED_PASTE))
-                    .unwrap_or(false);
-
-                if bracketed {
-                    let _ = pty.write(b"\x1B[200~");
-                    let _ = pty.write(text.as_bytes());
-                    let _ = pty.write(b"\x1B[201~");
-                } else {
-                    let _ = pty.write(text.as_bytes());
-                }
-            }
-        }
-    }
-
-    /// Convert pixel position to (col, row) cell coordinates.
-    /// winit CursorMoved gives physical pixels on macOS.
-    fn pixel_to_cell(&self, x: f64, y: f64) -> Option<(u16, u16)> {
-        let renderer = self.renderer.as_ref()?;
-        let state = self.shared.as_ref()?;
-        let scale = renderer.scale_factor;
-        let padding = config::PADDING as f64 * scale;
-        // x, y are already in physical pixels — don't multiply by scale
-        let px = x - padding;
-        let py = y - padding;
-        if px < 0.0 || py < 0.0 {
-            return Some((0, 0));
-        }
-        let col = (px / renderer.cell_width as f64) as u16;
-        let row = (py / renderer.cell_height as f64) as u16;
-        let col = col.min(state.grid.cols.saturating_sub(1));
-        let row = row.min(state.grid.rows.saturating_sub(1));
-        Some((col, row))
-    }
-
-    fn update_selection(&mut self) {
-        if let (Some(start), Some(end), Some(state)) =
-            (self.selection_start, self.selection_end, &mut self.shared)
-        {
-            // Normalize start/end
-            let (start, end) = if start.1 < end.1 || (start.1 == end.1 && start.0 <= end.0) {
-                (start, end)
-            } else {
-                (end, start)
-            };
-
-            // Clear old selection
-            let total = state.grid.cols as usize * state.grid.rows as usize;
-            for i in 0..total {
-                state.grid.cells[i].flags.remove(CellFlags::SELECTED);
-            }
-
-            // Set new selection
-            for row in start.1..=end.1 {
-                let from_col = if row == start.1 { start.0 } else { 0 };
-                let to_col = if row == end.1 {
-                    end.0
-                } else {
-                    state.grid.cols - 1
-                };
-                for col in from_col..=to_col {
-                    state
-                        .grid
-                        .cell_mut(row, col)
-                        .flags
-                        .insert(CellFlags::SELECTED);
-                }
-                state.grid.mark_dirty(row);
-            }
-        }
-    }
-
-    fn clear_selection(&mut self) {
-        if self.selection_start.is_some() {
-            self.selection_start = None;
-            self.selection_end = None;
-            if let Some(state) = &mut self.shared {
-                let total = state.grid.cols as usize * state.grid.rows as usize;
-                for i in 0..total {
-                    state.grid.cells[i].flags.remove(CellFlags::SELECTED);
-                }
-                state.grid.mark_all_dirty();
-            }
-        }
-    }
-}
-
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
-        }
-
-        let attrs = WindowAttributes::default()
-            .with_decorations(false)
-            .with_fullscreen(Some(Fullscreen::Borderless(None)));
-        let window = event_loop
-            .create_window(attrs)
-            .expect("failed to create window");
-        let scale = window.scale_factor();
+    fn new(win: &NativeWindow) -> Self {
+        let scale = win.scale_factor();
+        let (phys_w, phys_h) = win.physical_size();
 
         let rasterizer = FontRasterizer::new(config::FONT_FAMILY, config::FONT_SIZE, scale);
         let cell_width = rasterizer.metrics.cell_width;
         let cell_height = rasterizer.metrics.cell_height;
 
-        let win_size = window.inner_size();
         let padding_px = (config::PADDING as f64 * scale) as u32;
-        let cols = (win_size.width - padding_px * 2) / cell_width;
-        let rows = (win_size.height - padding_px * 2) / cell_height;
+        let cols = (phys_w - padding_px * 2) / cell_width;
+        let rows = (phys_h - padding_px * 2) / cell_height;
 
-        let mut renderer = MetalRenderer::new(&window, cols, rows, cell_width, cell_height);
+        let mut renderer = MetalRenderer::new(
+            win.view(),
+            scale,
+            phys_w,
+            phys_h,
+            cols,
+            rows,
+            cell_width,
+            cell_height,
+        );
 
         let mut atlas = Atlas::new(renderer.device(), cell_width, cell_height);
         atlas.preload_ascii(&rasterizer);
@@ -1005,165 +667,373 @@ impl ApplicationHandler for App {
         .expect("failed to spawn PTY");
         let pty = Arc::new(pty);
 
-        self.window = Some(window);
-        self.renderer = Some(renderer);
-        self.rasterizer = Some(rasterizer);
-        self.atlas = Some(atlas);
-        self.shared = Some(SharedState {
-            grid,
-            scrollback,
-            response_buf: Vec::new(),
+        Self {
+            renderer,
+            rasterizer,
+            atlas,
+            shared: SharedState {
+                grid,
+                scrollback,
+                response_buf: Vec::new(),
+                alive: true,
+            },
+            pty,
+            parser: Parser::new(),
+            modifiers: Modifiers::default(),
+            cursor_visible: true,
+            last_blink: Instant::now(),
             alive: true,
-        });
-        self.pty = Some(pty);
+            selection_start: None,
+            selection_end: None,
+            mouse_pressed: false,
+            cursor_pos: (0.0, 0.0),
+            prev_cursor_row: 0,
+            prev_cursor_col: 0,
+            sync_start: Instant::now(),
+        }
     }
 
-    fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: StartCause) {
-        self.process_pty_output();
+    fn process_pty_output(&mut self, win: &NativeWindow) {
+        let pty = self.pty.clone();
+        let mut buf = [0u8; 65536];
+
+        loop {
+            match pty.read(&mut buf) {
+                Ok(0) => {
+                    // EOF — shell exited
+                    self.shared.alive = false;
+                    break;
+                }
+                Ok(n) => {
+                    let was_syncing = self.shared.grid.mode.contains(TermMode::SYNC_OUTPUT);
+                    let mut response_buf = std::mem::take(&mut self.shared.response_buf);
+                    {
+                        let mut performer = TermPerformer {
+                            grid: &mut self.shared.grid,
+                            scrollback: &mut self.shared.scrollback,
+                            atlas: &mut self.atlas,
+                            rasterizer: &self.rasterizer,
+                            response_buf: &mut response_buf,
+                        };
+                        self.parser.parse(&buf[..n], &mut performer);
+                    }
+                    self.shared.response_buf = response_buf;
+
+                    // Record when synchronized output begins
+                    if !was_syncing && self.shared.grid.mode.contains(TermMode::SYNC_OUTPUT) {
+                        self.sync_start = Instant::now();
+                    }
+                }
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::WouldBlock {
+                        break;
+                    }
+                    self.shared.alive = false;
+                    break;
+                }
+            }
+        }
+
+        // Handle responses
+        let responses = std::mem::take(&mut self.shared.response_buf);
+        if !responses.is_empty() {
+            self.handle_responses(&responses, win);
+        }
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn handle_responses(&self, data: &[u8], win: &NativeWindow) {
+        let mut pos = 0;
+        while pos < data.len() {
+            if data[pos..].starts_with(b"\x1B]title:") {
+                let start = pos + 8;
+                if let Some(end) = data[start..].iter().position(|&b| b == 0x07) {
+                    if let Ok(title) = std::str::from_utf8(&data[start..start + end]) {
+                        win.set_title(title);
+                    }
+                    pos = start + end + 1;
+                } else {
+                    break;
+                }
+            } else if data[pos..].starts_with(b"\x1B]52;set:") {
+                let start = pos + 9;
+                if let Some(end) = data[start..].iter().position(|&b| b == 0x07) {
+                    let b64 = &data[start..start + end];
+                    if let Ok(text_bytes) = base64_decode(b64)
+                        && let Ok(text) = String::from_utf8(text_bytes)
+                    {
+                        set_clipboard(&text);
+                    }
+                    pos = start + end + 1;
+                } else {
+                    break;
+                }
+            } else if data[pos..].starts_with(b"\x1B]52;query\x07") {
+                // TODO: respond with clipboard contents
+                pos += 11;
+            } else {
+                // Regular response — write to PTY
+                let end = data[pos + 1..]
+                    .windows(2)
+                    .position(|w| w == b"\x1B]")
+                    .map(|e| pos + 1 + e)
+                    .unwrap_or(data.len());
+                let _ = self.pty.write(&data[pos..end]);
+                pos = end;
+            }
+        }
+    }
+
+    fn render(&mut self, win: &NativeWindow) {
+        // Drain any PTY data that arrived since last poll.
+        self.process_pty_output(win);
+
+        // Synchronized output (Mode 2026): defer rendering while the application
+        // is mid-update. Dirty bits accumulate and get flushed on the first frame
+        // after sync ends. Timeout after 100ms to prevent a stuck application from
+        // freezing the display.
+        if self.shared.grid.mode.contains(TermMode::SYNC_OUTPUT) {
+            let elapsed = Instant::now().duration_since(self.sync_start);
+            if elapsed.as_millis() < 100 {
+                return;
+            }
+            // Timeout — render anyway and clear the flag
+            self.shared.grid.mode.remove(TermMode::SYNC_OUTPUT);
+        }
+
+        // Cursor blink
+        let now = Instant::now();
+        if now.duration_since(self.last_blink).as_millis() >= config::CURSOR_BLINK_MS as u128 {
+            self.cursor_visible = !self.cursor_visible;
+            self.last_blink = now;
+            self.shared.grid.mark_dirty(self.shared.grid.cursor_row);
+        }
+
+        // Update cursor cell flag — clear old position first
+        let cursor_row = self.shared.grid.cursor_row;
+        let cursor_col = self.shared.grid.cursor_col;
+        let prev_row = self.prev_cursor_row;
+        let prev_col = self.prev_cursor_col;
+
+        // Clear CURSOR flag from previous position
+        if prev_row < self.shared.grid.rows && prev_col < self.shared.grid.cols {
+            self.shared
+                .grid
+                .cell_mut(prev_row, prev_col)
+                .flags
+                .remove(CellFlags::CURSOR);
+            self.shared.grid.mark_dirty(prev_row);
+        }
+
+        // Set CURSOR flag at new position
+        self.shared
+            .grid
+            .cell_mut(cursor_row, cursor_col)
+            .flags
+            .insert(CellFlags::CURSOR);
+        self.shared.grid.mark_dirty(cursor_row);
+
+        self.prev_cursor_row = cursor_row;
+        self.prev_cursor_col = cursor_col;
+
+        self.renderer
+            .render_frame(&mut self.shared.grid, self.cursor_visible);
+    }
+
+    fn copy_selection(&self) {
+        if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
+            let mut text = String::new();
+            let (start, end) = if start.1 < end.1 || (start.1 == end.1 && start.0 <= end.0) {
+                (start, end)
+            } else {
+                (end, start)
+            };
+
+            for row in start.1..=end.1 {
+                let from_col = if row == start.1 { start.0 } else { 0 };
+                let to_col = if row == end.1 {
+                    end.0 + 1
+                } else {
+                    self.shared.grid.cols
+                };
+
+                for col in from_col..to_col {
+                    let cell = self.shared.grid.cell(row, col);
+                    if cell.flags.contains(CellFlags::WIDE_CONT) {
+                        continue;
+                    }
+                    if cell.codepoint >= 0x20
+                        && let Some(ch) = char::from_u32(cell.codepoint as u32)
+                    {
+                        text.push(ch);
+                    }
+                }
+                if row < end.1 {
+                    text.push('\n');
+                }
+            }
+
+            set_clipboard(&text);
+        }
+    }
+
+    fn paste_clipboard(&self) {
+        if let Some(text) = get_clipboard() {
+            let bracketed = self.shared.grid.mode.contains(TermMode::BRACKETED_PASTE);
+
+            if bracketed {
+                let _ = self.pty.write(b"\x1B[200~");
+                let _ = self.pty.write(text.as_bytes());
+                let _ = self.pty.write(b"\x1B[201~");
+            } else {
+                let _ = self.pty.write(text.as_bytes());
+            }
+        }
+    }
+
+    /// Convert pixel position to (col, row) cell coordinates.
+    /// Coordinates are in physical pixels.
+    fn pixel_to_cell(&self, x: f64, y: f64) -> (u16, u16) {
+        let scale = self.renderer.scale_factor;
+        let padding = config::PADDING as f64 * scale;
+        let px = x - padding;
+        let py = y - padding;
+        if px < 0.0 || py < 0.0 {
+            return (0, 0);
+        }
+        let col = (px / self.renderer.cell_width as f64) as u16;
+        let row = (py / self.renderer.cell_height as f64) as u16;
+        let col = col.min(self.shared.grid.cols.saturating_sub(1));
+        let row = row.min(self.shared.grid.rows.saturating_sub(1));
+        (col, row)
+    }
+
+    fn update_selection(&mut self) {
+        if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
+            // Normalize start/end
+            let (start, end) = if start.1 < end.1 || (start.1 == end.1 && start.0 <= end.0) {
+                (start, end)
+            } else {
+                (end, start)
+            };
+
+            // Clear old selection
+            let total = self.shared.grid.cols as usize * self.shared.grid.rows as usize;
+            for i in 0..total {
+                self.shared.grid.cells[i].flags.remove(CellFlags::SELECTED);
+            }
+
+            // Set new selection
+            for row in start.1..=end.1 {
+                let from_col = if row == start.1 { start.0 } else { 0 };
+                let to_col = if row == end.1 {
+                    end.0
+                } else {
+                    self.shared.grid.cols - 1
+                };
+                for col in from_col..=to_col {
+                    self.shared
+                        .grid
+                        .cell_mut(row, col)
+                        .flags
+                        .insert(CellFlags::SELECTED);
+                }
+                self.shared.grid.mark_dirty(row);
+            }
+        }
+    }
+
+    fn clear_selection(&mut self) {
+        if self.selection_start.is_some() {
+            self.selection_start = None;
+            self.selection_end = None;
+            let total = self.shared.grid.cols as usize * self.shared.grid.rows as usize;
+            for i in 0..total {
+                self.shared.grid.cells[i].flags.remove(CellFlags::SELECTED);
+            }
+            self.shared.grid.mark_all_dirty();
+        }
+    }
+
+    fn handle_event(&mut self, event: &Event, _win: &NativeWindow) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-
-            WindowEvent::RedrawRequested => {
-                if let Some(state) = &self.shared {
-                    if !state.alive {
-                        event_loop.exit();
-                        return;
-                    }
-                }
-                self.render();
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
+            Event::Closed => {
+                self.alive = false;
             }
 
-            WindowEvent::Resized(size) => {
-                if size.width == 0 || size.height == 0 {
+            Event::Resized { w, h, scale } => {
+                if *w == 0 || *h == 0 {
                     return;
                 }
-                let scale = self.window.as_ref().unwrap().scale_factor();
-                if let Some(renderer) = &mut self.renderer {
-                    renderer.resize(size.width, size.height, scale);
-                    let cols = renderer.cols as u16;
-                    let rows = renderer.rows as u16;
-                    if let Some(state) = &mut self.shared {
-                        state.grid.resize(cols, rows);
-                    }
-                    if let Some(pty) = &self.pty {
-                        pty.resize(
-                            cols,
-                            rows,
-                            renderer.cell_width as u16,
-                            renderer.cell_height as u16,
-                        );
-                    }
-                }
+                self.renderer.resize(*w, *h, *scale);
+                let cols = self.renderer.cols as u16;
+                let rows = self.renderer.rows as u16;
+                self.shared.grid.resize(cols, rows);
+                self.pty.resize(
+                    cols,
+                    rows,
+                    self.renderer.cell_width as u16,
+                    self.renderer.cell_height as u16,
+                );
             }
 
-            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                if let (Some(renderer), Some(atlas)) = (&mut self.renderer, &mut self.atlas) {
-                    let rasterizer =
-                        FontRasterizer::new(config::FONT_FAMILY, config::FONT_SIZE, scale_factor);
-                    renderer.cell_width = rasterizer.metrics.cell_width;
-                    renderer.cell_height = rasterizer.metrics.cell_height;
-                    *atlas = Atlas::new(
-                        renderer.device(),
-                        rasterizer.metrics.cell_width,
-                        rasterizer.metrics.cell_height,
-                    );
-                    atlas.preload_ascii(&rasterizer);
-                    renderer.atlas_texture = atlas.texture.clone();
-                    self.rasterizer = Some(rasterizer);
-                }
+            Event::ModifiersChanged { modifiers } => {
+                self.modifiers = *modifiers;
             }
 
-            WindowEvent::ModifiersChanged(mods) => {
-                self.modifiers = mods.state();
-            }
-
-            WindowEvent::KeyboardInput { event, .. } => {
-                if event.state != ElementState::Pressed {
-                    return;
-                }
-
-                // Cmd+C
-                if self.modifiers.super_key() && event.logical_key == Key::Character("c".into()) {
-                    self.copy_selection();
-                    return;
-                }
-                // Cmd+V
-                if self.modifiers.super_key() && event.logical_key == Key::Character("v".into()) {
-                    self.paste_clipboard();
-                    return;
-                }
-
-                let term_mode = self
-                    .shared
-                    .as_ref()
-                    .map(|s| s.grid.mode)
-                    .unwrap_or_default();
-
-                if let Some(bytes) =
-                    input::key_to_bytes(&event.logical_key, &self.modifiers, term_mode)
+            Event::KeyDown { key, modifiers } => {
+                // Cmd+Q/C/V shortcuts
+                if modifiers.super_key()
+                    && let Key::Character(s) = key
                 {
-                    if let Some(pty) = &self.pty {
-                        let _ = pty.write(&bytes);
+                    match s.as_str() {
+                        "q" => {
+                            self.alive = false;
+                            return;
+                        }
+                        "c" => {
+                            self.copy_selection();
+                            return;
+                        }
+                        "v" => {
+                            self.paste_clipboard();
+                            return;
+                        }
+                        _ => {}
                     }
+                }
+
+                let term_mode = self.shared.grid.mode;
+
+                if let Some(bytes) = input::key_to_bytes(key, modifiers, term_mode) {
+                    let _ = self.pty.write(&bytes);
                     self.cursor_visible = true;
                     self.last_blink = Instant::now();
                 }
             }
 
-            WindowEvent::CursorMoved { position, .. } => {
-                self.cursor_pos = (position.x, position.y);
+            Event::MouseDown { x, y } => {
+                self.clear_selection();
+                self.mouse_pressed = true;
+                let cell = self.pixel_to_cell(*x, *y);
+                self.cursor_pos = (*x, *y);
+                self.selection_start = Some(cell);
+                self.selection_end = Some(cell);
+            }
+
+            Event::MouseUp { x, y } => {
+                self.cursor_pos = (*x, *y);
+                self.mouse_pressed = false;
+            }
+
+            Event::MouseDragged { x, y } => {
+                self.cursor_pos = (*x, *y);
                 if self.mouse_pressed {
-                    if let Some(cell) = self.pixel_to_cell(position.x, position.y) {
-                        self.selection_end = Some(cell);
-                        self.update_selection();
-                    }
+                    let cell = self.pixel_to_cell(*x, *y);
+                    self.selection_end = Some(cell);
+                    self.update_selection();
                 }
             }
-
-            WindowEvent::MouseInput {
-                state: btn_state,
-                button,
-                ..
-            } => {
-                if button == MouseButton::Left {
-                    match btn_state {
-                        ElementState::Pressed => {
-                            self.clear_selection();
-                            self.mouse_pressed = true;
-                            if let Some(cell) =
-                                self.pixel_to_cell(self.cursor_pos.0, self.cursor_pos.1)
-                            {
-                                self.selection_start = Some(cell);
-                                self.selection_end = Some(cell);
-                            }
-                        }
-                        ElementState::Released => {
-                            self.mouse_pressed = false;
-                        }
-                    }
-                }
-            }
-
-            _ => {}
         }
-    }
-
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some(w) = &self.window {
-            w.request_redraw();
-        }
-        event_loop.set_control_flow(ControlFlow::Poll);
     }
 }
 
@@ -1217,8 +1087,22 @@ fn main() {
         return;
     }
 
-    let event_loop = EventLoop::new().expect("failed to create event loop");
-    event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::new();
-    event_loop.run_app(&mut app).expect("event loop failed");
+    let mut win = NativeWindow::new();
+    let mut app = App::new(&win);
+
+    loop {
+        objc2::rc::autoreleasepool(|_| {
+            app.process_pty_output(&win);
+
+            for event in &win.poll_events() {
+                app.handle_event(event, &win);
+            }
+
+            app.render(&win);
+        });
+
+        if !app.alive || !app.shared.alive {
+            break;
+        }
+    }
 }

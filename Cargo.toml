@@ -7,9 +7,8 @@ build = "build.rs"
 [dependencies]
 metal = "0.33"
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSArray"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["NSView", "NSResponder", "NSPasteboard"] }
-winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSDate", "NSObjCRuntime", "NSRunLoop"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSView", "NSResponder", "NSPasteboard", "NSApplication", "NSEvent", "NSGraphics", "NSScreen", "NSWindow", "NSRunningApplication", "objc2-core-foundation"] }
 bytemuck = { version = "1", features = ["derive"] }
 bitflags = "2"
 bitvec = "1"
