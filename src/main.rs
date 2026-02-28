@@ -1295,6 +1295,22 @@ impl App {
                 );
                 if mouse_mode {
                     let sgr = self.shared.grid.mode.contains(TermMode::MOUSE_SGR);
+                    let motion_mode = self
+                        .shared
+                        .grid
+                        .mode
+                        .intersects(TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL);
+                    // tmux's MouseDragEnd binding runs copy-selection based on
+                    // wherever the cursor was last moved by a drag event. The
+                    // OS-delivered drag stream ends one frame before the button-up,
+                    // so the last drag event is always slightly behind the actual
+                    // release position. Send a synthetic drag at the release
+                    // coordinates first so tmux's cursor lands on the right cell
+                    // before the button-up triggers the copy.
+                    if motion_mode && self.mouse_pressed {
+                        let bytes = input::mouse_to_bytes(32, cell.0 + 1, cell.1 + 1, true, sgr);
+                        let _ = self.pty.write(&bytes);
+                    }
                     if sgr {
                         let bytes = input::mouse_to_bytes(0, cell.0 + 1, cell.1 + 1, false, true);
                         let _ = self.pty.write(&bytes);
