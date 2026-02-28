@@ -107,7 +107,7 @@ impl Grid {
             cursor_col: 0,
             cursor_pending_wrap: false,
             attr,
-            mode: TermMode::AUTO_WRAP | TermMode::CURSOR_VISIBLE,
+            mode: TermMode::AUTO_WRAP | TermMode::CURSOR_VISIBLE | TermMode::BRACKETED_PASTE,
             scroll_top: 0,
             scroll_bottom: rows.saturating_sub(1),
             charset_g0: 0,
