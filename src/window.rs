@@ -2,8 +2,8 @@ use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly, define_class};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask,
-    NSEventModifierFlags, NSEventType, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior,
-    NSWindowStyleMask,
+    NSEventModifierFlags, NSEventPhase, NSEventType, NSScreen, NSView, NSWindow,
+    NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_foundation::{NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString};
 
@@ -288,7 +288,13 @@ impl NativeWindow {
                 let (x, y) = self.mouse_position(&event);
                 let delta_y = event.scrollingDeltaY();
                 let precise = event.hasPreciseScrollingDeltas();
-                if delta_y != 0.0 {
+                // Suppress trackpad momentum (inertia) events — after the user
+                // lifts their fingers, macOS keeps firing scroll events with
+                // decreasing deltas. In mouse mode these get forwarded to the
+                // PTY (e.g. tmux), silently shifting the view while the user is
+                // about to click for selection.
+                let momentum = event.momentumPhase();
+                if delta_y != 0.0 && momentum == NSEventPhase::None {
                     self.events.push(Event::ScrollWheel {
                         x,
                         y,
