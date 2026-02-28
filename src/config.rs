@@ -22,9 +22,6 @@ pub const DEFAULT_FG: u32 = 0x00ffffff;
 /// Default background color (palette index 0)
 pub const DEFAULT_BG: u32 = 0x00000000;
 
-/// Cursor blink interval in milliseconds
-pub const CURSOR_BLINK_MS: u64 = 1000;
-
 /// xterm-256color palette: ANSI 0-15 (tweaked), 16-231 (6x6x6 cube), 232-255 (grayscale)
 pub const PALETTE: [u32; 256] = {
     let mut p = [0u32; 256];

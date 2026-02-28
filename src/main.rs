@@ -862,7 +862,6 @@ struct App {
     parser: Parser,
     modifiers: Modifiers,
     cursor_visible: bool,
-    last_blink: Instant,
     alive: bool,
 
     // Selection state
@@ -935,7 +934,6 @@ impl App {
             parser: Parser::new(),
             modifiers: Modifiers::default(),
             cursor_visible: true,
-            last_blink: Instant::now(),
             alive: true,
             selection_start: None,
             selection_end: None,
@@ -1054,18 +1052,9 @@ impl App {
             self.shared.grid.sync_start = None;
         }
 
-        // Cursor blink — only when DECTCEM (CURSOR_VISIBLE mode) is set
-        let dectcem = self.shared.grid.mode.contains(TermMode::CURSOR_VISIBLE);
-        let now = Instant::now();
+        // Cursor visible when DECTCEM (CURSOR_VISIBLE mode) is set
         let prev_visible = self.cursor_visible;
-
-        if !dectcem {
-            self.cursor_visible = false;
-        } else if now.duration_since(self.last_blink).as_millis() >= config::CURSOR_BLINK_MS as u128
-        {
-            self.cursor_visible = !self.cursor_visible;
-            self.last_blink = now;
-        }
+        self.cursor_visible = self.shared.grid.mode.contains(TermMode::CURSOR_VISIBLE);
 
         // Update cursor cell flag — only if position or visibility changed
         let cursor_row = self.shared.grid.cursor_row;
@@ -1276,7 +1265,6 @@ impl App {
                 if let Some(bytes) = input::key_to_bytes(key, modifiers, term_mode) {
                     let _ = self.pty.write(&bytes);
                     self.cursor_visible = true;
-                    self.last_blink = Instant::now();
                 }
             }
 
