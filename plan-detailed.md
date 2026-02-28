@@ -2,7 +2,7 @@
 
 ## Overview
 
-Minimalist terminal emulator for macOS. Compute-shader-only Metal renderer (no vertex pipeline), SIMD VT parser (NEON), Apple Silicon only. Goal: outperform Alacritty on input latency, throughput, and power efficiency.
+Minimalist terminal emulator for macOS. Compute-shader-only Metal renderer (no vertex pipeline), SIMD VT parser (NEON), Apple Silicon only. Single-threaded event loop with native AppKit windowing (no winit).
 
 ## Decision Log
 
@@ -10,32 +10,32 @@ Minimalist terminal emulator for macOS. Compute-shader-only Metal renderer (no v
 |---|---|---|---|
 | 1 | Atlas coords | `u8×u8`, 2048 atlas | 20K+ slots sufficient for v1. Revisit if needed. |
 | 2 | Codepoint field | Keep `u16` in CellData | GPU doesn't use it but useful for debugging. BMP-only fine for v1. |
-| 3 | Metal layer setup | Inline `raw-window-metal` logic | ~30 lines of objc, no extra dependency. |
-| 4 | Grid sync | Single `Mutex` | Critical section is tiny (memcpy dirty rows). Upgrade if profiling shows contention. |
+| 3 | Metal layer setup | Native `objc2` AppKit | `NativeWindow` in `window.rs` — NSApplication + NSWindow + TtyView (NSView subclass). No winit, no cocoa crate. |
+| 4 | Grid sync | Single-threaded, no Mutex | Everything runs in one thread — no lock needed. |
 | 5 | DECSET scope | Full list + mode 2026 (synchronized output) | Enough for nvim/tmux/htop. Sync output prevents tearing. |
 | 6 | Config | Compile-time `config.rs` constants | No runtime config parsing. Change and recompile. |
-| 7 | Wide chars | Double-width atlas slots | Wide glyphs get 2×cell_width slot. Shader checks wide flag. |
+| 7 | Wide chars | Single-width atlas slots, overflow | Wide glyphs rasterized at 2×cell_width but stored starting at a single grid slot, overflowing into adjacent pixel space. Shader checks wide flag. |
 | 8 | Bold | Bright colors only | No bold font variant in v1. Simplifies atlas (regular weight only). |
-| 9 | Subpixel AA | Grayscale R8 only | Simpler shader, fine on Retina. macOS disabled subpixel AA in Mojave. |
+| 9 | Subpixel AA | Weighted grayscale R8 | RGBA context with `FONT_SMOOTH_WEIGHT` blend between min-channel (thinnest) and average (medium). Fine on Retina. |
 | 10 | Resize reflow | No reflow | Resize changes grid dims + SIGWINCH. Wrapped lines stay wrapped. |
 | 11 | Clipboard | Cmd+C/V + OSC 52 | NSPasteboard for GUI copy/paste. OSC 52 for programmatic (tmux/nvim over SSH). |
-| 12 | Cursor shape | Block only | Ignore DECSCUSR. Single cursor style. |
-| 13 | Font | Menlo 13pt | Ships with every macOS. |
+| 12 | Cursor shape | Block only | Ignore DECSCUSR. Single cursor style with blink. |
+| 13 | Font | Hack 16pt | Configured in `config.rs`. CoreText rasterization with `CTFontCreateForString` fallback for missing glyphs. |
 | 14 | TERM | `xterm-256color` | Universal terminfo. No custom terminfo entry. |
-| 15 | Scrollback | Ring buffer, fixed width | Pre-allocated. Old rows padded/truncated to current width. Cache-friendly. |
-| 16 | Box drawing | Procedural in shader | Pixel-perfect alignment for U+2500–U+257F. Lookup table for edge connectivity. |
-| 17 | Color scheme | Tweaked (Alacritty-style) | Softer ANSI colors. bg #1d1f21, fg #c5c8c6. |
-| 18 | Selection | Simple linear model | Click-drag, double-click word, triple-click line. Rendered as inverted fg/bg. |
-| 19 | Window padding | Configurable, 8px default | Constant in config.rs. Shader offsets grid origin. |
+| 15 | Scrollback | Ring buffer, fixed width | `Vec<Vec<Cell>>`. Old rows stored at the terminal width at time of eviction. |
+| 16 | Box drawing | Procedural in shader | Pixel-perfect alignment for U+2500–U+257F. 128-entry lookup table for edge connectivity + weight. |
+| 17 | Color scheme | Dracula-inspired | ANSI colors: bg #000000, fg #ffffff. Bright palette with distinctive colors per index. |
+| 18 | Selection | Simple linear model | Click-drag only (no double/triple-click). Rendered as inverted fg/bg via SELECTED cell flag. |
+| 19 | Window padding | 16px default | Constant in config.rs. Shader offsets grid origin. Padding top respects notch safe area. |
 | 20 | Transparency | Opaque only | layer.setOpaque(true). No alpha compositing. |
-| 21 | Shell exit | Close window immediately | Shell exits → process exits. |
-| 22 | Framerate | Display-synced + frame skip | 60Hz/120Hz via displaySyncEnabled. Zero GPU work when idle. |
-| 23 | DEC graphics | G0/G1 character set support | 96-entry lookup table. Required for tmux/ncurses. |
-| 24 | DPI change | Eager atlas rebuild | ScaleFactorChanged → clear + rebuild atlas (~10ms). |
-| 25 | Option key | Always Meta | Both Option keys send ESC prefix. Simplest. Matches Alacritty. |
-| 26 | Cmd shortcuts | Cmd+C/V only | Clipboard only. Cmd+Q/W via AppKit defaults. |
-| 27 | Window size | Native fullscreen | Launch into macOS borderless fullscreen. Grid auto-sizes. |
-| 28 | Intel support | Apple Silicon only | NEON-only SIMD, no SSE2 fallbacks. StorageMode::Shared everywhere. |
+| 21 | Shell exit | Close window immediately | Shell exits → `alive = false` → loop breaks → process exits. |
+| 22 | Framerate | kqueue idle + 8ms poll | displaySyncEnabled for vsync. kqueue on PTY fd for immediate wake on shell output. 8ms timeout for AppKit event polling. Zero GPU work when idle. |
+| 23 | DEC graphics | G0/G1 character set support | 31-entry lookup table (0x60–0x7E). Required for tmux/ncurses. |
+| 24 | DPI change | Handled via resize event | NativeWindow detects scale factor changes, triggers resize path. |
+| 25 | Option key | Always Meta | Both Option keys send ESC prefix. Simplest. |
+| 26 | Cmd shortcuts | Cmd+Q/C/V | Cmd+Q quits, Cmd+C copies selection, Cmd+V pastes. All other Cmd combos ignored (not sent to PTY). |
+| 27 | Window size | Native fullscreen | Launch into macOS fullscreen with suppressed animation. Notch-aware safe area inset. |
+| 28 | Intel support | Apple Silicon only | NEON-only SIMD, scalar fallback compiled but untested. StorageMode::Shared everywhere. |
 | 29 | Environment | TERM only, inherit parent | Set TERM=xterm-256color. Pass through parent env otherwise. |
 
 ---
@@ -43,29 +43,29 @@ Minimalist terminal emulator for macOS. Compute-shader-only Metal renderer (no v
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│                  Main Thread                     │
-│  winit event loop → keyboard/mouse → PTY write  │
-│  CAMetalLayer ← present drawable                 │
-└────────┬──────────────────────────┬──────────────┘
-         │                          │
-    ┌────▼────┐              ┌──────▼──────┐
-    │ I/O     │              │ Render      │
-    │ Thread  │              │ Thread      │
-    │         │   Grid+Dirty │             │
-    │ PTY read├──────────────► Upload dirty│
-    │ SIMD VT │   (Mutex)    │ rows to GPU │
-    │ parse   │              │ Dispatch    │
-    │ Grid    │              │ compute     │
-    │ mutate  │              │ Present     │
-    └─────────┘              └─────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                    Single Thread (main loop)                  │
+│                                                              │
+│  1. process_pty_output()  — read PTY, feed parser, mutate grid│
+│  2. poll_events()         — drain AppKit events               │
+│  3. handle_event()        — keys/mouse → PTY write / state    │
+│  4. render()              — drain PTY again, upload grid, GPU  │
+│  5. if idle → kqueue wait — block on PTY fd, 8ms timeout      │
+│                                                              │
+│  NativeWindow (objc2 AppKit)    MetalRenderer (CAMetalLayer) │
+│  Parser (SIMD + state machine)  Grid + Scrollback            │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ### Threading Model
 
-- **Main thread**: winit event loop, AppKit, keyboard/mouse input → PTY write
-- **I/O thread**: PTY read (kqueue), SIMD VT parsing, grid state mutation, dirty flag setting
-- **Render thread**: Metal rendering — lock grid (Mutex), upload dirty rows, dispatch compute, present
+Single-threaded. A manual `loop` in `main()` drives everything:
+
+- **Event polling**: `NativeWindow::poll_events()` drains AppKit event queue (keys, mouse, resize, focus)
+- **PTY I/O**: Non-blocking `libc::read()`/`libc::write()` on the master fd in the main loop
+- **Parsing**: SIMD VT parser runs synchronously, mutates grid directly (no locking)
+- **Rendering**: Metal compute dispatch via `render_frame()`, GPU work is the only async component
+- **Idle**: kqueue on PTY fd with 8ms timeout — wakes immediately on shell output, falls back to polling AppKit
 
 ---
 
@@ -74,36 +74,37 @@ Minimalist terminal emulator for macOS. Compute-shader-only Metal renderer (no v
 ```
 tty.app/
 ├── Cargo.toml
-├── build.rs                    # Metal shader compilation
+├── build.rs                    # Records rustc commit hash for --version
 ├── src/
-│   ├── main.rs                 # Entry point, winit bootstrap, thread spawning
+│   ├── main.rs                 # Entry point, App struct, TermPerformer, event loop
+│   ├── lib.rs                  # Re-exports config, parser, terminal as public modules
 │   ├── config.rs               # Compile-time constants (font, colors, padding, scrollback)
+│   ├── window.rs               # NativeWindow (objc2 AppKit), TtyView, Event types, key translation
+│   ├── input.rs                # Key/mouse events → VT byte sequences
 │   ├── terminal/
 │   │   ├── mod.rs
-│   │   ├── grid.rs             # Cell grid, dirty tracking bitset, cursor state
+│   │   ├── grid.rs             # Cell grid, dirty tracking bitset, cursor state, alt-screen
 │   │   ├── cell.rs             # Cell struct (must match Metal CellData layout)
 │   │   └── scrollback.rs       # Scrollback ring buffer
 │   ├── parser/
 │   │   ├── mod.rs              # Parser public API, 3-layer dispatch
 │   │   ├── simd.rs             # NEON byte classifier + ASCII run scanner
-│   │   ├── csi_fast.rs         # Optimistic CSI parser (SGR, cursor, erase)
+│   │   ├── csi_fast.rs         # Optimistic CSI parser (~25 sequences, handles colon sub-params)
 │   │   ├── state_machine.rs    # Full VT state machine (Paul Williams model)
-│   │   ├── table.rs            # Packed transition table (375 bytes)
+│   │   ├── table.rs            # Packed transition table (14 states × 24 classes = 336 entries)
 │   │   ├── perform.rs          # Perform trait (parser → grid interface)
 │   │   ├── utf8.rs             # UTF-8 codepoint assembler
 │   │   └── charset.rs          # G0/G1 character set translation (DEC Special Graphics)
 │   ├── renderer/
 │   │   ├── mod.rs
-│   │   ├── metal.rs            # Device, queue, pipeline, triple-buffer, dispatch
-│   │   ├── atlas.rs            # Glyph texture atlas (grid packing, LRU)
-│   │   ├── font.rs             # CoreText rasterization → R8 alpha bitmaps
+│   │   ├── metal.rs            # Device, queue, pipeline, double-buffer, dispatch
+│   │   ├── atlas.rs            # Glyph texture atlas (grid packing, LRU, font fallback)
+│   │   ├── font.rs             # CoreText rasterization → weighted R8 alpha bitmaps
 │   │   └── shader.metal        # Compute shader (glyph render + box drawing + cursor)
-│   ├── pty/
-│   │   └── mod.rs              # forkpty + kqueue non-blocking I/O
-│   └── input.rs                # Key event → VT byte sequence translation
-└── benches/
-    ├── parser_bench.rs
-    └── render_bench.rs
+│   └── pty/
+│       └── mod.rs              # libc::forkpty, non-blocking read/write, TIOCSWINSZ resize
+└── tests/
+    └── parser_tests.rs         # Split-boundary and UTF-8 reassembly tests
 ```
 
 ---
@@ -114,15 +115,18 @@ tty.app/
 Offset  Size  Field       Description
 0       2     codepoint   Unicode BMP (u16). Debugging aid; shader uses atlas coords.
 2       2     flags       Bitfield:
-                            [0]    wide         — this cell starts a wide character
-                            [1]    wide_cont    — continuation of wide char (skip rendering)
-                            [2]    underline
-                            [3]    strikethrough
-                            [4]    inverse
-                            [5]    cursor       — cursor is on this cell
-                            [6]    selected     — selection highlight active
-                            [7:8]  reserved
-                            [9:15] reserved
+                            [0]    WIDE         — this cell starts a wide character
+                            [1]    WIDE_CONT    — continuation of wide char
+                            [2]    UNDERLINE
+                            [3]    STRIKE
+                            [4]    INVERSE
+                            [5]    CURSOR       — cursor is on this cell
+                            [6]    SELECTED     — selection highlight active
+                            [7]    BOLD         — triggers bright color mapping in shader
+                            [8]    ITALIC
+                            [9]    DIM
+                            [10]   HIDDEN       — fg = bg in shader
+                            [11:15] reserved
 4       1     fg_index    0-255 xterm palette. 0xFF = use fg_rgb field.
 5       1     bg_index    0-255 xterm palette. 0xFF = use bg_rgb field.
 6       1     atlas_x     Glyph column in atlas grid.
@@ -135,71 +139,64 @@ Offset  Size  Field       Description
 
 ## Phase 1: Metal Window + Compute Shader
 
-**Goal**: winit fullscreen window with CAMetalLayer, compute shader fills drawable with a solid color.
+**Goal**: Native fullscreen window with CAMetalLayer, compute shader fills drawable with a solid color.
 
-**Files**: `Cargo.toml`, `build.rs`, `src/main.rs`, `src/config.rs`, `src/renderer/mod.rs`, `src/renderer/metal.rs`, `src/renderer/shader.metal`
+**Files**: `Cargo.toml`, `build.rs`, `src/main.rs`, `src/window.rs`, `src/config.rs`, `src/renderer/mod.rs`, `src/renderer/metal.rs`, `src/renderer/shader.metal`
 
 ### Cargo.toml Dependencies
 
 ```toml
 [dependencies]
-metal = "0.32"
-objc = "0.2"
-cocoa = "0.26"
-winit = "0.30"
+metal = "0.33"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [...] }
+objc2-app-kit = { version = "0.3", features = [...] }
 bytemuck = { version = "1", features = ["derive"] }
 bitflags = "2"
 bitvec = "1"
 core-foundation = "0.10"
-core-graphics = "0.24"
-core-text = "20"
-foreign-types = "0.5"
-log = "0.4"
-env_logger = "0.11"
+core-graphics = "0.25"
+core-graphics-types = "0.2"
+core-text = "21"
+block = "0.1"
+libc = "0.2"
 ```
 
 ### build.rs
 
-- Compile `src/renderer/shader.metal` → `shader.air` → `shader.metallib`
-- Command: `xcrun -sdk macosx metal -c shader.metal -o shader.air -ffast-math -std=metal3.0`
-- Command: `xcrun -sdk macosx metallib shader.air -o shader.metallib`
-- Embed in binary via `include_bytes!(concat!(env!("OUT_DIR"), "/shader.metallib"))`
+Records the rustc commit hash into `TTY_RUSTC_COMMIT` env var for `--version` output. Shader is compiled at runtime via `include_str!` + `new_library_with_source()`, not pre-compiled.
 
-### Metal Setup Sequence
+### Window Setup (window.rs)
+
+1. `NSApplication::sharedApplication()` → `setActivationPolicy(Regular)` → `finishLaunching()`
+2. Create `NSWindow` with `FullSizeContentView` style, transparent titlebar, black background
+3. `TtyView` (NSView subclass via `define_class!`) set as content view
+4. Enable `FullScreenPrimary` collection behavior
+5. Enter native fullscreen with suppressed animation via `NSAnimationContext`
+6. Detect notch safe area via `safeAreaInsets`
+
+### Metal Setup Sequence (metal.rs)
 
 1. `Device::system_default()`
-2. Create `CAMetalLayer` via inline objc (from NSView obtained via winit's `HasWindowHandle`)
-3. Set pixel format `BGRAUnorm`, `framebufferOnly = false`, `displaySyncEnabled = true`
-4. Create compute pipeline from compiled metallib
-5. Create command queue
-6. Render loop: `next_drawable()` → encode compute → dispatch threads → present → commit
-
-### Compute Shader (Phase 1)
-
-Simple: one thread per pixel, writes a solid color to the output texture.
-
-```metal
-kernel void render(
-    texture2d<half, access::write> output [[texture(0)]],
-    uint2 gid [[thread_position_in_grid]]
-) {
-    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
-    output.write(half4(0.114, 0.122, 0.129, 1.0), gid);  // #1d1f21
-}
-```
+2. Create `MetalLayer`, set pixel format `BGRA8Unorm`, `framebufferOnly = false`, `displaySyncEnabled = true`, `presentsWithTransaction = true`
+3. Attach layer to TtyView via `setLayer:`
+4. Compile shader from source at runtime: `include_str!("shader.metal")` → `new_library_with_source()` with fast math
+5. Create compute pipeline from `render` function
+6. Create command queue
+7. Render loop: check dirty → spin-wait buffer → memcpy grid → `next_drawable()` → encode compute → dispatch → present → commit
 
 ### config.rs
 
 ```rust
-pub const FONT_FAMILY: &str = "Menlo";
-pub const FONT_SIZE: f64 = 13.0;
-pub const PADDING: u32 = 8;
+pub const FONT_FAMILY: &str = "Hack";
+pub const FONT_SIZE: f64 = 16.0;
+pub const FONT_SMOOTH_WEIGHT: f32 = 0.3;
+pub const PADDING: u32 = 16;
 pub const SCROLLBACK_LINES: usize = 10_000;
-
-// Tweaked palette (Alacritty-style)
-pub const DEFAULT_FG: u32 = 0x00c5c8c6;
-pub const DEFAULT_BG: u32 = 0x001d1f21;
-pub const PALETTE: [u32; 256] = [ /* ... */ ];
+pub const DEFAULT_FG: u32 = 0x00ffffff;
+pub const DEFAULT_BG: u32 = 0x00000000;
+pub const CURSOR_BLINK_MS: u64 = 1000;
+pub const PALETTE: [u32; 256] = { /* const block: Dracula-inspired ANSI 0-15, 6×6×6 cube, 24-step grayscale */ };
 ```
 
 ---
@@ -212,29 +209,24 @@ pub const PALETTE: [u32; 256] = [ /* ... */ ];
 
 ### Font Rasterization (font.rs)
 
-- Load font via `CTFont::new_from_name("Menlo", 13.0)` at current DPI scale
-- Measure cell size: `CTFont::bounding_rects_for_glyphs()` for advance width, `ascent + descent + leading` for height
+- Load font via `ct_font::new_from_name("Hack", 16.0 * scale)` at current DPI scale
+- Measure cell size: `get_advances_for_glyphs()` on 'M' for advance width, `ascent + descent + leading` for height
+- Font fallback: `CTFontCreateForString` (FFI) finds system fonts for glyphs missing from primary font
 - Rasterize each glyph:
   1. Get glyph index from codepoint via `CTFont::get_glyphs_for_characters()`
-  2. Create `CGBitmapContext` with `kCGImageAlphaOnly` (8-bit grayscale)
-  3. Draw glyph with `CTFont::draw_glyphs()` at baseline position
-  4. Extract pixel buffer → R8 alpha bitmap
+  2. Create `CGBitmapContext` with `kCGImageAlphaNoneSkipLast` (RGBA — required by CoreText)
+  3. Draw glyph in white on black with `CTFont::draw_glyphs()` at baseline position
+  4. Extract weighted single-channel alpha: blend between min(R,G,B) and avg(R,G,B) controlled by `FONT_SMOOTH_WEIGHT`
 
 ### Atlas (atlas.rs)
 
 - 2048×2048 `MTLTexture` with `PixelFormat::R8Unorm`, `StorageMode::Shared`
-- Grid layout: uniform cell slots, `(2048 / cell_w) × (2048 / cell_h)` slots
-- At startup: pre-rasterize ASCII 0x20–0x7E (95 glyphs, regular weight only since bold = bright colors)
-- HashMap<GlyphKey, AtlasPosition> for lookup (GlyphKey = codepoint + wide flag)
-- LRU eviction for non-ASCII glyphs. ASCII permanently pinned (slot indices 0–94).
-- Wide glyphs get a double-width slot (uses two adjacent columns in the grid)
+- Grid layout: uniform cell-width slots, `(2048 / cell_w) × (2048 / cell_h)` slots
+- At startup: pre-rasterize ASCII 0x20–0x7E (95 glyphs, regular weight only since bold = bright colors). These are pinned and never evicted.
+- `HashMap<GlyphKey, AtlasPos>` for lookup (GlyphKey = codepoint + wide flag, AtlasPos = u8 × u8 grid coords)
+- LRU eviction for non-ASCII glyphs: `frame` counter tracks last-access per slot, `evict_lru()` finds minimum
+- Wide glyphs rasterized at 2×cell_width but stored starting at a single grid slot, overflowing into adjacent pixel space
 - Upload via `texture.replace_region()` for individual slots
-- On DPI change: clear entire atlas, re-rasterize from scratch
-
-### DPI Handling
-
-- Track current scale factor from winit
-- On `ScaleFactorChanged`: re-create CTFont at new size × scale, clear atlas, re-rasterize ASCII, recalculate cell dimensions
 
 ---
 
@@ -248,29 +240,35 @@ pub const PALETTE: [u32; 256] = [ /* ... */ ];
 
 - `Grid { cells: Vec<Cell>, cols: u16, rows: u16, dirty: BitVec }`
 - `dirty`: one bit per row, managed by `bitvec`
-- Cursor position: `(col, row)` stored in grid
-- `mark_dirty(row)` / `is_dirty(row)` / `clear_dirty()`
-- Resize: reallocate cells, send SIGWINCH to PTY
+- Cursor position: `(cursor_col, cursor_row)` stored in grid
+- `mark_dirty(row)` / `mark_all_dirty()` / `clear_dirty()`
+- `cursor_pending_wrap`: DECAWM deferred wrap flag
+- `mode: TermMode` bitflags for all DECSET modes
+- `saved_cursor: SavedCursor` for DECSC/DECRC
+- `sync_start: Option<Instant>` for mode 2026 timeout
+- Alt-screen: `alt_cells: Vec<Cell>` + `main_cursor: SavedCursor`
+- Resize: reallocate cells, copy preserved content, rebuild tab stops, send SIGWINCH to PTY
 
-### Triple-Buffered Frame Pipeline
+### Double-Buffered Frame Pipeline
 
 ```
-3 × MTLBuffer for CellData (StorageMode::Shared)
-  Size: max_rows × max_cols × 16 bytes each
-dispatch_semaphore(3) for frame pacing
+2 × MTLBuffer for CellData (StorageMode::Shared)
+  Size: rows × cols × 16 bytes each
+AtomicBool per buffer for GPU completion signaling
 
 Per frame:
-  1. semaphore.wait()
-  2. Lock grid mutex
-  3. For each dirty row: memcpy row to cell_buffers[frame_idx % 3]
-  4. Copy dirty bitset, clear it
-  5. Unlock grid mutex
-  6. If nothing was dirty → semaphore.signal(), skip to next frame
-  7. next_drawable()
-  8. Encode compute: bind cell_buffer, atlas_texture, palette_buffer, uniforms
-  9. dispatch_threads(drawable_size, threadgroup_size(16, 16, 1))
-  10. present_drawable + commit
-  11. add_completed_handler { semaphore.signal() }
+  1. Check dirty.any() — skip frame if nothing changed (and !needs_render)
+  2. Spin-wait for target buffer to be free (AtomicBool, rarely spins)
+  3. ptr::copy_nonoverlapping(grid.cells → cell_buffer) — bulk memcpy entire grid
+  4. Clear dirty bits
+  5. next_drawable() — if None, set needs_render = true, return
+  6. Update uniforms (cols, rows, cell size, padding, cursor pos, etc.)
+  7. Encode compute: bind cell_buffer, atlas_texture, palette_buffer, uniforms
+  8. dispatch_threads(framebuffer_size, threadgroup_size(16, 16, 1))
+  9. Mark buffer in-flight (AtomicBool = false)
+  10. add_completed_handler { AtomicBool = true }
+  11. commit() + wait_until_scheduled() + present()
+  12. Swap to other buffer for next frame
 ```
 
 ### Shader Uniforms
@@ -284,61 +282,40 @@ struct Uniforms {
     uint  atlas_cell_width;
     uint  atlas_cell_height;
     uint  padding;
+    uint  padding_top;       // max(padding, notch safe area)
     uint  cursor_row;
     uint  cursor_col;
+    uint  cursor_visible;
+    uint  frame_bg;          // 0x00RRGGBB default background
 };
 ```
 
-### Updated Compute Shader
+### Compute Shader Pipeline
 
-```metal
-kernel void render(
-    texture2d<half, access::write>  output     [[texture(0)]],
-    texture2d<half, access::read>   atlas      [[texture(1)]],
-    device const CellData*          cells      [[buffer(0)]],
-    device const float4*            palette    [[buffer(1)]],
-    constant Uniforms&              uni        [[buffer(2)]],
-    uint2 gid [[thread_position_in_grid]]
-) {
-    if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
+Per-pixel compute kernel processes the entire framebuffer:
 
-    // Account for padding
-    int2 pos = int2(gid) - int2(uni.padding);
-    if (pos.x < 0 || pos.y < 0) {
-        output.write(bg_color, gid);
-        return;
-    }
-
-    uint col = pos.x / uni.cell_width;
-    uint row = pos.y / uni.cell_height;
-    if (col >= uni.cols || row >= uni.rows) {
-        output.write(bg_color, gid);
-        return;
-    }
-
-    CellData cell = cells[row * uni.cols + col];
-
-    // Skip wide_cont cells (already rendered by the wide cell)
-    // Resolve fg/bg colors from palette or RGB
-    // Read glyph alpha from atlas
-    // Blend: bg_color * (1 - alpha) + fg_color * alpha
-    // Handle inverse flag
-    // Handle underline/strikethrough (single-pixel horizontal lines)
-    // Handle cursor (block = invert entire cell)
-    // Handle selection (invert colors)
-    // Handle box drawing (procedural, see below)
-}
-```
+1. Map pixel → grid cell via integer division
+2. Padding region → `frame_bg` default background
+3. Wide continuation cells → look at owner cell to the left, sample right half of owner's glyph
+4. Bold → remap palette index 0-7 to 8-15
+5. Resolve fg/bg colors (palette lookup or RGB unpack)
+6. Hidden → fg = bg
+7. Inverse → swap fg/bg
+8. Selected → swap fg/bg
+9. Box drawing (U+2500..U+257F) → procedural from `BOX_EDGES[128]` lookup table
+10. Normal glyphs → alpha blend from atlas texture via `atlas.read()`
+11. Underline → 1px line at `cell_height - 2`
+12. Strikethrough → 1px line at `cell_height / 2`
+13. Cursor → full color inversion (`1.0 - color` per channel)
 
 ### Box Drawing (Procedural)
 
 For codepoints U+2500–U+257F, instead of sampling the atlas:
-- Decode the codepoint into edge connectivity (top, bottom, left, right) and weight (light, heavy, double)
-- Calculate pixel position within the cell
-- Draw horizontal/vertical line segments and corners with appropriate thickness
-- Light lines = 1px, heavy = 2px, double = two 1px lines with 1px gap
-
-Lookup table: `box_drawing_edges[128]` mapping each char to a packed byte of edge flags.
+- 128-entry `BOX_EDGES` lookup table, each byte encodes edge connectivity:
+  - Bits [0-3]: right, left, down, up (light)
+  - Bits [4-7]: right-heavy, left-heavy, down-heavy, up-heavy
+- `draw_box_line()` tests pixel position against horizontal/vertical line segments
+- Light lines = `max(1, cell_width/8)` px, heavy = `max(2, cell_width/4)` px
 
 ---
 
@@ -351,33 +328,37 @@ Lookup table: `box_drawing_edges[128]` mapping each char to a packed byte of edg
 ### PTY Setup
 
 ```rust
-// forkpty() to create PTY pair + fork child
-// Child: setsid(), set TERM=xterm-256color, exec($SHELL or /bin/zsh)
-// Parent: get master fd, set non-blocking via fcntl(O_NONBLOCK)
+// libc::forkpty() to create PTY pair + fork child
+// Child: cd $HOME, set TERM=xterm-256color, exec($SHELL or /bin/zsh) as login shell (prefix with -)
+// Parent: set master fd non-blocking via fcntl(O_NONBLOCK)
 ```
 
-### I/O Thread
+### Read Path (in main loop)
 
 ```rust
-// Dedicated thread, runs independently
-loop {
-    // kqueue wait on master_fd (EVFILT_READ)
-    // read() into 64KB buffer
-    // Feed buffer to VT parser
-    // Parser calls Perform methods which mutate grid (under Mutex)
-    // Set AtomicBool dirty flag to wake render thread
-}
+// process_pty_output() called from main loop (twice: once at top, once in render())
+// Non-blocking read() into 64KB buffer
+// Returns WouldBlock when empty → break
+// Returns Ok(0) on EOF → shell exited → alive = false
+// Feed buffer to VT parser which mutates grid directly (single-threaded, no lock)
 ```
 
 ### Write Path
 
-- Main thread receives keyboard events → translate to bytes → write() to master_fd
-- Non-blocking write, buffer if EAGAIN (unlikely for typical keyboard input)
+- Main thread receives keyboard/mouse events → translate to bytes via `input.rs` → `pty.write()` to master_fd
+- Non-blocking write (unlikely to block for typical keyboard input)
+
+### Idle Wait (in main loop)
+
+- kqueue registered with `EVFILT_READ` on PTY master fd
+- When main loop is idle: `kevent()` with 8ms timeout
+- Wakes immediately on shell output, falls back to 8ms polling for AppKit events
 
 ### Child Exit
 
-- kqueue EVFILT_PROC or detect read() returning 0 / EIO
-- Signal main thread to exit → winit event loop breaks → process exits
+- Detect `read()` returning `Ok(0)` (EOF) or `Err` (not WouldBlock) → set `alive = false`
+- Main loop checks `alive` flag → breaks → process exits
+- `Pty::drop()` sends SIGHUP to child
 
 ---
 
@@ -390,57 +371,50 @@ loop {
 ### Architecture: 3-Layer Pipeline
 
 ```
-Input bytes ──► Layer 0: NEON SIMD Scanner
+Input bytes ──► Layer 1: NEON SIMD Scanner
                 │
-                ├─ Printable ASCII run ──► performer.print_ascii_run()  [bulk memcpy to grid]
+                ├─ Printable ASCII run ──► performer.print_ascii_run()
                 │
-                ├─ ESC [ detected ──► Layer 1: CSI Fast-Path
+                ├─ ESC [ detected ──► Layer 2: CSI Fast-Path
                 │                     │
-                │                     ├─ Recognized (SGR, cursor, erase) ──► performer.specific_method()
+                │                     ├─ Recognized (~25 sequences) ──► performer.specific_method()
                 │                     │
-                │                     └─ Unrecognized ──► Layer 2: Scalar State Machine
+                │                     └─ Bail (intermediate bytes, incomplete) ──► Layer 3
                 │
-                └─ Control / high byte ──► Layer 2: Scalar State Machine
-                                           │
-                                           └─ Actions ──► performer.csi_dispatch() / osc_dispatch() / etc.
+                ├─ UTF-8 lead byte ──► Utf8Assembler (buffers across parse() calls)
+                │
+                └─ Control / ESC ──► Layer 3: Scalar State Machine
+                                     │
+                                     └─ Actions ──► performer.csi_dispatch() / osc_dispatch() / etc.
 ```
 
-### Layer 0: NEON SIMD Scanner (simd.rs)
+### Layer 1: NEON SIMD Scanner (simd.rs)
 
 - Process 64 bytes per iteration (4×16 unrolled)
-- Classify each byte: printable ASCII (0x20–0x7E) vs control/high
-- When all 64 bytes are printable: call `performer.print_ascii_run(&buf[start..start+64])`
-- When a special byte is found: flush the ASCII run, hand off to Layer 1 or 2
+- Classify each byte: printable ASCII (0x20–0x7E) vs everything else
+- When all 64 bytes are printable: call `performer.print_ascii_run()`
+- When a special byte is found: return position, flush the ASCII run
+- Remaining 16-byte chunks processed individually, then scalar tail
+- `find_first_zero()` via `vshrn_n_u16` narrowing + nibble scan
+- Scalar-only fallback for non-aarch64 (compiled but untested)
 
-```rust
-#[cfg(target_arch = "aarch64")]
-use core::arch::aarch64::*;
+### Layer 2: CSI Fast-Path (csi_fast.rs)
 
-unsafe fn classify_chunk_16(ptr: *const u8) -> u64 {
-    let chunk = vld1q_u8(ptr);
-    let is_control = vcltq_u8(chunk, vdupq_n_u8(0x20));
-    let is_high_or_del = vcgeq_u8(chunk, vdupq_n_u8(0x7F));
-    let attention = vorrq_u8(is_control, is_high_or_del);
-    // Pack 16 bytes to bitmask
-    vget_lane_u64::<0>(vreinterpret_u64_u8(vshrn_n_u16::<4>(vreinterpretq_u16_u8(attention))))
-}
-```
-
-### Layer 1: CSI Fast-Path (csi_fast.rs)
-
-Handles the ~15 most common CSI sequences inline without entering the state machine:
+Handles ~25 CSI sequences inline without entering the state machine:
 
 | Final | Sequence | Action |
 |---|---|---|
-| `m` | SGR | Colors, bold (→ bright), italic, underline, reset |
+| `m` | SGR | Colors, bold, dim, italic, underline, inverse, hidden, strike, reset |
 | `A` | CUU | Cursor up |
-| `B` | CUD | Cursor down |
-| `C` | CUF | Cursor forward |
+| `B`/`e` | CUD/VPR | Cursor down |
+| `C`/`a` | CUF/HPR | Cursor forward |
 | `D` | CUB | Cursor backward |
-| `H` | CUP | Cursor position |
-| `G` | CHA | Cursor horizontal absolute |
+| `E` | CNL | Cursor next line |
+| `F` | CPL | Cursor previous line |
+| `H`/`f` | CUP/HVP | Cursor position |
+| `G`/`` ` `` | CHA/HPA | Cursor horizontal absolute |
 | `d` | VPA | Cursor vertical absolute |
-| `J` | ED | Erase in display |
+| `J` | ED | Erase in display (0/1/2/3) |
 | `K` | EL | Erase in line |
 | `S` | SU | Scroll up |
 | `T` | SD | Scroll down |
@@ -448,42 +422,50 @@ Handles the ~15 most common CSI sequences inline without entering the state mach
 | `M` | DL | Delete lines |
 | `@` | ICH | Insert characters |
 | `P` | DCH | Delete characters |
+| `X` | ECH | Erase characters |
 | `h`/`l` | SM/RM | Set/reset mode (with `?` prefix for DECSET/DECRST) |
+| `r` | DECSTBM | Set scroll region |
+| `g` | TBC | Tab clear |
+| `n` | DSR | Device status report |
+| `b` | REP | Repeat last character |
+| `s`/`u` | SCOSC/SCORC | Save/restore cursor (ANSI.SYS-style) |
 
-Bail to Layer 2 on: colon sub-params, intermediate bytes, unrecognized finals, malformed sequences.
+Colon sub-parameters: handled inline for SGR (`m` with colons) — dispatched to `performer.sgr_colon()` with raw bytes. Supports `4:N` underline styles, `38:2::R:G:B` / `48:2::R:G:B` direct color.
 
-### Layer 2: Scalar State Machine (state_machine.rs)
+Bail to Layer 3 on: intermediate bytes (`0x20..0x2F`), incomplete sequences (buffer ends mid-sequence), unrecognized final bytes.
+
+### Layer 3: Scalar State Machine (state_machine.rs)
 
 - Paul Williams VT500-compatible model
-- 15 states: Ground, Escape, EscapeIntermediate, CsiEntry, CsiParam, CsiIntermediate, CsiIgnore, DcsEntry, DcsParam, DcsIntermediate, DcsPassthrough, DcsIgnore, OscString, SosPmApcString
-- 14 actions: Print, Execute, Hook, Put, Unhook, OscStart, OscPut, OscEnd, CsiDispatch, EscDispatch, Clear, Collect, Param, Ignore
-- Packed transition table: 25 byte equivalence classes × 15 states = 375 entries
+- 14 states: Ground, Escape, EscapeIntermediate, CsiEntry, CsiParam, CsiIntermediate, CsiIgnore, DcsEntry, DcsParam, DcsIntermediate, DcsPassthrough, DcsIgnore, OscString, SosPmApcString
+- 14 actions: Print, Execute, Hook, Put, Unhook, OscStart, OscPut, OscEnd, CsiDispatch, EscDispatch, Clear, Collect, Param, Ignore (+ None)
+- Packed transition table: 24 byte equivalence classes × 14 states = 336 entries
 - Each entry: `u8` where high nibble = action, low nibble = next state
+- 7-bit C1 equivalents handled: ESC P → DCS, ESC [ → CSI, ESC ] → OSC, ESC X/^/_ → SOS/PM/APC
+- BEL (0x07) terminates OSC strings (xterm extension)
 
 ### Character Sets (charset.rs)
 
-- Track active G0/G1 designations
-- DEC Special Graphics (ESC ( 0): 96-entry lookup table mapping ASCII → Unicode box drawing
+- Track active G0/G1 designations via `charset_g0`, `charset_g1`, `active_charset`
+- DEC Special Graphics (ESC ( 0): 31-entry lookup table mapping 0x60–0x7E → Unicode box drawing / special glyphs
 - `SO` (0x0E) / `SI` (0x0F) to switch between G0 and G1
-- Translation applied in `print()` path before grid insertion
+- Translation applied in `print_ascii_run()` and `print()` paths before grid insertion
 
 ### UTF-8 Assembler (utf8.rs)
 
-- Accumulate continuation bytes across parser calls
-- Validate sequences, replace malformed with U+FFFD
-- Feed complete codepoints to `performer.print()`
+- Buffers incomplete multi-byte sequences (2-4 bytes) across `parse()` calls
+- `try_complete()`: called at start of each `parse()` to finish buffered sequence with new data
+- `decode()`: attempts to decode from current position, buffers if incomplete
+- Validates continuation bytes, rejects overlong encodings and surrogates
+- Replaces malformed sequences with U+FFFD
 
 ### Perform Trait (perform.rs)
 
 ```rust
 pub trait Perform {
-    // Hot path — bulk ASCII
     fn print_ascii_run(&mut self, bytes: &[u8]);
-    // Single Unicode char (after charset translation)
     fn print(&mut self, c: char);
-    // C0 controls
-    fn execute(&mut self, byte: u8);  // CR, LF, BS, TAB, BEL, etc.
-    // Cursor movement
+    fn execute(&mut self, byte: u8);
     fn cursor_up(&mut self, n: u16);
     fn cursor_down(&mut self, n: u16);
     fn cursor_forward(&mut self, n: u16);
@@ -491,27 +473,30 @@ pub trait Perform {
     fn cursor_position(&mut self, row: u16, col: u16);
     fn cursor_horizontal_absolute(&mut self, col: u16);
     fn cursor_vertical_absolute(&mut self, row: u16);
-    // Erase
     fn erase_in_display(&mut self, mode: u16);
     fn erase_in_line(&mut self, mode: u16);
-    // Scroll
     fn scroll_up(&mut self, n: u16);
     fn scroll_down(&mut self, n: u16);
-    // Insert/delete
     fn insert_lines(&mut self, n: u16);
     fn delete_lines(&mut self, n: u16);
     fn insert_chars(&mut self, n: u16);
     fn delete_chars(&mut self, n: u16);
-    // SGR
+    fn erase_chars(&mut self, n: u16);
     fn sgr(&mut self, params: &[u16]);
-    // Modes
-    fn set_mode(&mut self, mode: u16, private: bool);
-    fn reset_mode(&mut self, mode: u16, private: bool);
-    // OSC
+    fn sgr_colon(&mut self, raw: &[u8]);
+    fn set_mode(&mut self, params: &[u16], private: bool);
+    fn reset_mode(&mut self, params: &[u16], private: bool);
+    fn set_scroll_region(&mut self, top: u16, bottom: u16);
+    fn tab_clear(&mut self, mode: u16);
+    fn set_tab_stop(&mut self);
     fn osc_dispatch(&mut self, params: &[&[u8]]);
-    // Fallback
-    fn csi_dispatch(&mut self, params: &[u16], intermediates: &[u8], byte: u8);
     fn esc_dispatch(&mut self, intermediates: &[u8], byte: u8);
+    fn csi_dispatch(&mut self, params: &[u16], intermediates: &[u8], ignore: bool, byte: u8);
+    fn save_cursor(&mut self);
+    fn restore_cursor(&mut self);
+    fn device_status_report(&mut self, mode: u16);
+    fn set_cursor_style(&mut self, _style: u16) {}  // no-op, block only
+    fn repeat_char(&mut self, n: u16);
 }
 ```
 
@@ -520,23 +505,25 @@ pub trait Perform {
 | Mode | Name | Description |
 |---|---|---|
 | 1 | DECCKM | Cursor keys send ESC O vs ESC [ |
+| 6 | DECOM | Origin mode — cursor relative to scroll region |
 | 7 | DECAWM | Auto-wrap at right margin |
 | 25 | DECTCEM | Cursor visible/hidden |
-| 47 | Alt screen (old) | Switch to/from alternate screen buffer |
+| 47/1047 | Alt screen | Switch to/from alternate screen buffer |
 | 1000 | Mouse button tracking | Report mouse clicks |
 | 1002 | Mouse cell-motion | Report mouse motion while button held |
 | 1003 | Mouse all-motion | Report all mouse motion |
-| 1004 | Focus events | Report focus in/out (stub: accept, don't report) |
+| 1004 | Focus events | Report focus in (ESC[I) / out (ESC[O) |
 | 1006 | SGR mouse encoding | Mouse reports as CSI < ... M/m |
-| 1049 | Alt screen + cursor | Switch alt screen, save/restore cursor |
-| 2004 | Bracketed paste | Wrap pasted text in ESC [200~/201~ |
-| 2026 | Synchronized output | Defer rendering between BSU/ESU markers |
+| 1049 | Alt screen + cursor | Save cursor, switch alt screen; restore on exit |
+| 2004 | Bracketed paste | Wrap pasted text in ESC[200~ / ESC[201~ |
+| 2026 | Synchronized output | Defer rendering during application updates |
 
 ### Synchronized Output (Mode 2026)
 
-- On BSU (`ESC P =1s ESC \` or `CSI ? 2026 h`): set flag, suppress render-thread wake
-- On ESU (`ESC P =2s ESC \` or `CSI ? 2026 l`): clear flag, mark all dirty, wake render thread
-- Timeout: if BSU without ESU for >1 second, force render (prevents stuck invisible state)
+- On `CSI ? 2026 h`: set `SYNC_OUTPUT` flag, record `sync_start = Instant::now()`
+- On `CSI ? 2026 l`: clear flag, clear `sync_start`
+- `render()` returns early while `SYNC_OUTPUT` is set — dirty bits accumulate
+- Timeout: if sync active for >100ms, force render and clear the flag (prevents stuck display)
 
 ---
 
@@ -544,15 +531,25 @@ pub trait Perform {
 
 **Goal**: Keyboard events → correct VT byte sequences → PTY write.
 
-**Files**: `src/input.rs`
+**Files**: `src/input.rs`, `src/window.rs`
 
-### Key Translation
+### Window Event System (window.rs)
 
-- winit `KeyEvent` → match on `key.logical_key` and `key.physical_key`
-- Printable characters: UTF-8 encode and write
-- Option key: always send ESC prefix (both Left and Right Option)
-- Cmd+C: copy selection to NSPasteboard (not sent to PTY)
-- Cmd+V: read NSPasteboard, wrap in bracketed paste if mode 2004 active, write to PTY
+- `NativeWindow::poll_events()` returns `Vec<Event>` with typed event variants
+- Key events: `Event::KeyDown { key: Key, modifiers: Modifiers }`
+- `Key::Character(String)` for printable keys, `Key::Named(NamedKey)` for special keys
+- `Modifiers` is a u8 bitfield: SHIFT=1, CONTROL=2, ALT=4, SUPER=8
+- Uses `charactersIgnoringModifiers` when Ctrl/Alt/Cmd held (gets base letter)
+- macOS virtual key codes translated to `NamedKey` variants (arrows, F1-F12, etc.)
+
+### Key Translation (input.rs)
+
+- `key_to_bytes(key, modifiers, term_mode) -> Option<Vec<u8>>`
+- Cmd modifier → return None (handled by App directly for Cmd+Q/C/V)
+- Ctrl+letter: `(ch as u8) - b'a' + 1` (maps to 0x01–0x1A)
+- Ctrl+special: `@`→0x00, `[`→0x1B, `\`→0x1C, `]`→0x1D, `^`→0x1E, `_`/`/`→0x1F
+- Alt/Option: ESC prefix before key bytes
+- Printable characters: UTF-8 encode
 
 ### Special Keys
 
@@ -566,23 +563,35 @@ pub trait Perform {
 | End | `ESC [ F` | `ESC O F` |
 | F1-F4 | `ESC O P/Q/R/S` | same |
 | F5-F12 | `ESC [ 15~` ... `ESC [ 24~` | same |
+| PageUp/Down | `ESC [ 5~` / `ESC [ 6~` | same |
+| Insert | `ESC [ 2~` | same |
+| Delete | `ESC [ 3~` | same |
 | Backspace | `0x7F` | `0x7F` |
-| Delete | `ESC [ 3 ~` | same |
-| Tab | `0x09` | `0x09` |
+| Tab | `0x09` (Shift+Tab = `ESC[Z`) | same |
 | Enter | `0x0D` | `0x0D` |
 | Escape | `0x1B` | `0x1B` |
+| Space | `0x20` (Ctrl+Space = `0x00`) | same |
 
 ### Modifier Encoding
 
-- Ctrl+letter: `byte & 0x1F` (e.g., Ctrl+C = 0x03)
-- Alt/Option+key: `ESC` prefix + key byte
-- Shift+special: modify parameter (e.g., Shift+Up = `ESC [ 1 ; 2 A`)
+- xterm modifier parameter: 1=none, +1 shift, +2 alt, +4 ctrl
+- Modified arrows: `ESC [ 1 ; <mod> <key>` (e.g., Shift+Up = `ESC [ 1 ; 2 A`)
+- Modified F5+: `ESC [ <num> ; <mod> ~`
 
-### Mouse Events
+### Mouse Events (input.rs)
 
 When mouse tracking modes are active:
 - SGR encoding (mode 1006): `ESC [ < button ; col ; row M` (press) / `m` (release)
-- Button values: 0=left, 1=middle, 2=right, 32+=motion, 64+=scroll
+- Normal encoding: `ESC [ M` + 3 bytes (button+32, col+32, row+32), capped at 223
+- Button values: 0=left, 1=middle, 2=right, 3=release (normal only), 32+=motion, 64=scroll-up, 65=scroll-down
+
+### Scroll Wheel
+
+- Trackpad (precise): accumulate `delta_y` in logical points, convert to lines via `cell_height_pts`
+- Mouse wheel (non-precise): delta is in lines, multiply by `cell_height_pts` for accumulator
+- Extract whole lines from accumulator, cap at 5 per frame to prevent PTY flooding
+- Mouse mode: send scroll button events (64=up, 65=down)
+- No mouse mode: send arrow up/down keys (respects DECCKM)
 
 ---
 
@@ -590,7 +599,7 @@ When mouse tracking modes are active:
 
 **Goal**: Efficient scrolling and scrollback buffer.
 
-**Files**: `src/terminal/scrollback.rs`, updates to `src/terminal/grid.rs`
+**Files**: `src/terminal/scrollback.rs`, `src/terminal/grid.rs`
 
 ### Ring Buffer
 
@@ -598,26 +607,27 @@ When mouse tracking modes are active:
 pub struct Scrollback {
     buf: Vec<Vec<Cell>>,   // Ring buffer of rows
     capacity: usize,        // Max rows (from config::SCROLLBACK_LINES)
-    head: usize,            // Write position
+    head: usize,            // Next write position
     len: usize,             // Current number of stored rows
 }
 ```
 
-- Push: copy top grid row to `buf[head]`, advance head
+- Push: store row at `buf[head]`, advance head modulo capacity
+- Lazy allocation: `Vec::with_capacity(min(capacity, 1024))`, grows as needed
 - Each row stored at the terminal width at time of eviction (fixed-width, per decision #15)
-- Access by offset from current viewport
+- `clear()`: reset buf, head, len
 
-### Scroll Operations
+### Scroll Operations (grid.rs)
 
-- **Scroll up (new content at bottom)**: memmove cells up by N rows, push evicted rows to scrollback, clear new rows at bottom, mark only new rows dirty
-- **Scroll down (new content at top)**: memmove cells down, clear new rows at top, mark only new rows dirty
-- **Viewport scroll (user scrolling through history)**: render from scrollback instead of active grid. Any new PTY output snaps back to bottom.
+- **Scroll up** (`scroll_up`): `copy_within` (memmove) cells up within scroll region, clear new rows at bottom with current bg color, return evicted rows (only when `scroll_top == 0`)
+- **Scroll down** (`scroll_down`): `copy_within` (memmove) cells down within scroll region, clear new rows at top with current bg color
+- Both mark all rows in the scroll region dirty (`scroll_top..=scroll_bottom`)
 
 ### Efficiency
 
-- `memmove` the CellData buffer instead of shifting individual cells
-- Only mark actually-changed rows dirty (new content rows after scroll)
-- Scrollback rows are not uploaded to GPU — only the visible viewport's worth of cells
+- `copy_within` for bulk cell movement (memmove, handles overlapping regions)
+- Scrollback rows are not uploaded to GPU — only the visible grid's cells
+- Erase operations use current SGR background color (per VT spec)
 
 ---
 
@@ -625,79 +635,67 @@ pub struct Scrollback {
 
 ### Selection
 
-- State: `Option<(SelectionStart, SelectionEnd)>` where each is `(col, row)`
-- Mouse down: set start, clear end
-- Mouse drag: update end, mark affected rows dirty
-- Mouse up: finalize selection
-- Double-click: select word (scan for word boundaries)
-- Triple-click: select line
-- Cmd+C: extract selected text from grid cells, write to NSPasteboard
-- Render: set `selected` flag on cells within selection range, shader inverts colors
+- State: `selection_start: Option<(u16, u16)>` and `selection_end: Option<(u16, u16)>` as `(col, row)`
+- Mouse down: set start = end = cell position, set `mouse_pressed`
+- Mouse drag: update end, call `update_selection()` which sets SELECTED flag on affected cells
+- Cmd+C: `copy_selection()` extracts text from selected cells, writes to NSPasteboard
+- `clear_selection()`: remove SELECTED flag from all cells, mark all dirty
+- Render: shader swaps fg/bg for cells with SELECTED flag
+- Not implemented: double-click word select, triple-click line select
 
 ### OSC 52 (Clipboard)
 
-- Parse: `OSC 52 ; c ; <base64-data> ST`
-- Decode base64, write to NSPasteboard
-- Query (empty data): respond with current clipboard contents encoded as base64
+- Set: `OSC 52 ; <selection> ; <base64-data> ST` → custom base64 decoder → `set_clipboard()` via NSPasteboard
+- Query (empty data): recognized but not yet implemented (TODO)
+- Response encoded via internal response buffer mechanism
 
 ### Window Title
 
-- OSC 0 / OSC 2: set window title via winit `window.set_title()`
-- Parse title from OSC data bytes (UTF-8)
+- OSC 0 / OSC 2: set window title via `NativeWindow::set_title()` (wraps `NSWindow::setTitle`)
+- Title data passed through internal response buffer as `\x1B]title:<text>\x07`, decoded in `handle_responses()`
 
 ### Cursor Blink
 
-- Timer: toggle cursor visibility every 500ms
-- When cursor cell changes (typing), reset blink timer to visible state
-- When toggling: mark only the cursor row dirty
+- Timer: toggle cursor visibility every `CURSOR_BLINK_MS` (1000ms)
+- On keypress: reset blink timer to visible state
+- Cursor flag (CellFlags::CURSOR) set/cleared on the cursor cell each frame
+- Previous cursor position tracked to clear stale CURSOR flags
+- When DECTCEM (mode 25) is off: cursor forced invisible
 
 ### Resize
 
-1. winit `Resized` event → recalculate grid dimensions from new window size
-2. Reallocate CellData buffers (all 3 triple-buffer slots)
-3. Copy existing grid content (truncate or pad)
-4. Send `SIGWINCH` to child process via `ioctl(TIOCSWINSZ)`
-5. Full dirty (all rows)
+1. `Event::Resized { w, h, scale }` from NativeWindow → `MetalRenderer::resize()`
+2. Recalculate grid dimensions from physical pixel size minus padding
+3. Reallocate both double-buffer MTLBuffers
+4. `Grid::resize()`: allocate new cells, copy preserved content, rebuild tab stops, reset scroll region
+5. `Pty::resize()`: `ioctl(TIOCSWINSZ)` signals child process
+6. Mark all rows dirty
 
 ### Bell
 
-- BEL (0x07): visual bell — invert all cells for one frame, then restore
-- Set all rows dirty with inverse flag, schedule restore for next frame
+- BEL (0x07): currently a no-op (`// TODO: visual bell`)
 
 ---
 
 ## Color Palette
 
-### Default ANSI (Tweaked/Alacritty-style)
+### Default ANSI (Dracula-inspired)
 
 ```
- 0 Black       #1d1f21     8 Bright Black   #969896
- 1 Red         #cc6666     9 Bright Red     #cc6666
- 2 Green       #b5bd68    10 Bright Green   #b5bd68
- 3 Yellow      #f0c674    11 Bright Yellow  #f0c674
- 4 Blue        #81a2be    12 Bright Blue    #81a2be
- 5 Magenta     #b294bb    13 Bright Magenta #b294bb
- 6 Cyan        #8abeb7    14 Bright Cyan    #8abeb7
- 7 White       #c5c8c6    15 Bright White   #ffffff
+ 0 Black       #000000     8 Bright Black   #666666
+ 1 Red         #ff5555     9 Bright Red     #ff6e6e
+ 2 Green       #50fa7b    10 Bright Green   #69ff94
+ 3 Yellow      #f1fa8c    11 Bright Yellow  #ffffa5
+ 4 Blue        #caa9fa    12 Bright Blue    #d6bfff
+ 5 Magenta     #ff79c6    13 Bright Magenta #ff92df
+ 6 Cyan        #8be9fd    14 Bright Cyan    #a4ffff
+ 7 White       #ffffff    15 Bright White   #ffffff
 ```
 
 Indices 16–231: 6×6×6 color cube (standard formula).
 Indices 232–255: grayscale ramp (standard formula).
 
-Default foreground: index 7 (#c5c8c6)
-Default background: index 0 (#1d1f21)
+Default foreground: index 7 (#ffffff)
+Default background: index 0 (#000000)
 
-Bold text: palette colors 0–7 brightened to 8–15. No font weight change.
-
----
-
-## Build & Run
-
-```bash
-cargo build --release
-./target/release/tty
-```
-
-Environment: inherits parent env, sets `TERM=xterm-256color`.
-Shell: `$SHELL` or fallback to `/bin/zsh`.
-Launches into macOS native fullscreen.
+Bold text: palette colors 0–7 brightened to 8–15 in shader. No font weight change.

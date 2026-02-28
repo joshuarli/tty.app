@@ -7,12 +7,14 @@ A GPU-accelerated terminal emulator for macOS. Rust + Metal compute shaders, sin
 ```
 src/
 ├── main.rs                 # Event loop, App struct, TermPerformer (Perform impl)
+├── lib.rs                  # Re-exports config, parser, terminal as public modules
 ├── config.rs               # Compile-time constants (font, palette, padding)
-├── input.rs                # Winit key events → VT byte sequences
+├── input.rs                # Key/mouse events → VT byte sequences
+├── window.rs               # Native macOS windowing (objc2 AppKit), event polling, fullscreen
 ├── parser/
 │   ├── mod.rs              # Three-layer parser: SIMD → CSI fast → state machine
 │   ├── simd.rs             # NEON vectorized printable ASCII scanner
-│   ├── csi_fast.rs         # Inline parser for ~15 common CSI sequences
+│   ├── csi_fast.rs         # Inline parser for common CSI sequences (~25 final bytes)
 │   ├── state_machine.rs    # Full Paul Williams VT500 state machine
 │   ├── table.rs            # Byte classification + state transition lookup table
 │   ├── perform.rs          # Perform trait — parser-to-grid interface
@@ -61,7 +63,7 @@ MetalRenderer.render_frame()
   1. Check dirty.any() — skip frame if nothing changed
   2. Spin-wait for GPU to release current buffer (AtomicBool)
   3. ptr::copy_nonoverlapping(grid.cells → cell_buffer)  ← bulk memcpy, ~5μs
-  4. Acquire next drawable (retry next frame if None — dirty bits preserved)
+  4. Acquire next drawable (retry next frame if None — needs_render flag set)
   5. Dispatch compute shader (one thread per output pixel, 16×16 threadgroups)
   6. add_completed_handler → set buffer_ready = true
   7. commit() — returns immediately, GPU works async
@@ -98,7 +100,7 @@ When an application sets Mode 2026 (e.g., tmux during pane switch), `render()` r
 
 ### Parser layering
 
-The three layers are a performance hierarchy. Layer 1 (SIMD) handles bulk text at ~16 GB/s on Apple Silicon. Layer 2 (CSI fast) avoids state machine overhead for the ~15 sequences that account for >95% of CSI traffic. Layer 3 (state machine) handles everything else faithfully.
+The three layers are a performance hierarchy. Layer 1 (SIMD) handles bulk text at ~16 GB/s on Apple Silicon. Layer 2 (CSI fast) avoids state machine overhead for the ~25 sequences that account for >95% of CSI traffic. Layer 3 (state machine) handles everything else faithfully.
 
 **Cross-boundary correctness**: The parser maintains state across `parse()` calls. When a CSI sequence spans two PTY reads (e.g., `ESC[` arrives in one read, `5;10H` in the next), the fast path cannot parse it (returns None). The state machine accumulates the bytes and dispatches the complete sequence via `csi_dispatch()`. This means `csi_dispatch()` must handle **every** CSI sequence the fast path handles — a mismatch causes silent drops. The UTF-8 assembler similarly buffers incomplete multi-byte sequences (2-4 bytes) across parse() boundaries and completes them on the next call.
 
@@ -108,15 +110,27 @@ When the cursor reaches the last column, the wrap is *deferred* (`cursor_pending
 
 ## Threading Model
 
-Single-threaded. The winit event loop runs everything:
+Single-threaded. A manual `loop` in `main()` drives everything (no winit — raw `objc2` AppKit via `window.rs`):
 
-- `new_events()` → `process_pty_output()` — drains PTY, feeds parser
-- `RedrawRequested` → `render()` — drains PTY again, then uploads grid, dispatches GPU
-- `about_to_wait()` → `request_redraw()` — continuous polling at vsync
+```
+loop {
+    1. app.process_pty_output()   — drain PTY, feed parser
+    2. win.poll_events()          — drain AppKit events (keys, mouse, resize, focus)
+    3. app.handle_event()         — translate events → PTY writes / state changes
+    4. app.render()               — drains PTY again, then uploads grid, dispatches GPU
+    5. if idle → kqueue wait      — block on PTY fd with 8ms timeout
+}
+```
 
-The PTY fd is set to `O_NONBLOCK`. Reads happen synchronously in the event loop, returning `WouldBlock` when empty. PTY data is drained both in `new_events()` and at the top of `render()` — the second drain catches data that arrived between the two calls, which is critical for apps that don't use synchronized updates (mode 2026) like htop and tmux. GPU work is the only thing that runs asynchronously (via Metal command buffer).
+The PTY fd is set to `O_NONBLOCK`. Reads happen synchronously in the event loop, returning `WouldBlock` when empty. PTY data is drained both in step 1 and at the top of `render()` (step 4) — the second drain catches data that arrived between the two calls, which is critical for apps that don't use synchronized updates (mode 2026) like htop and tmux. GPU work is the only thing that runs asynchronously (via Metal command buffer).
+
+When idle (no PTY data, no AppKit events, no GPU dispatch), the loop blocks on a kqueue watching the PTY fd with an 8ms timeout. This gives near-zero latency for shell output while still polling AppKit events at ~120Hz.
 
 ## Module Details
+
+### window.rs
+
+Native macOS windowing via `objc2` / `objc2-app-kit` (no winit). `NativeWindow` owns an `NSApplication`, `NSWindow`, and a `TtyView` (minimal NSView subclass). Launches into native fullscreen with suppressed animation. Detects safe area insets for notch. `poll_events()` drains the AppKit event queue and returns a `Vec<Event>` covering: `KeyDown`, `ModifiersChanged`, `MouseDown/Up/Dragged`, `ScrollWheel`, `Resized`, `FocusIn/Out`, `Closed`. Key translation maps macOS virtual key codes to `NamedKey` variants and uses `charactersIgnoringModifiers` when Ctrl/Alt/Cmd are held.
 
 ### main.rs
 
@@ -129,10 +143,11 @@ The `Perform` trait implementation in `TermPerformer` covers:
 - Scrolling (up/down within scroll region)
 - Line/character insert/delete
 - SGR parsing (8-color, 256-color, 24-bit RGB; bold/dim/italic/underline/inverse/hidden/strike)
-- Mode set/reset (DECSET/DECRST: autowrap, cursor visible, alt-screen, mouse, bracketed paste, sync output)
+- SGR colon sub-parameters (underline styles `4:N`, `38:2::R:G:B`, `48:2::R:G:B`)
+- Mode set/reset (DECSET/DECRST: cursor keys, origin mode, autowrap, cursor visible, alt-screen, mouse, focus events, bracketed paste, sync output)
 - OSC dispatch (window title, clipboard via OSC 52)
-- ESC dispatch (charset selection, save/restore cursor, RIS)
-- Device status report (cursor position response)
+- ESC dispatch (charset selection, save/restore cursor, RIS, IND, NEL, RI, tab stop set)
+- Device status report (cursor position response, DA1, DA2, DECRQM)
 
 ### parser/table.rs
 
@@ -140,7 +155,7 @@ The `Perform` trait implementation in `TermPerformer` covers:
 
 ### parser/csi_fast.rs
 
-Parses CSI parameters inline (up to 16 semicolon-separated u16 values). Bails to state machine on: colon sub-parameters, intermediate bytes, unrecognized final bytes. The `?` prefix for private modes is detected and passed through.
+Parses CSI parameters inline (up to 16 semicolon-separated u16 values). Colon sub-parameters are handled inline for SGR sequences (dispatched to `performer.sgr_colon()` with the raw parameter bytes). Bails to state machine on: intermediate bytes (`0x20..0x2F`), unrecognized final bytes, incomplete sequences (buffer ends mid-sequence). The `?` prefix for private modes is detected and passed through.
 
 **Invariant**: Every sequence handled by `csi_fast.rs` must also be handled in `TermPerformer::csi_dispatch()` (main.rs). The fast path handles complete sequences in a single buffer. When a sequence spans buffers, the state machine dispatches it to `csi_dispatch()` instead. If `csi_dispatch()` doesn't handle a sequence, it is silently dropped.
 
@@ -152,7 +167,7 @@ The grid is a flat `Vec<Cell>` indexed as `row * cols + col`. Scroll operations 
 
 ### renderer/atlas.rs
 
-Grid-based packing in a 2048×2048 texture. ASCII glyphs (0x20-0x7E) are pre-loaded and pinned (never evicted). Non-ASCII glyphs use LRU eviction based on a frame counter. Each slot holds one cell-sized glyph (or two cells wide for CJK).
+Grid-based packing in a 2048×2048 texture. Each slot is one cell wide (`cell_width` pixels); wide CJK glyphs overflow into the adjacent slot's pixel space. ASCII glyphs (0x20-0x7E) are pre-loaded and pinned (never evicted). Non-ASCII glyphs use LRU eviction (the `frame` counter tracks last-access; `evict_lru()` finds the minimum). Font fallback uses `CTFontCreateForString` to find system fonts for missing glyphs.
 
 ### renderer/shader.metal
 
@@ -174,4 +189,4 @@ All compile-time constants. The 256-color palette is computed in a `const` block
 
 ### pty/mod.rs
 
-Uses `nix::pty::forkpty()`. Child process execs the user's `$SHELL` (or `/bin/zsh`) as a login shell. Sets `TERM=xterm-256color`. Master fd is `O_NONBLOCK`. Drop sends `SIGHUP` to the child.
+Uses `libc::forkpty()`. Child process execs the user's `$SHELL` (or `/bin/zsh`) as a login shell. Sets `TERM=xterm-256color`. Master fd is `O_NONBLOCK`. Drop sends `SIGHUP` to the child.
