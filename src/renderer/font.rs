@@ -1,30 +1,11 @@
 use crate::config;
-use core_foundation::base::{CFIndex, TCFType};
-use core_foundation::string::CFString;
 use core_graphics::base::kCGImageAlphaNoneSkipLast;
 use core_graphics::color_space::CGColorSpace;
 use core_graphics::context::CGContext;
 use core_graphics::font::CGGlyph;
 use core_graphics::geometry::{CGPoint, CGRect, CGSize};
-use core_text::font::{self as ct_font, CTFont, CTFontRef};
+use core_text::font::{self as ct_font, CTFont};
 use core_text::font_descriptor::kCTFontOrientationDefault;
-
-// CTFontCreateForString: given a base font and a string, returns the best
-// font from the system cascade for rendering that string. This is CoreText's
-// standard font substitution mechanism.
-#[repr(C)]
-struct CFRange {
-    location: CFIndex,
-    length: CFIndex,
-}
-
-unsafe extern "C" {
-    fn CTFontCreateForString(
-        current_font: CTFontRef,
-        string: *const std::ffi::c_void, // CFStringRef
-        range: CFRange,
-    ) -> CTFontRef;
-}
 
 /// Rasterized glyph data (grayscale alpha).
 pub struct RasterizedGlyph {
@@ -43,8 +24,22 @@ pub struct FontMetrics {
 
 pub struct FontRasterizer {
     ct_font: CTFont,
+    // Explicit fallback fonts checked in order when the primary font lacks a glyph.
+    // Using an explicit list avoids CTFontCreateForString whose cascade behaviour
+    // differs between CLI (cargo run) and GUI app bundle contexts for user-installed fonts.
+    fallback_fonts: Vec<CTFont>,
     pub metrics: FontMetrics,
 }
+
+// System fonts ordered by Unicode coverage priority for terminal use.
+const FALLBACK_FAMILIES: &[&str] = &[
+    "Apple Symbols",
+    "Menlo",
+    "Apple Braille",
+    "Apple Color Emoji",
+    "Hiragino Sans",
+    "Arial Unicode MS",
+];
 
 impl FontRasterizer {
     pub fn new(family: &str, size: f64, scale: f64) -> Self {
@@ -81,54 +76,62 @@ impl FontRasterizer {
             descent,
         };
 
-        Self { ct_font, metrics }
+        // Pre-load fallback fonts at the same point size.
+        let fallback_fonts = FALLBACK_FAMILIES
+            .iter()
+            .filter_map(|name| ct_font::new_from_name(name, font_size).ok())
+            .collect();
+
+        Self {
+            ct_font,
+            fallback_fonts,
+            metrics,
+        }
     }
 
-    /// Return the best CoreText font for rendering `codepoint`, falling back
-    /// to system font substitution when the primary font lacks the glyph.
-    fn font_for_codepoint(&self, codepoint: u16) -> Option<CTFont> {
-        // Fast path: primary font has the glyph
+    /// Return the best font for rendering `codepoint`, or None to use the primary font.
+    ///
+    /// For ASCII, the primary font is always used (fast path).
+    /// For non-ASCII, we skip the primary font and check the explicit fallback list.
+    /// This is necessary because in a GUI app bundle context,
+    /// CTFontGetGlyphsForCharacters on a user-installed font (Hack) can report
+    /// non-zero glyph IDs for characters the font doesn't actually support —
+    /// CoreText's cascade fires at the API level and returns the .notdef glyph
+    /// (rendered as "_" in Hack) rather than returning false.
+    /// System fonts loaded explicitly by name don't exhibit this behaviour.
+    fn font_for_codepoint(&self, codepoint: u16) -> Option<&CTFont> {
         let characters = [codepoint];
         let mut glyphs: [CGGlyph; 1] = [0];
-        let found = unsafe {
-            self.ct_font
-                .get_glyphs_for_characters(characters.as_ptr(), glyphs.as_mut_ptr(), 1)
-        };
-        if found && glyphs[0] != 0 {
-            return None; // signal: use self.ct_font
+
+        // ASCII fast path: primary font always has these.
+        if codepoint < 0x80 {
+            return None; // use self.ct_font
         }
 
-        // Fallback: ask CoreText which system font covers this codepoint
-        let ch = char::from_u32(codepoint as u32)?;
-        let cf_str = CFString::new(&ch.to_string());
-        let fallback_ref = unsafe {
-            CTFontCreateForString(
-                self.ct_font.as_concrete_TypeRef(),
-                cf_str.as_concrete_TypeRef() as *const _,
-                CFRange {
-                    location: 0,
-                    length: 1,
-                },
-            )
-        };
-        if fallback_ref.is_null() {
-            return None;
+        // Non-ASCII: query the explicit fallback list only.
+        for font in &self.fallback_fonts {
+            let found = unsafe {
+                font.get_glyphs_for_characters(characters.as_ptr(), glyphs.as_mut_ptr(), 1)
+            };
+            if found && glyphs[0] != 0 {
+                return Some(font);
+            }
         }
-        Some(unsafe { CTFont::wrap_under_get_rule(fallback_ref) })
+
+        // No fallback has it — let the primary font render whatever it has.
+        None
     }
 
     /// Rasterize a single codepoint into an R8 alpha bitmap.
     /// Returns None if the glyph is missing from all fonts.
     pub fn rasterize(&self, codepoint: u16) -> Option<RasterizedGlyph> {
-        let fallback = self.font_for_codepoint(codepoint);
-        let font = fallback.as_ref().unwrap_or(&self.ct_font);
+        let font = self.font_for_codepoint(codepoint).unwrap_or(&self.ct_font);
         self.rasterize_with_font(font, codepoint, self.metrics.cell_width, false)
     }
 
     /// Rasterize a wide (double-width) codepoint.
     pub fn rasterize_wide(&self, codepoint: u16) -> Option<RasterizedGlyph> {
-        let fallback = self.font_for_codepoint(codepoint);
-        let font = fallback.as_ref().unwrap_or(&self.ct_font);
+        let font = self.font_for_codepoint(codepoint).unwrap_or(&self.ct_font);
         self.rasterize_with_font(font, codepoint, self.metrics.cell_width * 2, true)
     }
 

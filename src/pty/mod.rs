@@ -58,9 +58,17 @@ impl Pty {
             let _ = std::env::set_current_dir(home);
         }
 
-        // Set TERM
-        let term = CString::new("TERM=xterm-256color").unwrap();
-        unsafe { libc::putenv(term.as_ptr() as *mut _) };
+        // Set TERM and declare a modern terminal so programs like Claude Code
+        // use Unicode/rich output instead of ASCII fallbacks.
+        // Each CString must stay alive until execvp replaces the process image.
+        let env_term = CString::new("TERM=xterm-256color").unwrap();
+        let env_colorterm = CString::new("COLORTERM=truecolor").unwrap();
+        let env_term_program = CString::new("TERM_PROGRAM=tty").unwrap();
+        unsafe {
+            libc::putenv(env_term.as_ptr() as *mut _);
+            libc::putenv(env_colorterm.as_ptr() as *mut _);
+            libc::putenv(env_term_program.as_ptr() as *mut _);
+        }
 
         // Get user's shell
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
