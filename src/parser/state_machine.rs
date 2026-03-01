@@ -3,7 +3,6 @@ use crate::parser::table::*;
 
 const MAX_INTERMEDIATES: usize = 2;
 const MAX_PARAMS: usize = 16;
-const MAX_OSC_DATA: usize = 512;
 
 /// Full VT state machine (Paul Williams model).
 /// Handles all escape sequences that the CSI fast-path cannot.
@@ -33,7 +32,7 @@ impl StateMachine {
             params: [0; MAX_PARAMS],
             param_count: 0,
             current_param: 0,
-            osc_data: Vec::with_capacity(MAX_OSC_DATA),
+            osc_data: Vec::new(),
             ignoring: false,
         }
     }
@@ -127,9 +126,7 @@ impl StateMachine {
                 self.osc_data.clear();
             }
             ACTION_OSC_PUT => {
-                if self.osc_data.len() < MAX_OSC_DATA {
-                    self.osc_data.push(byte);
-                }
+                self.osc_data.push(byte);
             }
             ACTION_OSC_END => {
                 // Parse OSC: split on ';'
