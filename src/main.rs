@@ -9,8 +9,9 @@ mod window;
 use std::sync::Arc;
 use std::time::Instant;
 
+use objc2::rc::Retained;
 use objc2_app_kit::NSPasteboard;
-use objc2_foundation::{NSArray, NSString, ns_string};
+use objc2_foundation::{NSArray, NSData, NSString, ns_string};
 
 use crate::parser::Parser;
 use crate::parser::charset::translate_dec_special;
@@ -1138,9 +1139,27 @@ impl App {
             let bracketed = self.shared.grid.mode.contains(TermMode::BRACKETED_PASTE);
 
             if bracketed {
-                let _ = self.pty.write(b"\x1B[200~");
-                let _ = self.pty.write(text.as_bytes());
-                let _ = self.pty.write(b"\x1B[201~");
+                // Strip embedded paste markers to prevent bracketed paste injection attacks.
+                let sanitized = text.replace("\x1b[201~", "").replace("\x1b[200~", "");
+                let mut buf = Vec::with_capacity(sanitized.len() + 14);
+                buf.extend_from_slice(b"\x1B[200~");
+                buf.extend_from_slice(sanitized.as_bytes());
+                buf.extend_from_slice(b"\x1B[201~");
+                // The macOS PTY raw input queue (TTYHOG ≈ 1024 bytes) may not accept
+                // the full buffer in one write().  Loop until all bytes are delivered
+                // so the editor always receives the closing ESC[201~ and exits paste mode.
+                let mut pos = 0;
+                while pos < buf.len() {
+                    match self.pty.write(&buf[pos..]) {
+                        Ok(0) => break,
+                        Ok(n) => pos += n,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            // PTY buffer full — yield to let the editor drain it.
+                            std::thread::yield_now();
+                        }
+                        Err(_) => break,
+                    }
+                }
             } else {
                 let _ = self.pty.write(text.as_bytes());
             }
@@ -1431,7 +1450,10 @@ fn set_clipboard(text: &str) {
 fn get_clipboard() -> Option<String> {
     let pb = NSPasteboard::generalPasteboard();
     let pasteboard_type = ns_string!("public.utf8-plain-text");
-    pb.stringForType(pasteboard_type).map(|s| s.to_string())
+    // Use dataForType to get raw bytes so that invalid UTF-8 (e.g. from pbcopy of
+    // a file with lone high bytes) doesn't cause stringForType to return nil.
+    let data: Retained<NSData> = pb.dataForType(pasteboard_type)?;
+    Some(String::from_utf8_lossy(&data.to_vec()).into_owned())
 }
 
 fn base64_decode(input: &[u8]) -> Result<Vec<u8>, ()> {
