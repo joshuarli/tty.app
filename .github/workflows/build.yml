@@ -24,7 +24,7 @@ jobs:
         id: cache-toolchain
         uses: actions/cache@v4
         with:
-          path: ~/.rustup/toolchains/nightly-2026-03-01-aarch64-apple-darwin
+          path: ~/.rustup/toolchains/nightly-2026-03-01-x86_64-unknown-linux-gnu
           key: rust-toolchain-nightly-2026-03-01
 
       - name: Install Rust nightly
@@ -36,10 +36,27 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Cache Zig
+        id: cache-zig
+        uses: actions/cache@v4
+        with:
+          path: zig-x86_64-linux-0.15.2
+          key: zig-0.15.2
+
+      - name: Install Zig
+        if: steps.cache-zig.outputs.cache-hit != 'true'
+        run: curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz | tar -xJ
+
+      - name: Add Zig to PATH
+        run: echo "$PWD/zig-x86_64-linux-0.15.2" >> $GITHUB_PATH
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild
+
       - name: Build
         env:
           RUSTFLAGS: "-Zlocation-detail=none -Zunstable-options -Cpanic=immediate-abort"
-        run: cargo build --release -Z build-std=std -Z build-std-features= --target aarch64-apple-darwin
+        run: cargo zigbuild --release -Z build-std=std -Z build-std-features= --target aarch64-apple-darwin
 
       - name: Bundle .app
         run: |
