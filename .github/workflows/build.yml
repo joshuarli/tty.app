@@ -1,0 +1,55 @@
+name: Build
+
+# gh api repos/joshuarli/tty/actions/permissions/workflow --method PUT
+#   --field default_workflow_permissions=write
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash -euo pipefail {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Rust toolchain
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.rustup/toolchains/nightly-2026-03-01-aarch64-apple-darwin
+          key: rust-toolchain-nightly-2026-03-01
+
+      - name: Install Rust nightly
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: rustup toolchain install nightly-2026-03-01 --profile minimal --target aarch64-apple-darwin --component rust-src
+
+      - name: Set Rust nightly as default
+        run: rustup default nightly-2026-03-01
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        env:
+          RUSTFLAGS: "-Zlocation-detail=none -Zunstable-options -Cpanic=immediate-abort"
+        run: cargo build --release -Z build-std=std -Z build-std-features= --target aarch64-apple-darwin
+
+      - name: Bundle .app
+        run: |
+          mkdir -p tty.app/Contents/MacOS tty.app/Contents/Resources
+          cp Info.plist tty.app/Contents/
+          cp icon.icns tty.app/Contents/Resources/
+          cp target/aarch64-apple-darwin/release/tty tty.app/Contents/MacOS/
+          zip -r "tty-${{ github.ref_name }}-aarch64-apple-darwin.zip" tty.app
+
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${{ github.ref_name }}" "tty-${{ github.ref_name }}-aarch64-apple-darwin.zip" --title "${{ github.ref_name }}"
