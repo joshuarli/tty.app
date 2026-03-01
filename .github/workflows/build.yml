@@ -41,6 +41,9 @@ jobs:
           RUSTFLAGS: "-Zlocation-detail=none -Zunstable-options -Cpanic=immediate-abort"
         run: cargo build --release -Z build-std=std -Z build-std-features= --target aarch64-apple-darwin
 
+      - name: Generate icon
+        run: make icon
+
       - name: Bundle .app
         run: |
           mkdir -p tty.app/Contents/MacOS tty.app/Contents/Resources
