@@ -269,7 +269,14 @@ impl NativeWindow {
 
             if event_type == NSEventType::KeyDown {
                 if let Some(ev) = self.translate_key_event(&event) {
+                    let is_escape =
+                        matches!(ev, Event::KeyDown { key: Key::Named(NamedKey::Escape), .. });
                     self.events.push(ev);
+                    if is_escape {
+                        // Don't sendEvent — AppKit's fullscreen machinery intercepts Escape
+                        // via the responder chain and would exit fullscreen instead.
+                        continue;
+                    }
                 }
             } else if event_type == NSEventType::FlagsChanged {
                 let mods = Modifiers::from_ns_flags(event.modifierFlags());
