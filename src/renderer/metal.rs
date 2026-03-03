@@ -89,8 +89,8 @@ pub struct MetalRenderer {
     pub scale_factor: f64,
     pub notch_px: u32,
 
-    // Track whether we need to render
-    needs_render: bool,
+    // Track whether we need to render (deferred frame or previous drawable miss)
+    pub(crate) needs_render: bool,
 }
 
 impl MetalRenderer {
@@ -113,7 +113,7 @@ impl MetalRenderer {
         let layer = MetalLayer::new();
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-        layer.set_presents_with_transaction(true);
+        layer.set_presents_with_transaction(false);
         layer.set_display_sync_enabled(true);
         layer.set_opaque(true);
         layer.set_framebuffer_only(false); // compute shader writes to texture
@@ -237,22 +237,33 @@ impl MetalRenderer {
     pub fn render_frame(&mut self, grid: &mut Grid, cursor_visible: bool) -> bool {
         // Merge grid dirty rows into both per-buffer pending bitsets
         let cur = self.current_buffer;
+        let mut had_new_dirty = false;
         for (i, bit) in grid.dirty.iter().enumerate() {
             if *bit {
+                had_new_dirty = true;
                 self.pending[0].set(i, true);
                 self.pending[1].set(i, true);
             }
         }
         grid.clear_dirty();
 
+        // Only render when there are NEW dirty rows or a deferred render to retry.
+        // Stale pending bits from the alternate buffer's catch-up are left for the
+        // next real update — avoids wasting a drawable on identical content.
+        if !had_new_dirty && !self.needs_render {
+            return false;
+        }
+
         if !self.pending[cur].any() && !self.needs_render {
             return false;
         }
 
-        // Wait for the target buffer to be free (GPU finished reading it).
-        // In practice this rarely spins — the GPU is at most 1 frame behind.
-        while !self.buffer_ready[cur].load(Ordering::Acquire) {
-            std::hint::spin_loop();
+        // If the GPU is still reading this buffer, skip the frame and retry next
+        // iteration. This keeps the event loop non-blocking so PTY data continues
+        // to be drained while the GPU catches up.
+        if !self.buffer_ready[cur].load(Ordering::Acquire) {
+            self.needs_render = true;
+            return false;
         }
 
         // Copy only dirty rows into the current cell buffer.
@@ -339,7 +350,6 @@ impl MetalRenderer {
             command_buffer.add_completed_handler(&handler);
 
             command_buffer.commit();
-            command_buffer.wait_until_scheduled();
             drawable.present();
 
             // Swap to the other buffer for next frame

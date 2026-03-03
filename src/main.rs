@@ -1089,11 +1089,12 @@ impl App {
             self.prev_cursor_col = cursor_col;
         }
 
-        // render_frame returns true when GPU work was dispatched, false when idle
+        // render_frame returns true when GPU work was dispatched, false when idle.
+        // A deferred render (GPU buffer busy) is not idle — we want to retry promptly.
         let dispatched = self
             .renderer
             .render_frame(&mut self.shared.grid, self.cursor_visible);
-        !dispatched
+        !dispatched && !self.renderer.needs_render
     }
 
     fn copy_selection(&self) {
@@ -1390,54 +1391,66 @@ impl App {
                 precise,
             } => {
                 self.cursor_pos = (*x, *y);
-                let cell = self.pixel_to_cell(*x, *y);
-                let mouse_mode = self.shared.grid.mode.intersects(
-                    TermMode::MOUSE_BUTTON | TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL,
-                );
-
-                // Precise (trackpad): delta is in points — accumulate and convert to lines.
-                // Non-precise (mouse wheel): delta is already in lines.
+                // Accumulate scroll delta — actual PTY events are flushed once
+                // per frame (in flush_scroll) so that rapid trackpad events are
+                // coalesced into a single batched write.
                 let cell_height_pts = self.renderer.cell_height as f64 / self.renderer.scale_factor;
                 if *precise {
                     self.scroll_accumulator += *delta_y;
                 } else {
                     self.scroll_accumulator += *delta_y * cell_height_pts;
                 }
-
-                // Extract whole lines from the accumulator, capped to prevent
-                // flooding the PTY with too many events per frame.
-                let lines = (self.scroll_accumulator / cell_height_pts) as i32;
-                if lines == 0 {
-                    // Not enough delta accumulated for a full line yet
-                } else {
-                    self.scroll_accumulator -= lines as f64 * cell_height_pts;
-                    let count = lines.unsigned_abs().min(5);
-
-                    if mouse_mode {
-                        // Mouse mode: send scroll button events (64=up, 65=down)
-                        let sgr = self.shared.grid.mode.contains(TermMode::MOUSE_SGR);
-                        let button = if lines > 0 { 64u8 } else { 65u8 };
-                        for _ in 0..count {
-                            let bytes =
-                                input::mouse_to_bytes(button, cell.0 + 1, cell.1 + 1, true, sgr);
-                            let _ = self.pty.write(&bytes);
-                        }
-                    } else {
-                        // No mouse mode: send arrow up/down for shell scrolling
-                        let app_cursor = self.shared.grid.mode.contains(TermMode::CURSOR_KEYS);
-                        let seq = if lines > 0 {
-                            if app_cursor { b"\x1BOA" } else { b"\x1B[A" }
-                        } else if app_cursor {
-                            b"\x1BOB"
-                        } else {
-                            b"\x1B[B"
-                        };
-                        for _ in 0..count {
-                            let _ = self.pty.write(seq.as_slice());
-                        }
-                    }
-                }
             }
+        }
+    }
+
+    /// Flush accumulated scroll delta as batched mouse/arrow events.
+    /// Called once per frame after all events are processed, so that rapid
+    /// trackpad events are coalesced into a single PTY write.
+    fn flush_scroll(&mut self) {
+        let cell_height_pts = self.renderer.cell_height as f64 / self.renderer.scale_factor;
+        let lines = (self.scroll_accumulator / cell_height_pts) as i32;
+        if lines == 0 {
+            return;
+        }
+
+        // Cap per-frame events at terminal height — one full page per frame is
+        // plenty, and keeps the PTY buffer from overflowing with tmux redraws.
+        let max_lines = self.shared.grid.rows as u32;
+        let count = lines.unsigned_abs().min(max_lines);
+
+        // Subtract only the consumed delta — excess carries to the next frame.
+        let sign = if lines > 0 { 1.0 } else { -1.0 };
+        self.scroll_accumulator -= count as f64 * cell_height_pts * sign;
+
+        let mouse_mode = self.shared.grid.mode.intersects(
+            TermMode::MOUSE_BUTTON | TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL,
+        );
+
+        if mouse_mode {
+            let cell = self.pixel_to_cell(self.cursor_pos.0, self.cursor_pos.1);
+            let sgr = self.shared.grid.mode.contains(TermMode::MOUSE_SGR);
+            let button = if lines > 0 { 64u8 } else { 65u8 };
+            let single = input::mouse_to_bytes(button, cell.0 + 1, cell.1 + 1, true, sgr);
+            let mut batch = Vec::with_capacity(single.len() * count as usize);
+            for _ in 0..count {
+                batch.extend_from_slice(&single);
+            }
+            let _ = self.pty.write(&batch);
+        } else {
+            let app_cursor = self.shared.grid.mode.contains(TermMode::CURSOR_KEYS);
+            let seq: &[u8] = if lines > 0 {
+                if app_cursor { b"\x1BOA" } else { b"\x1B[A" }
+            } else if app_cursor {
+                b"\x1BOB"
+            } else {
+                b"\x1B[B"
+            };
+            let mut batch = Vec::with_capacity(seq.len() * count as usize);
+            for _ in 0..count {
+                batch.extend_from_slice(seq);
+            }
+            let _ = self.pty.write(&batch);
         }
     }
 }
@@ -1527,6 +1540,7 @@ fn main() {
             for event in &events {
                 app.handle_event(event, &win);
             }
+            app.flush_scroll();
 
             let frame_idle = app.render();
             !got_pty_data && !got_events && frame_idle
