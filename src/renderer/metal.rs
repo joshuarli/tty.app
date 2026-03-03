@@ -113,7 +113,7 @@ impl MetalRenderer {
         let layer = MetalLayer::new();
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-        layer.set_presents_with_transaction(false);
+        layer.set_presents_with_transaction(true);
         layer.set_display_sync_enabled(true);
         layer.set_opaque(true);
         layer.set_framebuffer_only(false); // compute shader writes to texture
@@ -350,6 +350,7 @@ impl MetalRenderer {
             command_buffer.add_completed_handler(&handler);
 
             command_buffer.commit();
+            command_buffer.wait_until_scheduled();
             drawable.present();
 
             // Swap to the other buffer for next frame
