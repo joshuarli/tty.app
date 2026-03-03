@@ -102,22 +102,17 @@ impl SimdScanner {
     #[inline]
     unsafe fn find_first_zero(v: core::arch::aarch64::uint8x16_t) -> usize {
         use core::arch::aarch64::*;
-        // Find first byte that is 0x00 (not 0xFF)
-        // Narrow to 8 bytes, then extract and find trailing zeros
+        // Narrow 16×u8 to 8×u8 by treating as u16 lanes and shifting right 4.
+        // Each output nibble is 0xF (ok) or 0x0 (attention).
         let narrowed = unsafe { vshrn_n_u16::<4>(vreinterpretq_u16_u8(v)) };
         let bits = unsafe { vget_lane_u64::<0>(vreinterpret_u64_u8(narrowed)) };
-        // Each byte in narrowed is 0x0F (ok) or 0x00 (attention)
-        // Find first 0x00 nibble
-        if bits == 0xFFFF_FFFF_FFFF_FFFF {
-            return 16; // all ok (shouldn't happen if called correctly)
-        }
-        // Each nibble represents one byte. Find first zero nibble.
-        for i in 0..16 {
-            if ((bits >> (i * 4)) & 0xF) == 0 {
-                return i;
-            }
-        }
-        16
+        // Find first zero nibble using the "has zero nibble" trick:
+        // subtract 0x1111... so zero nibbles underflow, then mask with
+        // inverted bits to isolate actual zeros from borrow propagation.
+        let zero_mask = bits.wrapping_sub(0x1111_1111_1111_1111) & !bits & 0x8888_8888_8888_8888;
+        // Each set bit in zero_mask marks bit 3 of the first zero nibble.
+        // trailing_zeros / 4 gives the nibble index.
+        (zero_mask.trailing_zeros() / 4) as usize
     }
 
     /// Scalar fallback for non-aarch64 (shouldn't be used on Apple Silicon).

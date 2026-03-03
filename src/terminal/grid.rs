@@ -3,6 +3,7 @@ use std::time::Instant;
 use bitvec::prelude::*;
 
 use crate::terminal::cell::{Cell, CellFlags};
+use crate::terminal::scrollback::Scrollback;
 
 // Terminal mode flags (DECSET/DECRST)
 bitflags::bitflags! {
@@ -150,41 +151,39 @@ impl Grid {
 
     /// Clear row range [from..to) using current SGR background color.
     pub fn clear_rows(&mut self, from: u16, to: u16) {
-        let attr = self.attr;
+        let blank = Cell::blank(&self.attr);
         for row in from..to.min(self.rows) {
             let start = row as usize * self.cols as usize;
             let end = start + self.cols as usize;
-            for cell in &mut self.cells[start..end] {
-                cell.erase(&attr);
-            }
+            self.cells[start..end].fill(blank);
             self.mark_dirty(row);
         }
     }
 
     /// Clear columns [from_col..to_col) using current SGR background color.
     pub fn clear_cols(&mut self, row: u16, from_col: u16, to_col: u16) {
-        let attr = self.attr;
+        let blank = Cell::blank(&self.attr);
         let cols = self.cols;
         let start = row as usize * cols as usize + from_col as usize;
         let end = row as usize * cols as usize + to_col.min(cols) as usize;
-        for cell in &mut self.cells[start..end] {
-            cell.erase(&attr);
-        }
+        self.cells[start..end].fill(blank);
         self.mark_dirty(row);
     }
 
     /// Scroll the region [scroll_top..=scroll_bottom] up by n lines.
     /// New lines at the bottom are cleared.
-    pub fn scroll_up(&mut self, n: u16) -> Vec<Vec<Cell>> {
+    /// If scrollback is provided and scroll_top == 0, evicted rows are pushed directly.
+    pub fn scroll_up_into(&mut self, n: u16, scrollback: Option<&mut Scrollback>) {
         let n = n.min(self.scroll_bottom - self.scroll_top + 1);
         let cols = self.cols as usize;
-        let mut evicted = Vec::new();
 
-        // Save evicted rows (for scrollback)
+        // Push evicted rows directly into scrollback (no intermediate Vec)
         if self.scroll_top == 0 {
-            for row in 0..n {
-                let start = row as usize * cols;
-                evicted.push(self.cells[start..start + cols].to_vec());
+            if let Some(sb) = scrollback {
+                for row in 0..n {
+                    let start = row as usize * cols;
+                    sb.push_slice(&self.cells[start..start + cols]);
+                }
             }
         }
 
@@ -196,21 +195,22 @@ impl Grid {
             .copy_within(src_start..src_start + count, dst_start);
 
         // Clear new rows at bottom of scroll region (use current bg color)
-        let attr = self.attr;
+        let blank = Cell::blank(&self.attr);
         let clear_from = self.scroll_bottom + 1 - n;
         for row in clear_from..=self.scroll_bottom {
             let start = row as usize * cols;
-            for cell in &mut self.cells[start..start + cols] {
-                cell.erase(&attr);
-            }
+            self.cells[start..start + cols].fill(blank);
         }
 
         // Mark affected rows dirty
         for row in self.scroll_top..=self.scroll_bottom {
             self.mark_dirty(row);
         }
+    }
 
-        evicted
+    /// Scroll up without scrollback (used by insert_lines/delete_lines).
+    pub fn scroll_up(&mut self, n: u16) {
+        self.scroll_up_into(n, None);
     }
 
     /// Scroll the region [scroll_top..=scroll_bottom] down by n lines.
@@ -227,12 +227,10 @@ impl Grid {
             .copy_within(src_start..src_start + count, dst_start);
 
         // Clear new rows at top of scroll region (use current bg color)
-        let attr = self.attr;
+        let blank = Cell::blank(&self.attr);
         for row in self.scroll_top..self.scroll_top + n {
             let start = row as usize * cols;
-            for cell in &mut self.cells[start..start + cols] {
-                cell.erase(&attr);
-            }
+            self.cells[start..start + cols].fill(blank);
         }
 
         for row in self.scroll_top..=self.scroll_bottom {
@@ -249,9 +247,10 @@ impl Grid {
         self.save_cursor_to(&mut self.main_cursor.clone());
         self.main_cursor = self.current_saved_cursor();
 
-        // Swap buffers
+        // Swap buffers (reuse existing allocation when possible)
         let total = self.cols as usize * self.rows as usize;
-        self.alt_cells = vec![Cell::default(); total];
+        self.alt_cells.clear();
+        self.alt_cells.resize(total, Cell::default());
         std::mem::swap(&mut self.cells, &mut self.alt_cells);
 
         self.cursor_row = 0;
@@ -314,15 +313,14 @@ impl Grid {
     /// Resize the grid. Existing content is preserved where possible.
     pub fn resize(&mut self, new_cols: u16, new_rows: u16) {
         let mut new_cells = vec![Cell::default(); new_cols as usize * new_rows as usize];
-        let copy_rows = self.rows.min(new_rows);
-        let copy_cols = self.cols.min(new_cols);
+        let copy_rows = self.rows.min(new_rows) as usize;
+        let copy_cols = self.cols.min(new_cols) as usize;
 
         for row in 0..copy_rows {
-            for col in 0..copy_cols {
-                let src = row as usize * self.cols as usize + col as usize;
-                let dst = row as usize * new_cols as usize + col as usize;
-                new_cells[dst] = self.cells[src];
-            }
+            let src_start = row * self.cols as usize;
+            let dst_start = row * new_cols as usize;
+            new_cells[dst_start..dst_start + copy_cols]
+                .copy_from_slice(&self.cells[src_start..src_start + copy_cols]);
         }
 
         self.cells = new_cells;
@@ -430,7 +428,7 @@ impl Grid {
         cell.atlas_x = atlas_x;
         cell.atlas_y = atlas_y;
 
-        // Continuation cell
+        // Continuation cell — carry atlas coords so the shader can sample directly
         let cell2 = &mut self.cells[idx + 1];
         cell2.codepoint = b' ' as u16;
         cell2.flags = CellFlags::WIDE_CONT;
@@ -438,8 +436,8 @@ impl Grid {
         cell2.bg_index = attr.bg_index;
         cell2.fg_rgb = attr.fg_rgb;
         cell2.bg_rgb = attr.bg_rgb;
-        cell2.atlas_x = 0;
-        cell2.atlas_y = 0;
+        cell2.atlas_x = atlas_x;
+        cell2.atlas_y = atlas_y;
 
         self.mark_dirty(row);
 

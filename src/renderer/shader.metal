@@ -119,12 +119,11 @@ static inline half4 unpack_rgb(uint rgb) {
 }
 
 static inline half4 resolve_color(uchar index, uint rgb,
-                                   device const float4* palette) {
+                                   device const half4* palette) {
     if (index == 0xFF) {
         return unpack_rgb(rgb);
     }
-    float4 c = palette[index];
-    return half4(c);
+    return palette[index];
 }
 
 static inline bool draw_box_line(uint cp, uint px, uint py,
@@ -168,7 +167,7 @@ kernel void render(
     texture2d<half, access::write>  output     [[texture(0)]],
     texture2d<half, access::read>   atlas      [[texture(1)]],
     device const CellData*          cells      [[buffer(0)]],
-    device const float4*            palette    [[buffer(1)]],
+    device const half4*             palette    [[buffer(1)]],
     constant Uniforms&              uni        [[buffer(2)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
@@ -199,22 +198,17 @@ kernel void render(
 
     CellData cell = cells[row * uni.cols + col];
 
-    // Wide continuation — render background only
+    // Wide continuation — the cell carries the owner's colors and atlas coords
     if (cell.flags & FLAG_WIDE_CONT) {
-        // Look at the cell to the left for background color
-        CellData owner = (col > 0) ? cells[row * uni.cols + col - 1] : cell;
-        uchar owner_fg_idx = owner.fg_index;
-        if ((owner.flags & FLAG_BOLD) && owner_fg_idx < 8) owner_fg_idx += 8;
-        half4 bg = resolve_color(owner.bg_index, owner.bg_rgb, palette);
-        if (owner.flags & FLAG_INVERSE) bg = resolve_color(owner_fg_idx, owner.fg_rgb, palette);
-        // For wide chars, offset px to sample the right half of the glyph
+        half4 fg = resolve_color(cell.fg_index, cell.fg_rgb, palette);
+        half4 bg = resolve_color(cell.bg_index, cell.bg_rgb, palette);
+        if (cell.flags & FLAG_INVERSE) { half4 tmp = fg; fg = bg; bg = tmp; }
+        if (cell.flags & FLAG_HIDDEN) fg = bg;
+        // Offset px to sample the right half of the wide glyph
         px += uni.cell_width;
-        uint atlas_px = uint(owner.atlas_x) * uni.atlas_cell_width + px;
-        uint atlas_py = uint(owner.atlas_y) * uni.atlas_cell_height + py;
+        uint atlas_px = uint(cell.atlas_x) * uni.atlas_cell_width + px;
+        uint atlas_py = uint(cell.atlas_y) * uni.atlas_cell_height + py;
         half alpha = atlas.read(uint2(atlas_px, atlas_py)).r;
-        half4 fg = resolve_color(owner_fg_idx, owner.fg_rgb, palette);
-        if (owner.flags & FLAG_INVERSE) fg = resolve_color(owner.bg_index, owner.bg_rgb, palette);
-        if (owner.flags & FLAG_HIDDEN) fg = bg;
         half4 color = mix(bg, fg, alpha);
         output.write(color, gid);
         return;
@@ -258,7 +252,7 @@ kernel void render(
         if (draw_box_line(cp, px, py, uni.cell_width, uni.cell_height)) {
             color = fg;
         }
-    } else if (cell.atlas_x != 0 || cell.atlas_y != 0 || cell.codepoint == 0x20 || cell.codepoint == 0) {
+    } else if (cell.atlas_x != 0 || cell.atlas_y != 0) {
         // Glyph from atlas
         uint glyph_w = (cell.flags & FLAG_WIDE) ? uni.atlas_cell_width * 2 : uni.atlas_cell_width;
         if (px < glyph_w && py < uni.atlas_cell_height) {

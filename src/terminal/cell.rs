@@ -46,16 +46,18 @@ impl Default for Cell {
 }
 
 impl Cell {
-    /// Erase this cell using the current SGR attributes for background color.
-    /// Per VT spec, erase operations (ED/EL/ECH) fill with current bg color.
-    pub fn erase(&mut self, attr: &Cell) {
-        self.codepoint = b' ' as u16;
-        self.flags = CellFlags::empty();
-        self.fg_index = attr.fg_index;
-        self.bg_index = attr.bg_index;
-        self.atlas_x = 0;
-        self.atlas_y = 0;
-        self.fg_rgb = attr.fg_rgb;
-        self.bg_rgb = attr.bg_rgb;
+    /// Create a blank cell with the given SGR background attributes.
+    #[inline]
+    pub fn blank(attr: &Cell) -> Self {
+        Self {
+            codepoint: b' ' as u16,
+            flags: CellFlags::empty(),
+            fg_index: attr.fg_index,
+            bg_index: attr.bg_index,
+            atlas_x: 0,
+            atlas_y: 0,
+            fg_rgb: attr.fg_rgb,
+            bg_rgb: attr.bg_rgb,
+        }
     }
 }

@@ -36,16 +36,20 @@ impl Scrollback {
         self.len = 0;
     }
 
-    /// Push a row into the scrollback. Overwrites oldest if full.
-    pub fn push(&mut self, row: Vec<Cell>) {
+    /// Push a row from a slice into the scrollback. Reuses existing allocations
+    /// once the ring buffer is full (zero-alloc in steady state).
+    pub fn push_slice(&mut self, cells: &[Cell]) {
         if self.capacity == 0 {
             return;
         }
         if self.buf.len() < self.capacity {
-            self.buf.push(row);
+            self.buf.push(cells.to_vec());
             self.len = self.buf.len();
         } else {
-            self.buf[self.head] = row;
+            // Reuse existing Vec allocation
+            let row = &mut self.buf[self.head];
+            row.clear();
+            row.extend_from_slice(cells);
             self.head = (self.head + 1) % self.capacity;
             self.len = self.capacity;
         }

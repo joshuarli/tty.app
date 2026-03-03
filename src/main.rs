@@ -49,16 +49,26 @@ impl<'a> Perform for TermPerformer<'a> {
         let use_dec = (self.grid.active_charset == 0 && self.grid.charset_g0 == 1)
             || (self.grid.active_charset == 1 && self.grid.charset_g1 == 1);
 
-        for &b in bytes {
-            let ch = if use_dec && (0x60..=0x7E).contains(&b) {
-                translate_dec_special(b)
-            } else {
-                b as char
-            };
-            let cp = ch as u16;
-            let pos = self.atlas.get_or_insert(cp, false, self.rasterizer);
-            self.grid.write_char(ch, pos.x, pos.y);
-            self.grid.last_char = ch;
+        if use_dec {
+            for &b in bytes {
+                let ch = if (0x60..=0x7E).contains(&b) {
+                    translate_dec_special(b)
+                } else {
+                    b as char
+                };
+                let pos = self.atlas.get_ascii(b);
+                self.grid.write_char(ch, pos.x, pos.y);
+                self.grid.last_char = ch;
+            }
+        } else {
+            // Fast path: direct table lookup, no HashMap, no LRU
+            for &b in bytes {
+                let pos = self.atlas.get_ascii(b);
+                self.grid.write_char(b as char, pos.x, pos.y);
+            }
+            if let Some(&last) = bytes.last() {
+                self.grid.last_char = last as char;
+            }
         }
     }
 
@@ -113,10 +123,7 @@ impl<'a> Perform for TermPerformer<'a> {
             0x0A..=0x0C => {
                 // LF, VT, FF
                 if self.grid.cursor_row == self.grid.scroll_bottom {
-                    let evicted = self.grid.scroll_up(1);
-                    for row in evicted {
-                        self.scrollback.push(row);
-                    }
+                    self.grid.scroll_up_into(1, Some(self.scrollback));
                 } else if self.grid.cursor_row < self.grid.rows - 1 {
                     self.grid.cursor_row += 1;
                 }
@@ -231,10 +238,7 @@ impl<'a> Perform for TermPerformer<'a> {
     }
 
     fn scroll_up(&mut self, n: u16) {
-        let evicted = self.grid.scroll_up(n);
-        for row in evicted {
-            self.scrollback.push(row);
-        }
+        self.grid.scroll_up_into(n, Some(self.scrollback));
     }
 
     fn scroll_down(&mut self, n: u16) {
@@ -272,13 +276,12 @@ impl<'a> Perform for TermPerformer<'a> {
         let n = n.min(cols - col);
 
         let row_start = row as usize * cols as usize;
-        for c in (col + n..cols).rev() {
-            self.grid.cells[row_start + c as usize] = self.grid.cells[row_start + (c - n) as usize];
-        }
-        let attr = self.grid.attr;
-        for c in col..col + n {
-            self.grid.cells[row_start + c as usize].erase(&attr);
-        }
+        let src = row_start + col as usize;
+        let dst = row_start + (col + n) as usize;
+        let count = (cols - col - n) as usize;
+        self.grid.cells.copy_within(src..src + count, dst);
+        let blank = Cell::blank(&self.grid.attr);
+        self.grid.cells[src..src + n as usize].fill(blank);
         self.grid.mark_dirty(row);
     }
 
@@ -289,13 +292,13 @@ impl<'a> Perform for TermPerformer<'a> {
         let n = n.min(cols - col);
 
         let row_start = row as usize * cols as usize;
-        for c in col..cols - n {
-            self.grid.cells[row_start + c as usize] = self.grid.cells[row_start + (c + n) as usize];
-        }
-        let attr = self.grid.attr;
-        for c in cols - n..cols {
-            self.grid.cells[row_start + c as usize].erase(&attr);
-        }
+        let dst = row_start + col as usize;
+        let src = row_start + (col + n) as usize;
+        let count = (cols - col - n) as usize;
+        self.grid.cells.copy_within(src..src + count, dst);
+        let blank = Cell::blank(&self.grid.attr);
+        let fill_start = row_start + (cols - n) as usize;
+        self.grid.cells[fill_start..fill_start + n as usize].fill(blank);
         self.grid.mark_dirty(row);
     }
 
@@ -632,10 +635,7 @@ impl<'a> Perform for TermPerformer<'a> {
             ([], b'D') => {
                 // IND
                 if self.grid.cursor_row == self.grid.scroll_bottom {
-                    let evicted = self.grid.scroll_up(1);
-                    for row in evicted {
-                        self.scrollback.push(row);
-                    }
+                    self.grid.scroll_up_into(1, Some(self.scrollback));
                 } else if self.grid.cursor_row < self.grid.rows - 1 {
                     self.grid.cursor_row += 1;
                 }
@@ -644,10 +644,7 @@ impl<'a> Perform for TermPerformer<'a> {
                 // NEL
                 self.grid.cursor_col = 0;
                 if self.grid.cursor_row == self.grid.scroll_bottom {
-                    let evicted = self.grid.scroll_up(1);
-                    for row in evicted {
-                        self.scrollback.push(row);
-                    }
+                    self.grid.scroll_up_into(1, Some(self.scrollback));
                 } else if self.grid.cursor_row < self.grid.rows - 1 {
                     self.grid.cursor_row += 1;
                 }
@@ -868,6 +865,8 @@ struct App {
     // Selection state
     selection_start: Option<(u16, u16)>, // (col, row)
     selection_end: Option<(u16, u16)>,   // (col, row)
+    // Previously rendered selection range for targeted clearing
+    prev_sel_rows: Option<(u16, u16)>,   // (first_row, last_row) inclusive
     mouse_pressed: bool,
     cursor_pos: (f64, f64), // Physical pixel position of mouse cursor
 
@@ -877,6 +876,9 @@ struct App {
 
     // Accumulated scroll delta (in logical points) for fractional accumulation
     scroll_accumulator: f64,
+
+    // Reusable PTY read buffer (avoids 64KB stack alloc per frame)
+    pty_buf: Vec<u8>,
 }
 
 impl App {
@@ -938,22 +940,22 @@ impl App {
             alive: true,
             selection_start: None,
             selection_end: None,
+            prev_sel_rows: None,
             mouse_pressed: false,
             cursor_pos: (0.0, 0.0),
             prev_cursor_row: 0,
             prev_cursor_col: 0,
             scroll_accumulator: 0.0,
+            pty_buf: vec![0u8; 65536],
         }
     }
 
     /// Returns true if any PTY data was read.
     fn process_pty_output(&mut self, win: &NativeWindow) -> bool {
-        let pty = self.pty.clone();
-        let mut buf = [0u8; 65536];
         let mut got_data = false;
 
         loop {
-            match pty.read(&mut buf) {
+            match self.pty.read(&mut self.pty_buf) {
                 Ok(0) => {
                     // EOF — shell exited
                     self.shared.alive = false;
@@ -970,7 +972,7 @@ impl App {
                             rasterizer: &self.rasterizer,
                             response_buf: &mut response_buf,
                         };
-                        self.parser.parse(&buf[..n], &mut performer);
+                        self.parser.parse(&self.pty_buf[..n], &mut performer);
                     }
                     self.shared.response_buf = response_buf;
                 }
@@ -1036,10 +1038,7 @@ impl App {
     }
 
     /// Returns true if the frame was idle (no GPU work dispatched).
-    fn render(&mut self, win: &NativeWindow) -> bool {
-        // Drain any PTY data that arrived since last poll.
-        self.process_pty_output(win);
-
+    fn render(&mut self) -> bool {
         // Synchronized output (Mode 2026): defer rendering while the application
         // is mid-update. sync_start is set by the parser when mode 2026 is enabled
         // and cleared when disabled, so it precisely tracks each sync block.
@@ -1184,6 +1183,20 @@ impl App {
         (col, row)
     }
 
+    fn clear_selection_flags(&mut self) {
+        if let Some((first, last)) = self.prev_sel_rows {
+            let cols = self.shared.grid.cols as usize;
+            for row in first..=last.min(self.shared.grid.rows - 1) {
+                let start = row as usize * cols;
+                for cell in &mut self.shared.grid.cells[start..start + cols] {
+                    cell.flags.remove(CellFlags::SELECTED);
+                }
+                self.shared.grid.mark_dirty(row);
+            }
+            self.prev_sel_rows = None;
+        }
+    }
+
     fn update_selection(&mut self) {
         if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
             // Normalize start/end
@@ -1193,11 +1206,8 @@ impl App {
                 (end, start)
             };
 
-            // Clear old selection
-            let total = self.shared.grid.cols as usize * self.shared.grid.rows as usize;
-            for i in 0..total {
-                self.shared.grid.cells[i].flags.remove(CellFlags::SELECTED);
-            }
+            // Clear only previously selected rows
+            self.clear_selection_flags();
 
             // Set new selection
             for row in start.1..=end.1 {
@@ -1216,6 +1226,7 @@ impl App {
                 }
                 self.shared.grid.mark_dirty(row);
             }
+            self.prev_sel_rows = Some((start.1, end.1));
         }
     }
 
@@ -1223,11 +1234,7 @@ impl App {
         if self.selection_start.is_some() {
             self.selection_start = None;
             self.selection_end = None;
-            let total = self.shared.grid.cols as usize * self.shared.grid.rows as usize;
-            for i in 0..total {
-                self.shared.grid.cells[i].flags.remove(CellFlags::SELECTED);
-            }
-            self.shared.grid.mark_all_dirty();
+            self.clear_selection_flags();
         }
     }
 
@@ -1521,7 +1528,7 @@ fn main() {
                 app.handle_event(event, &win);
             }
 
-            let frame_idle = app.render(&win);
+            let frame_idle = app.render();
             !got_pty_data && !got_events && frame_idle
         });
 

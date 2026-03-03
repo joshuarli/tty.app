@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 
 use metal::*;
 
@@ -33,8 +34,12 @@ pub struct Atlas {
     // LRU: slot → last used frame
     usage: Vec<u64>,
     frame: u64,
+    // Min-heap for O(log n) LRU eviction (lazy deletion)
+    lru_heap: BinaryHeap<Reverse<(u64, u32)>>,
     // Slots 0..ascii_end are pinned (never evicted)
     ascii_end: u32,
+    // Direct lookup for ASCII (0x00..0x7F) — bypasses HashMap and LRU
+    ascii_table: [AtlasPos; 128],
 }
 
 impl Atlas {
@@ -61,7 +66,9 @@ impl Atlas {
             next_slot: 0,
             usage: vec![0; (cols * rows) as usize],
             frame: 0,
+            lru_heap: BinaryHeap::with_capacity(512),
             ascii_end: 0,
+            ascii_table: [AtlasPos::default(); 128],
         }
     }
 
@@ -73,10 +80,17 @@ impl Atlas {
                 wide: false,
             };
             if let Some(glyph) = rasterizer.rasterize(cp) {
-                self.insert(key, &glyph);
+                let pos = self.insert(key, &glyph);
+                self.ascii_table[cp as usize] = pos;
             }
         }
         self.ascii_end = self.next_slot;
+    }
+
+    /// Direct ASCII lookup — no HashMap, no LRU. Caller must ensure cp < 128.
+    #[inline]
+    pub fn get_ascii(&self, cp: u8) -> AtlasPos {
+        self.ascii_table[cp as usize]
     }
 
     /// Look up or rasterize a glyph, returning its atlas position.
@@ -91,6 +105,7 @@ impl Atlas {
         if let Some(pos) = self.map.get(&key) {
             let slot = pos.y as u32 * self.cols + pos.x as u32;
             self.usage[slot as usize] = self.frame;
+            self.lru_heap.push(Reverse((self.frame, slot)));
             return *pos;
         }
 
@@ -142,27 +157,27 @@ impl Atlas {
         };
         self.map.insert(key, pos);
         self.usage[slot as usize] = self.frame;
+        self.lru_heap.push(Reverse((self.frame, slot)));
         pos
     }
 
     fn evict_lru(&mut self) -> u32 {
-        // Find the least recently used slot (skip pinned ASCII)
-        let mut min_frame = u64::MAX;
-        let mut min_slot = self.ascii_end;
-
-        for slot in self.ascii_end..(self.cols * self.rows) {
-            if self.usage[slot as usize] < min_frame {
-                min_frame = self.usage[slot as usize];
-                min_slot = slot;
+        // Pop stale entries until we find a valid, non-pinned LRU slot
+        while let Some(Reverse((frame, slot))) = self.lru_heap.pop() {
+            if slot < self.ascii_end {
+                continue; // pinned
             }
+            if self.usage[slot as usize] != frame {
+                continue; // stale — slot was accessed more recently
+            }
+            // Found the real LRU slot
+            let grid_x = slot % self.cols;
+            let grid_y = slot / self.cols;
+            self.map
+                .retain(|_, pos| !(pos.x == grid_x as u8 && pos.y == grid_y as u8));
+            return slot;
         }
-
-        // Remove the old entry from the map
-        let grid_x = min_slot % self.cols;
-        let grid_y = min_slot / self.cols;
-        self.map
-            .retain(|_, pos| !(pos.x == grid_x as u8 && pos.y == grid_y as u8));
-
-        min_slot
+        // Fallback: shouldn't happen unless every slot is pinned
+        self.ascii_end
     }
 }

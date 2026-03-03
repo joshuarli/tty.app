@@ -4,6 +4,7 @@ use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use bitvec::prelude::*;
 use block::ConcreteBlock;
 use core_graphics_types::geometry::CGSize;
 use metal::foreign_types::ForeignType;
@@ -68,8 +69,10 @@ pub struct MetalRenderer {
     cell_buffers: [Buffer; NUM_BUFFERS],
     current_buffer: usize,
     buffer_ready: [Arc<AtomicBool>; NUM_BUFFERS],
+    // Per-buffer dirty row tracking: each dirty row must be copied to BOTH buffers
+    pending: [BitVec; NUM_BUFFERS],
 
-    // Palette buffer (256 × float4)
+    // Palette buffer (256 × half4)
     palette_buffer: Buffer,
 
     // Uniform buffer
@@ -150,11 +153,11 @@ impl MetalRenderer {
             Arc::new(AtomicBool::new(true)),
         ];
 
-        // Palette buffer (256 × [f32; 4])
+        // Palette buffer (256 × half4 = 256 × 4 × 2 bytes)
         let palette_data = Self::build_palette_buffer();
         let palette_buffer = device.new_buffer_with_data(
             palette_data.as_ptr() as *const c_void,
-            (256 * 4 * mem::size_of::<f32>()) as u64,
+            (256 * 4 * mem::size_of::<u16>()) as u64,
             MTLResourceOptions::StorageModeShared,
         );
 
@@ -181,6 +184,10 @@ impl MetalRenderer {
             cell_buffers,
             current_buffer: 0,
             buffer_ready,
+            pending: [
+                bitvec![1; rows as usize],
+                bitvec![1; rows as usize],
+            ],
             palette_buffer,
             uniform_buffer,
             atlas_texture,
@@ -194,16 +201,31 @@ impl MetalRenderer {
         }
     }
 
-    fn build_palette_buffer() -> Vec<f32> {
+    /// Convert f32 to IEEE 754 half-precision (f16) stored as u16.
+    fn f32_to_f16(val: f32) -> u16 {
+        let bits = val.to_bits();
+        let sign = (bits >> 16) & 0x8000;
+        let exp = ((bits >> 23) & 0xFF) as i32 - 127 + 15;
+        let frac = bits & 0x007F_FFFF;
+        if exp <= 0 {
+            0 // flush subnormals to zero — palette values are [0,1]
+        } else if exp >= 31 {
+            (sign | 0x7C00) as u16 // infinity
+        } else {
+            (sign | ((exp as u32) << 10) | (frac >> 13)) as u16
+        }
+    }
+
+    fn build_palette_buffer() -> Vec<u16> {
         let mut data = Vec::with_capacity(256 * 4);
         for &rgb in config::PALETTE.iter() {
             let r = ((rgb >> 16) & 0xFF) as f32 / 255.0;
             let g = ((rgb >> 8) & 0xFF) as f32 / 255.0;
             let b = (rgb & 0xFF) as f32 / 255.0;
-            data.push(r);
-            data.push(g);
-            data.push(b);
-            data.push(1.0);
+            data.push(Self::f32_to_f16(r));
+            data.push(Self::f32_to_f16(g));
+            data.push(Self::f32_to_f16(b));
+            data.push(Self::f32_to_f16(1.0));
         }
         data
     }
@@ -213,29 +235,46 @@ impl MetalRenderer {
     /// Cell data is bulk-copied from the grid (Cell and CellData share identical repr(C) layout).
     /// Bold brightness and hidden attribute are handled in the shader.
     pub fn render_frame(&mut self, grid: &mut Grid, cursor_visible: bool) -> bool {
-        let any_dirty = grid.dirty.any();
+        // Merge grid dirty rows into both per-buffer pending bitsets
+        let cur = self.current_buffer;
+        for (i, bit) in grid.dirty.iter().enumerate() {
+            if *bit {
+                self.pending[0].set(i, true);
+                self.pending[1].set(i, true);
+            }
+        }
         grid.clear_dirty();
 
-        if !any_dirty && !self.needs_render {
+        if !self.pending[cur].any() && !self.needs_render {
             return false;
         }
 
         // Wait for the target buffer to be free (GPU finished reading it).
         // In practice this rarely spins — the GPU is at most 1 frame behind.
-        while !self.buffer_ready[self.current_buffer].load(Ordering::Acquire) {
+        while !self.buffer_ready[cur].load(Ordering::Acquire) {
             std::hint::spin_loop();
         }
 
-        // Bulk-copy the entire grid into the current cell buffer.
+        // Copy only dirty rows into the current cell buffer.
         // Cell is #[repr(C)] with identical layout to CellData — this is a plain memcpy.
-        let grid_cells = grid.cols as usize * grid.rows as usize;
-        let copy_cells = grid_cells.min(self.cols as usize * self.rows as usize);
-        let byte_count = copy_cells * CELL_DATA_SIZE;
-        unsafe {
-            let src = grid.cells.as_ptr() as *const u8;
-            let dst = self.cell_buffers[self.current_buffer].contents() as *mut u8;
-            ptr::copy_nonoverlapping(src, dst, byte_count);
+        let cols = self.cols.min(grid.cols as u32) as usize;
+        let row_bytes = cols * CELL_DATA_SIZE;
+        let src_base = grid.cells.as_ptr() as *const u8;
+        let dst_base = self.cell_buffers[cur].contents() as *mut u8;
+        let src_stride = grid.cols as usize * CELL_DATA_SIZE;
+        let dst_stride = self.cols as usize * CELL_DATA_SIZE;
+        for (row, pending) in self.pending[cur].iter().enumerate() {
+            if *pending {
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        src_base.add(row * src_stride),
+                        dst_base.add(row * dst_stride),
+                        row_bytes,
+                    );
+                }
+            }
         }
+        self.pending[cur].fill(false);
 
         objc2::rc::autoreleasepool(|_| {
             let drawable = match self.layer.next_drawable() {
@@ -341,6 +380,11 @@ impl MetalRenderer {
                 .new_buffer(buffer_size, MTLResourceOptions::StorageModeShared),
             self.device
                 .new_buffer(buffer_size, MTLResourceOptions::StorageModeShared),
+        ];
+        // Mark all rows pending in both buffers after resize
+        self.pending = [
+            bitvec![1; self.rows as usize],
+            bitvec![1; self.rows as usize],
         ];
         self.needs_render = true;
     }
