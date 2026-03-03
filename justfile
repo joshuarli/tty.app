@@ -1,13 +1,20 @@
-target := arch() + "-apple-darwin"
-app    := "tty.app"
+name    := "tty"
+app     := "tty.app"
+target  := arch() + "-apple-darwin"
+nightly := "nightly-2026-02-23"
+
+setup:
+  rustup toolchain install {{ nightly }}
+  rustup component add rust-src --toolchain {{ nightly }}
+  prek install --install-hooks
 
 build:
     cargo build
 
 release:
-    cargo clean -p tty --release --target {{ target }}
+    cargo clean -p {{ name }} --release --target {{ target }}
     RUSTFLAGS="-Zlocation-detail=none -Zunstable-options -Cpanic=immediate-abort" \
-    cargo +nightly build --release \
+    cargo +{{ nightly }} build --release \
       -Z build-std=std \
       -Z build-std-features= \
       --target {{ target }}
@@ -34,7 +41,7 @@ install: release icon
     install -d /Applications/{{ app }}/Contents/Resources
     install -m 644 Info.plist /Applications/{{ app }}/Contents/
     install -m 644 icon.icns /Applications/{{ app }}/Contents/Resources/
-    install -m 755 target/{{ target }}/release/tty /Applications/{{ app }}/Contents/MacOS/
+    install -m 755 target/{{ target }}/release/{{ name }} /Applications/{{ app }}/Contents/MacOS/
     codesign --force --sign - /Applications/{{ app }}
     @echo "Installed to /Applications/{{ app }}"
 
@@ -46,9 +53,6 @@ run-release *ARGS:
 
 stats *ARGS:
     cargo run -- --stats {{ ARGS }}
-
-setup:
-  prek install --install-hooks
 
 pc:
   prek run --all-files
