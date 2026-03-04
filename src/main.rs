@@ -1,3 +1,4 @@
+mod clipboard;
 mod config;
 mod input;
 mod parser;
@@ -9,9 +10,7 @@ mod window;
 use std::sync::Arc;
 use std::time::Instant;
 
-use objc2::rc::Retained;
-use objc2_app_kit::NSPasteboard;
-use objc2_foundation::{NSArray, NSData, NSString, ns_string};
+use crate::clipboard::{clipboard_has_image, get_clipboard, set_clipboard};
 
 use crate::parser::Parser;
 use crate::parser::charset::translate_dec_special;
@@ -1136,6 +1135,9 @@ impl App {
 
     fn paste_clipboard(&self) {
         if let Some(text) = get_clipboard() {
+            if text.is_empty() {
+                return;
+            }
             let bracketed = self.shared.grid.mode.contains(TermMode::BRACKETED_PASTE);
 
             if bracketed {
@@ -1163,6 +1165,11 @@ impl App {
             } else {
                 let _ = self.pty.write(text.as_bytes());
             }
+        } else if clipboard_has_image() {
+            // No text but image data exists. Send Ctrl+V (0x16) so the
+            // application can read the clipboard image directly (e.g. Claude
+            // Code runs `osascript` to grab PNG data from NSPasteboard).
+            let _ = self.pty.write(&[0x16]);
         }
     }
 
@@ -1453,27 +1460,6 @@ impl App {
             let _ = self.pty.write(&batch);
         }
     }
-}
-
-// ── Clipboard helpers ──
-
-fn set_clipboard(text: &str) {
-    let pb = NSPasteboard::generalPasteboard();
-    pb.clearContents();
-    let pasteboard_type = ns_string!("public.utf8-plain-text");
-    let types = NSArray::from_slice(&[pasteboard_type]);
-    unsafe { pb.declareTypes_owner(&types, None) };
-    let ns_text = NSString::from_str(text);
-    pb.setString_forType(&ns_text, pasteboard_type);
-}
-
-fn get_clipboard() -> Option<String> {
-    let pb = NSPasteboard::generalPasteboard();
-    let pasteboard_type = ns_string!("public.utf8-plain-text");
-    // Use dataForType to get raw bytes so that invalid UTF-8 (e.g. from pbcopy of
-    // a file with lone high bytes) doesn't cause stringForType to return nil.
-    let data: Retained<NSData> = pb.dataForType(pasteboard_type)?;
-    Some(String::from_utf8_lossy(&data.to_vec()).into_owned())
 }
 
 fn base64_decode(input: &[u8]) -> Result<Vec<u8>, ()> {
