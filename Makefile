@@ -1,20 +1,24 @@
-install: icon
-	rustup component add rust-src --toolchain nightly-2026-02-23-aarch64-apple-darwin
+NAME   := tty
+APP    := tty.app
+ARCH   := $(shell uname -m | sed 's/arm64/aarch64/')
+TARGET := $(ARCH)-apple-darwin
 
-	cargo clean -p tty --release --target aarch64-apple-darwin
+.PHONY: setup build release-bin release icon install run run-release stats test test-ci pc bump-version
 
+setup:
+	rustup show active-toolchain
+	prek install --install-hooks
+
+build:
+	cargo build
+
+release-bin:
+	cargo clean -p $(NAME) --release --target $(TARGET)
 	RUSTFLAGS="-Zlocation-detail=none -Zunstable-options -Cpanic=immediate-abort" \
-	cargo +nightly-2026-02-23 build --release \
+	cargo build --release \
 	  -Z build-std=std \
 	  -Z build-std-features= \
-	  --target aarch64-apple-darwin
-
-	install -d /Applications/tty.app/Contents/MacOS
-	install -d /Applications/tty.app/Contents/Resources
-	install -m 644 Info.plist /Applications/tty.app/Contents/
-	install -m 644 icon.icns /Applications/tty.app/Contents/Resources/
-	install -m 755 target/aarch64-apple-darwin/release/tty /Applications/tty.app/Contents/MacOS/
-	codesign --force --sign - /Applications/tty.app
+	  --target $(TARGET)
 
 icon:
 	mkdir -p icon.iconset
@@ -30,3 +34,47 @@ icon:
 	sips -z 1024 1024 icon.png --out icon.iconset/icon_512x512@2x.png
 	iconutil -c icns icon.iconset -o icon.icns
 	rm -rf icon.iconset
+
+release: release-bin icon
+	install -d $(APP)/Contents/MacOS
+	install -d $(APP)/Contents/Resources
+	install -m 644 Info.plist $(APP)/Contents/
+	install -m 644 icon.icns $(APP)/Contents/Resources/
+	install -m 755 target/$(TARGET)/release/$(NAME) $(APP)/Contents/MacOS/
+
+install: release
+	cp -R $(APP) /Applications/$(APP)
+	codesign --force --sign - /Applications/$(APP)
+	@echo "Installed to /Applications/$(APP)"
+
+run:
+	cargo run
+
+run-release:
+	cargo run --release
+
+stats:
+	cargo run -- --stats
+
+test:
+	cargo test -- --test-threads=4
+
+# So we don't do duplicate work (building both debug and release) in CI.
+test-ci:
+	cargo test --release -- --test-threads=4
+
+pc:
+	prek run --all-files
+
+# Usage: make bump-version [V=x.y.z]
+# Without V, increments the patch version.
+bump-version:
+ifndef V
+	$(eval OLD := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml))
+	$(eval V := $(shell echo "$(OLD)" | awk -F. '{printf "%d.%d.%d", $$1, $$2, $$3+1}'))
+endif
+	sed -i '' 's/^version = ".*"/version = "$(V)"/' Cargo.toml
+	cargo check --quiet 2>/dev/null
+	git add Cargo.toml Cargo.lock
+	git commit -m "bump version to $(V)"
+	git tag "release/$(V)"
