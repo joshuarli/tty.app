@@ -6,13 +6,13 @@ name: Build
 on:
   push:
     tags:
-      - 'v*'
+      - 'release/*'
 
 jobs:
   build:
     name: Build release
-    runs-on: macos-latest
-    timeout-minutes: 5
+    runs-on: macos-15
+    timeout-minutes: 10
     defaults:
       run:
         shell: bash -euo pipefail {0}
@@ -20,26 +20,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache Rust toolchain
-        id: cache-toolchain
-        uses: actions/cache@v4
-        with:
-          path: ~/.rustup/toolchains/nightly-2026-03-01-aarch64-apple-darwin
-          key: rust-toolchain-nightly-2026-03-01
-
-      - name: Install Rust nightly
-        if: steps.cache-toolchain.outputs.cache-hit != 'true'
-        run: rustup toolchain install nightly-2026-03-01 --profile minimal --component rust-src
-
-      - name: Set Rust nightly as default
-        run: rustup default nightly-2026-03-01
-
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build
-        env:
-          RUSTFLAGS: "-Zlocation-detail=none -Zunstable-options -Cpanic=immediate-abort"
-        run: cargo build --release -Z build-std=std -Z build-std-features= --target aarch64-apple-darwin
+      - name: test and release
+        run: |
+          make test-ci
+          make release
 
       - name: Generate icon
         run: make icon
