@@ -7,6 +7,8 @@ pub fn set_clipboard(text: &str) {
     pb.clearContents();
     let pasteboard_type = ns_string!("public.utf8-plain-text");
     let types = NSArray::from_slice(&[pasteboard_type]);
+    // SAFETY: declareTypes_owner requires an unsafe call due to the optional owner
+    // parameter (raw Objective-C pointer). Passing None is always safe.
     unsafe { pb.declareTypes_owner(&types, None) };
     let ns_text = NSString::from_str(text);
     pb.setString_forType(&ns_text, pasteboard_type);
@@ -38,6 +40,7 @@ pub fn set_clipboard_image(data: &[u8], uti: &str) {
     pb.clearContents();
     let pasteboard_type = NSString::from_str(uti);
     let types = NSArray::from_slice(&[&*pasteboard_type]);
+    // SAFETY: Same as set_clipboard — None owner is always safe.
     unsafe { pb.declareTypes_owner(&types, None) };
     let ns_data = NSData::with_bytes(data);
     pb.setData_forType(Some(&ns_data), &pasteboard_type);

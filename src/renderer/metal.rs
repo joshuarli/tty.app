@@ -1,6 +1,5 @@
 use std::ffi::c_void;
 use std::mem;
-use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -12,7 +11,8 @@ use metal::*;
 use objc2_app_kit::NSView;
 
 use crate::config;
-use crate::terminal::cell::Cell;
+use crate::renderer::atlas::Atlas;
+use crate::terminal::cell::CellFlags;
 use crate::terminal::grid::Grid;
 
 /// Uniforms passed to the compute shader. Must match Metal Uniforms struct.
@@ -49,12 +49,6 @@ pub struct CellData {
 
 const CELL_DATA_SIZE: usize = mem::size_of::<CellData>();
 const _: () = assert!(CELL_DATA_SIZE == 16, "CellData must be 16 bytes");
-
-// Cell and CellData must have identical layout for bulk memcpy.
-const _: () = assert!(
-    mem::size_of::<Cell>() == CELL_DATA_SIZE,
-    "Cell and CellData size mismatch"
-);
 
 /// Number of cell buffers for pipelining (CPU uploads to one while GPU reads the other).
 const NUM_BUFFERS: usize = 2;
@@ -120,6 +114,9 @@ impl MetalRenderer {
 
         // Attach layer to NSView (layer-backed, then replace the layer)
         view.setWantsLayer(true);
+        // SAFETY: layer.as_ptr() returns a valid CAMetalLayer pointer. setLayer:
+        // accepts any CALayer subclass, which CAMetalLayer is. The view retains
+        // the layer, and both outlive this call.
         unsafe {
             let layer_obj: *mut objc2::runtime::AnyObject = layer.as_ptr().cast();
             let _: () = objc2::msg_send![view, setLayer: layer_obj];
@@ -232,9 +229,9 @@ impl MetalRenderer {
 
     /// Render a frame. Only dispatches GPU work if content changed.
     /// Returns true if GPU work was dispatched, false if the frame was idle.
-    /// Cell data is bulk-copied from the grid (Cell and CellData share identical repr(C) layout).
+    /// Cell data is built per-cell from Grid cells + atlas glyph positions.
     /// Bold brightness and hidden attribute are handled in the shader.
-    pub fn render_frame(&mut self, grid: &mut Grid, cursor_visible: bool) -> bool {
+    pub fn render_frame(&mut self, grid: &mut Grid, atlas: &Atlas, cursor_visible: bool) -> bool {
         // Merge grid dirty rows into both per-buffer pending bitsets
         let cur = self.current_buffer;
         let mut had_new_dirty = false;
@@ -266,22 +263,39 @@ impl MetalRenderer {
             return false;
         }
 
-        // Copy only dirty rows into the current cell buffer.
-        // Cell is #[repr(C)] with identical layout to CellData — this is a plain memcpy.
+        // Build CellData for dirty rows from Grid cells + atlas glyph positions.
+        // Cell (terminal domain) and CellData (GPU) are decoupled — atlas coords
+        // are resolved here at render time rather than stored in every Cell.
         let cols = self.cols.min(grid.cols as u32) as usize;
-        let row_bytes = cols * CELL_DATA_SIZE;
-        let src_base = grid.cells.as_ptr() as *const u8;
-        let dst_base = self.cell_buffers[cur].contents() as *mut u8;
-        let src_stride = grid.cols as usize * CELL_DATA_SIZE;
-        let dst_stride = self.cols as usize * CELL_DATA_SIZE;
+        let dst_base = self.cell_buffers[cur].contents() as *mut CellData;
+        let dst_stride = self.cols as usize;
         for (row, pending) in self.pending[cur].iter().enumerate() {
             if *pending {
-                unsafe {
-                    ptr::copy_nonoverlapping(
-                        src_base.add(row * src_stride),
-                        dst_base.add(row * dst_stride),
-                        row_bytes,
-                    );
+                let src_start = row * grid.cols as usize;
+                let src_row = &grid.cells[src_start..src_start + cols];
+                for (col, cell) in src_row.iter().enumerate() {
+                    let wide = cell.flags.contains(CellFlags::WIDE);
+                    let pos = if cell.codepoint < 0x80 {
+                        atlas.get_ascii(cell.codepoint as u8)
+                    } else {
+                        atlas.get_cached(cell.codepoint, wide)
+                    };
+                    // SAFETY: dst_base points to a Metal shared buffer sized for
+                    // self.cols * self.rows CellData entries. row < self.rows and
+                    // col < cols <= self.cols, so the offset is in bounds.
+                    unsafe {
+                        let dst = dst_base.add(row * dst_stride + col);
+                        *dst = CellData {
+                            codepoint: cell.codepoint,
+                            flags: cell.flags.bits(),
+                            fg_index: cell.fg_index,
+                            bg_index: cell.bg_index,
+                            atlas_x: pos.x,
+                            atlas_y: pos.y,
+                            fg_rgb: cell.fg_rgb,
+                            bg_rgb: cell.bg_rgb,
+                        };
+                    }
                 }
             }
         }
@@ -315,6 +329,9 @@ impl MetalRenderer {
                 cursor_visible: if cursor_visible { 1 } else { 0 },
                 frame_bg: config::DEFAULT_BG,
             };
+            // SAFETY: uniform_buffer was allocated with size_of::<Uniforms>() bytes
+            // of shared storage. contents() returns a valid pointer to that region.
+            // No GPU command buffer is reading this buffer yet (commit happens below).
             unsafe {
                 let ptr = self.uniform_buffer.contents() as *mut Uniforms;
                 *ptr = uniforms;

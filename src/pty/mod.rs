@@ -20,6 +20,9 @@ impl Pty {
         };
 
         let mut master_fd: RawFd = -1;
+        // SAFETY: forkpty is called with valid pointers — &mut master_fd receives the
+        // master fd, and &mut ws provides the initial window size. The null pointers
+        // for name and termp are permitted by the API (no slave name, no termios).
         let pid = unsafe {
             libc::forkpty(
                 &mut master_fd,
@@ -39,11 +42,15 @@ impl Pty {
         }
 
         // Parent: set master to non-blocking
+        // SAFETY: master_fd is a valid open file descriptor returned by forkpty
+        // (pid > 0 means we're in the parent). F_GETFL/F_SETFL are safe on valid fds.
         unsafe {
             let flags = libc::fcntl(master_fd, libc::F_GETFL);
             libc::fcntl(master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
         }
 
+        // SAFETY: master_fd is a valid open file descriptor that we own exclusively.
+        // OwnedFd takes ownership and will close it on drop.
         let master = unsafe { OwnedFd::from_raw_fd(master_fd) };
 
         Ok(Pty {
@@ -64,6 +71,9 @@ impl Pty {
         let env_term = CString::new("TERM=xterm-256color").unwrap();
         let env_colorterm = CString::new("COLORTERM=truecolor").unwrap();
         let env_term_program = CString::new("TERM_PROGRAM=tty").unwrap();
+        // SAFETY: The CString values are kept alive on the stack until execvp replaces
+        // the process image. putenv stores the pointer directly (no copy), so the
+        // CStrings must not be dropped before exec — which they aren't.
         unsafe {
             libc::putenv(env_term.as_ptr() as *mut _);
             libc::putenv(env_colorterm.as_ptr() as *mut _);
@@ -83,9 +93,11 @@ impl Pty {
 
         let args: [*const libc::c_char; 2] = [c_name.as_ptr(), std::ptr::null()];
 
+        // SAFETY: c_shell and c_name are valid CStrings kept alive on the stack.
+        // args is a null-terminated array of pointers to them. execvp replaces the
+        // process image on success; on failure we _exit immediately.
         unsafe {
             libc::execvp(c_shell.as_ptr(), args.as_ptr());
-            // If exec fails, exit
             libc::_exit(1);
         }
     }
@@ -99,6 +111,8 @@ impl Pty {
     /// Returns Ok(0) on true EOF (shell exited).
     /// Returns Err(WouldBlock) when no data is available.
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        // SAFETY: self.master is a valid open fd. buf.as_mut_ptr() and buf.len()
+        // describe a valid writable region. libc::read writes at most buf.len() bytes.
         let n = unsafe {
             libc::read(
                 self.master.as_raw_fd(),
@@ -114,6 +128,8 @@ impl Pty {
 
     /// Write to the PTY master.
     pub fn write(&self, data: &[u8]) -> io::Result<usize> {
+        // SAFETY: self.master is a valid open fd. data.as_ptr() and data.len()
+        // describe a valid readable region. libc::write reads at most data.len() bytes.
         let n = unsafe {
             libc::write(
                 self.master.as_raw_fd(),
@@ -135,6 +151,8 @@ impl Pty {
             ws_xpixel: cols * cell_width,
             ws_ypixel: rows * cell_height,
         };
+        // SAFETY: self.master is a valid open fd. TIOCSWINSZ expects a pointer to
+        // a winsize struct, which &ws provides. The ioctl updates the PTY dimensions.
         unsafe {
             libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &ws);
         }
@@ -143,7 +161,8 @@ impl Pty {
 
 impl Drop for Pty {
     fn drop(&mut self) {
-        // Kill child if still alive
+        // SAFETY: child_pid was returned by forkpty and is a valid process ID.
+        // SIGHUP signals the child to terminate gracefully.
         unsafe {
             libc::kill(self.child_pid, libc::SIGHUP);
         }

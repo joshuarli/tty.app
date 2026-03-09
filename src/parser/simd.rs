@@ -18,6 +18,12 @@ impl SimdScanner {
         let mut pos = 0;
 
         // Process 64 bytes at a time (4 × 16 unrolled)
+        //
+        // SAFETY: All NEON intrinsics below operate on data within `buf`.
+        // - `vld1q_u8` loads are guarded by `pos + 64 <= len` (or `pos + 16 <= len`),
+        //   ensuring every `buf.as_ptr().add(pos)` is in bounds with 16+ bytes remaining.
+        // - `vcgeq_u8`, `vcltq_u8`, `vandq_u8`, `vminvq_u8` are pure SIMD arithmetic
+        //   on register values with no memory safety concerns.
         unsafe {
             let lo = vdupq_n_u8(0x20);
             let hi = vdupq_n_u8(0x7F);
@@ -104,6 +110,9 @@ impl SimdScanner {
         use core::arch::aarch64::*;
         // Narrow 16×u8 to 8×u8 by treating as u16 lanes and shifting right 4.
         // Each output nibble is 0xF (ok) or 0x0 (attention).
+        //
+        // SAFETY: `v` is a valid uint8x16_t from a prior SIMD load. The narrowing
+        // and reinterpret intrinsics are pure register operations with no memory access.
         let narrowed = unsafe { vshrn_n_u16::<4>(vreinterpretq_u16_u8(v)) };
         let bits = unsafe { vget_lane_u64::<0>(vreinterpret_u64_u8(narrowed)) };
         // Find first zero nibble using the "has zero nibble" trick:

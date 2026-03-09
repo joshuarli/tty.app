@@ -127,6 +127,9 @@ impl Utf8Assembler {
         };
 
         if valid {
+            // SAFETY: `cp` has been validated above — overlong encodings, surrogates
+            // (0xD800..=0xDFFF), and values > 0x10FFFF are all rejected, so cp is a
+            // valid Unicode scalar value.
             unsafe { char::from_u32_unchecked(cp) }
         } else {
             '\u{FFFD}'

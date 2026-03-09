@@ -344,7 +344,7 @@ impl Grid {
     }
 
     /// Write a character at the current cursor position with current attributes.
-    pub fn write_char(&mut self, c: char, atlas_x: u8, atlas_y: u8) {
+    pub fn write_char(&mut self, c: char) {
         if self.cursor_pending_wrap {
             if self.mode.contains(TermMode::AUTO_WRAP) {
                 self.cursor_col = 0;
@@ -369,8 +369,6 @@ impl Grid {
         cell.bg_index = attr.bg_index;
         cell.fg_rgb = attr.fg_rgb;
         cell.bg_rgb = attr.bg_rgb;
-        cell.atlas_x = atlas_x;
-        cell.atlas_y = atlas_y;
         self.mark_dirty(row);
 
         // Advance cursor
@@ -382,7 +380,7 @@ impl Grid {
     }
 
     /// Write a wide character (2 cells). Sets WIDE flag on first cell, WIDE_CONT on second.
-    pub fn write_wide_char(&mut self, c: char, atlas_x: u8, atlas_y: u8) {
+    pub fn write_wide_char(&mut self, c: char) {
         if self.cursor_pending_wrap {
             if self.mode.contains(TermMode::AUTO_WRAP) {
                 self.cursor_col = 0;
@@ -425,19 +423,15 @@ impl Grid {
         cell.bg_index = attr.bg_index;
         cell.fg_rgb = attr.fg_rgb;
         cell.bg_rgb = attr.bg_rgb;
-        cell.atlas_x = atlas_x;
-        cell.atlas_y = atlas_y;
 
-        // Continuation cell — carry atlas coords so the shader can sample directly
+        // Continuation cell
         let cell2 = &mut self.cells[idx + 1];
-        cell2.codepoint = b' ' as u16;
+        cell2.codepoint = c as u16;
         cell2.flags = CellFlags::WIDE_CONT;
         cell2.fg_index = attr.fg_index;
         cell2.bg_index = attr.bg_index;
         cell2.fg_rgb = attr.fg_rgb;
         cell2.bg_rgb = attr.bg_rgb;
-        cell2.atlas_x = atlas_x;
-        cell2.atlas_y = atlas_y;
 
         self.mark_dirty(row);
 

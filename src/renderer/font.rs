@@ -53,11 +53,15 @@ impl FontRasterizer {
         // Get advance width from a reference glyph ('M')
         let characters: [u16; 1] = [b'M' as u16];
         let mut glyphs: [CGGlyph; 1] = [0];
+        // SAFETY: characters and glyphs are stack arrays with exactly 1 element.
+        // The count argument (1) matches both array lengths.
         unsafe {
             ct_font.get_glyphs_for_characters(characters.as_ptr(), glyphs.as_mut_ptr(), 1);
         }
 
         let mut advances = [CGSize::new(0.0, 0.0)];
+        // SAFETY: glyphs and advances are stack arrays with exactly 1 element.
+        // The count argument (1) matches both array lengths.
         unsafe {
             ct_font.get_advances_for_glyphs(
                 kCTFontOrientationDefault,
@@ -110,6 +114,8 @@ impl FontRasterizer {
 
         // Non-ASCII: query the explicit fallback list only.
         for font in &self.fallback_fonts {
+            // SAFETY: characters and glyphs are stack arrays with exactly 1 element.
+            // The count argument (1) matches both array lengths.
             let found = unsafe {
                 font.get_glyphs_for_characters(characters.as_ptr(), glyphs.as_mut_ptr(), 1)
             };
@@ -144,6 +150,8 @@ impl FontRasterizer {
     ) -> Option<RasterizedGlyph> {
         let characters = [codepoint];
         let mut glyphs: [CGGlyph; 1] = [0];
+        // SAFETY: characters and glyphs are stack arrays with exactly 1 element.
+        // The count argument (1) matches both array lengths.
         let result =
             unsafe { font.get_glyphs_for_characters(characters.as_ptr(), glyphs.as_mut_ptr(), 1) };
         if !result || glyphs[0] == 0 {

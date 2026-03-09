@@ -25,12 +25,12 @@ struct TestPerformer<'a> {
 impl<'a> Perform for TestPerformer<'a> {
     fn print_ascii_run(&mut self, bytes: &[u8]) {
         for &b in bytes {
-            self.grid.write_char(b as char, 0, 0);
+            self.grid.write_char(b as char);
         }
     }
 
     fn print(&mut self, c: char) {
-        self.grid.write_char(c, 0, 0);
+        self.grid.write_char(c);
     }
 
     fn execute(&mut self, byte: u8) {
@@ -57,10 +57,7 @@ impl<'a> Perform for TestPerformer<'a> {
             }
             0x0A..=0x0C => {
                 if self.grid.cursor_row == self.grid.scroll_bottom {
-                    let evicted = self.grid.scroll_up(1);
-                    for row in evicted {
-                        self.scrollback.push(row);
-                    }
+                    self.grid.scroll_up_into(1, Some(self.scrollback));
                 } else if self.grid.cursor_row < self.grid.rows - 1 {
                     self.grid.cursor_row += 1;
                 }
@@ -95,13 +92,13 @@ impl<'a> Perform for TestPerformer<'a> {
         } else {
             self.grid.rows - 1
         };
-        self.grid.cursor_row = (row + n).min(bottom);
+        self.grid.cursor_row = row.saturating_add(n).min(bottom);
         self.grid.cursor_pending_wrap = false;
         self.grid.mark_dirty(self.grid.cursor_row);
     }
 
     fn cursor_forward(&mut self, n: u16) {
-        self.grid.cursor_col = (self.grid.cursor_col + n).min(self.grid.cols - 1);
+        self.grid.cursor_col = self.grid.cursor_col.saturating_add(n).min(self.grid.cols - 1);
         self.grid.cursor_pending_wrap = false;
     }
 
@@ -157,10 +154,7 @@ impl<'a> Perform for TestPerformer<'a> {
     }
 
     fn scroll_up(&mut self, n: u16) {
-        let evicted = self.grid.scroll_up(n);
-        for row in evicted {
-            self.scrollback.push(row);
-        }
+        self.grid.scroll_up_into(n, Some(self.scrollback));
     }
 
     fn scroll_down(&mut self, n: u16) {
@@ -202,7 +196,7 @@ impl<'a> Perform for TestPerformer<'a> {
         }
         let attr = self.grid.attr;
         for c in col..col + n {
-            self.grid.cells[row_start + c as usize].erase(&attr);
+            self.grid.cells[row_start + c as usize] = Cell::blank(&attr);
         }
         self.grid.mark_dirty(row);
     }
@@ -218,7 +212,7 @@ impl<'a> Perform for TestPerformer<'a> {
         }
         let attr = self.grid.attr;
         for c in cols - n..cols {
-            self.grid.cells[row_start + c as usize].erase(&attr);
+            self.grid.cells[row_start + c as usize] = Cell::blank(&attr);
         }
         self.grid.mark_dirty(row);
     }
@@ -231,7 +225,7 @@ impl<'a> Perform for TestPerformer<'a> {
         let attr = self.grid.attr;
         let row_start = row as usize * cols as usize;
         for c in col..col + n {
-            self.grid.cells[row_start + c as usize].erase(&attr);
+            self.grid.cells[row_start + c as usize] = Cell::blank(&attr);
         }
         self.grid.mark_dirty(row);
     }
@@ -239,7 +233,7 @@ impl<'a> Perform for TestPerformer<'a> {
     fn repeat_char(&mut self, n: u16) {
         let c = self.grid.last_char;
         for _ in 0..n {
-            self.grid.write_char(c, 0, 0);
+            self.grid.write_char(c);
         }
     }
 
@@ -464,10 +458,7 @@ impl<'a> Perform for TestPerformer<'a> {
             ([], b'8') => self.grid.restore_cursor(),
             ([], b'D') => {
                 if self.grid.cursor_row == self.grid.scroll_bottom {
-                    let evicted = self.grid.scroll_up(1);
-                    for row in evicted {
-                        self.scrollback.push(row);
-                    }
+                    self.grid.scroll_up_into(1, Some(self.scrollback));
                 } else if self.grid.cursor_row < self.grid.rows - 1 {
                     self.grid.cursor_row += 1;
                 }
@@ -475,10 +466,7 @@ impl<'a> Perform for TestPerformer<'a> {
             ([], b'E') => {
                 self.grid.cursor_col = 0;
                 if self.grid.cursor_row == self.grid.scroll_bottom {
-                    let evicted = self.grid.scroll_up(1);
-                    for row in evicted {
-                        self.scrollback.push(row);
-                    }
+                    self.grid.scroll_up_into(1, Some(self.scrollback));
                 } else if self.grid.cursor_row < self.grid.rows - 1 {
                     self.grid.cursor_row += 1;
                 }

@@ -89,7 +89,10 @@ impl StateMachine {
                     }
                     self.current_param = 0;
                 } else if byte.is_ascii_digit() {
-                    self.current_param = self.current_param * 10 + (byte - b'0') as u32;
+                    self.current_param = self
+                        .current_param
+                        .saturating_mul(10)
+                        .saturating_add((byte - b'0') as u32);
                 }
             }
             ACTION_ESC_DISPATCH => {

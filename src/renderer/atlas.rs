@@ -93,6 +93,14 @@ impl Atlas {
         self.ascii_table[cp as usize]
     }
 
+    /// Look up a previously-rasterized glyph without triggering rasterization.
+    /// Returns default (0,0) if the glyph is not in the atlas.
+    #[inline]
+    pub fn get_cached(&self, codepoint: u16, wide: bool) -> AtlasPos {
+        let key = GlyphKey { codepoint, wide };
+        self.map.get(&key).copied().unwrap_or_default()
+    }
+
     /// Look up or rasterize a glyph, returning its atlas position.
     pub fn get_or_insert(
         &mut self,

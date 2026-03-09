@@ -147,6 +147,8 @@ define_class!(
 impl TtyView {
     fn new(frame: NSRect, mtm: MainThreadMarker) -> Retained<Self> {
         let obj = Self::alloc(mtm).set_ivars(());
+        // SAFETY: Calling NSView's initWithFrame: on a freshly allocated TtyView.
+        // TtyView inherits from NSView, so the super init is valid.
         unsafe { objc2::msg_send![super(obj), initWithFrame: frame] }
     }
 }
@@ -177,6 +179,8 @@ impl NativeWindow {
         let frame = screen.frame();
         let scale = screen.backingScaleFactor();
 
+        // SAFETY: Calling NSWindow's designated initializer with valid parameters.
+        // mtm guarantees we are on the main thread as required by AppKit.
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(mtm),
@@ -190,6 +194,10 @@ impl NativeWindow {
         };
 
         // Hide titlebar chrome — content fills the entire window
+        // SAFETY: These are standard NSWindow/NSColor messages. The window is valid
+        // (just initialized above). NSColor.blackColor is a class method that always
+        // succeeds. AnyClass::get(c"NSColor") is safe because NSColor is a built-in
+        // AppKit class that is always loaded.
         unsafe {
             let _: () = objc2::msg_send![&window, setTitlebarAppearsTransparent: true];
             // NSWindowTitleHidden = 1
@@ -214,6 +222,9 @@ impl NativeWindow {
         app.activateIgnoringOtherApps(true);
 
         // Enter native fullscreen with suppressed animation
+        // SAFETY: NSAnimationContext is a built-in AppKit class. beginGrouping/endGrouping
+        // bracket a zero-duration animation context so toggleFullScreen executes without
+        // visible transition. The window is valid and on the main thread.
         unsafe {
             let ctx_cls = objc2::runtime::AnyClass::get(c"NSAnimationContext").unwrap();
             let _: () = objc2::msg_send![ctx_cls, beginGrouping];
@@ -224,6 +235,8 @@ impl NativeWindow {
         }
 
         // Detect safe area inset for notch (physical pixels)
+        // SAFETY: safeAreaInsets is a valid NSScreen property (macOS 12+).
+        // Returns NSEdgeInsets by value. screen is valid (from mainScreen above).
         let safe_area_top = unsafe {
             let insets: objc2_foundation::NSEdgeInsets = objc2::msg_send![&screen, safeAreaInsets];
             (insets.top * scale) as u32
@@ -256,6 +269,8 @@ impl NativeWindow {
             let event = self.app.nextEventMatchingMask_untilDate_inMode_dequeue(
                 NSEventMask::Any,
                 None,
+                // SAFETY: NSDefaultRunLoopMode is a global NSString constant,
+                // always valid in a running application.
                 unsafe { NSDefaultRunLoopMode },
                 true,
             );

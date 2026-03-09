@@ -42,7 +42,9 @@ impl CsiFastParser {
             let b = buf[pos];
             match b {
                 b'0'..=b'9' => {
-                    current_param = current_param * 10 + (b - b'0') as u32;
+                    current_param = current_param
+                        .saturating_mul(10)
+                        .saturating_add((b - b'0') as u32);
                     has_digit = true;
                     pos += 1;
                 }

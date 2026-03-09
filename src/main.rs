@@ -55,15 +55,14 @@ impl<'a> Perform for TermPerformer<'a> {
                 } else {
                     b as char
                 };
-                let pos = self.atlas.get_ascii(b);
-                self.grid.write_char(ch, pos.x, pos.y);
+                self.grid.write_char(ch);
                 self.grid.last_char = ch;
             }
         } else {
-            // Fast path: direct table lookup, no HashMap, no LRU
+            // Fast path: no atlas lookup needed — ASCII glyphs are preloaded
+            // and resolved at render time via atlas.get_ascii().
             for &b in bytes {
-                let pos = self.atlas.get_ascii(b);
-                self.grid.write_char(b as char, pos.x, pos.y);
+                self.grid.write_char(b as char);
             }
             if let Some(&last) = bytes.last() {
                 self.grid.last_char = last as char;
@@ -74,8 +73,9 @@ impl<'a> Perform for TermPerformer<'a> {
     fn print(&mut self, c: char) {
         let cp = c as u32;
         if cp > 0xFFFF {
-            let pos = self.atlas.get_or_insert(0xFFFD, false, self.rasterizer);
-            self.grid.write_char('\u{FFFD}', pos.x, pos.y);
+            // Ensure replacement glyph is rasterized for render-time lookup
+            let _ = self.atlas.get_or_insert(0xFFFD, false, self.rasterizer);
+            self.grid.write_char('\u{FFFD}');
             self.grid.last_char = '\u{FFFD}';
             return;
         }
@@ -83,14 +83,15 @@ impl<'a> Perform for TermPerformer<'a> {
         let wide = is_wide(cp);
 
         if wide {
-            let pos = self.atlas.get_or_insert(cp as u16, true, self.rasterizer);
-            self.grid.write_wide_char(c, pos.x, pos.y);
+            let _ = self.atlas.get_or_insert(cp as u16, true, self.rasterizer);
+            self.grid.write_wide_char(c);
             self.grid.last_char = c;
         } else if is_zero_width(cp) {
             // Zero-width combining marks — ignore for v1
         } else {
-            let pos = self.atlas.get_or_insert(cp as u16, false, self.rasterizer);
-            self.grid.write_char(c, pos.x, pos.y);
+            // Ensure glyph is rasterized; coords resolved at render time
+            let _ = self.atlas.get_or_insert(cp as u16, false, self.rasterizer);
+            self.grid.write_char(c);
             self.grid.last_char = c;
         }
     }
@@ -158,13 +159,13 @@ impl<'a> Perform for TermPerformer<'a> {
         } else {
             self.grid.rows - 1
         };
-        self.grid.cursor_row = (row + n).min(bottom);
+        self.grid.cursor_row = row.saturating_add(n).min(bottom);
         self.grid.cursor_pending_wrap = false;
         self.grid.mark_dirty(self.grid.cursor_row);
     }
 
     fn cursor_forward(&mut self, n: u16) {
-        self.grid.cursor_col = (self.grid.cursor_col + n).min(self.grid.cols - 1);
+        self.grid.cursor_col = self.grid.cursor_col.saturating_add(n).min(self.grid.cols - 1);
         self.grid.cursor_pending_wrap = false;
     }
 
@@ -178,7 +179,7 @@ impl<'a> Perform for TermPerformer<'a> {
             // DECOM: coordinates are relative to scroll region, clamped within it
             let top = self.grid.scroll_top;
             let bottom = self.grid.scroll_bottom;
-            self.grid.cursor_row = (top + row.saturating_sub(1)).min(bottom);
+            self.grid.cursor_row = top.saturating_add(row.saturating_sub(1)).min(bottom);
         } else {
             self.grid.cursor_row = (row.saturating_sub(1)).min(self.grid.rows - 1);
         }
@@ -195,7 +196,7 @@ impl<'a> Perform for TermPerformer<'a> {
         if self.grid.mode.contains(TermMode::ORIGIN_MODE) {
             let top = self.grid.scroll_top;
             let bottom = self.grid.scroll_bottom;
-            self.grid.cursor_row = (top + row.saturating_sub(1)).min(bottom);
+            self.grid.cursor_row = top.saturating_add(row.saturating_sub(1)).min(bottom);
         } else {
             self.grid.cursor_row = (row.saturating_sub(1)).min(self.grid.rows - 1);
         }
@@ -1090,9 +1091,9 @@ impl App {
 
         // render_frame returns true when GPU work was dispatched, false when idle.
         // A deferred render (GPU buffer busy) is not idle — we want to retry promptly.
-        let dispatched = self
-            .renderer
-            .render_frame(&mut self.shared.grid, self.cursor_visible);
+        let dispatched =
+            self.renderer
+                .render_frame(&mut self.shared.grid, &self.atlas, self.cursor_visible);
         !dispatched && !self.renderer.needs_render
     }
 

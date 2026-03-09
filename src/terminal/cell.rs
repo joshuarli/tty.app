@@ -18,14 +18,11 @@ bitflags::bitflags! {
 }
 
 #[derive(Clone, Copy, Debug)]
-#[repr(C)]
 pub struct Cell {
     pub codepoint: u16,
     pub flags: CellFlags,
     pub fg_index: u8,
     pub bg_index: u8,
-    pub atlas_x: u8,
-    pub atlas_y: u8,
     pub fg_rgb: u32,
     pub bg_rgb: u32,
 }
@@ -37,8 +34,6 @@ impl Default for Cell {
             flags: CellFlags::empty(),
             fg_index: 7, // default fg = palette 7
             bg_index: 0, // default bg = palette 0
-            atlas_x: 0,
-            atlas_y: 0,
             fg_rgb: config::DEFAULT_FG,
             bg_rgb: config::DEFAULT_BG,
         }
@@ -54,8 +49,6 @@ impl Cell {
             flags: CellFlags::empty(),
             fg_index: attr.fg_index,
             bg_index: attr.bg_index,
-            atlas_x: 0,
-            atlas_y: 0,
             fg_rgb: attr.fg_rgb,
             bg_rgb: attr.bg_rgb,
         }
