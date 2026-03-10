@@ -59,11 +59,8 @@ impl<'a> Perform for TermPerformer<'a> {
                 self.grid.last_char = ch;
             }
         } else {
-            // Fast path: no atlas lookup needed — ASCII glyphs are preloaded
-            // and resolved at render time via atlas.get_ascii().
-            for &b in bytes {
-                self.grid.write_char(b as char);
-            }
+            // Fast path: bulk write without per-char overhead
+            self.grid.write_ascii_run(bytes);
             if let Some(&last) = bytes.last() {
                 self.grid.last_char = last as char;
             }

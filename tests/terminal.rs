@@ -24,8 +24,9 @@ struct TestPerformer<'a> {
 
 impl<'a> Perform for TestPerformer<'a> {
     fn print_ascii_run(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.grid.write_char(b as char);
+        self.grid.write_ascii_run(bytes);
+        if let Some(&last) = bytes.last() {
+            self.grid.last_char = last as char;
         }
     }
 

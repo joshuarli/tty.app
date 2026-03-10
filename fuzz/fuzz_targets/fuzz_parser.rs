@@ -22,9 +22,7 @@ struct FuzzPerformer<'a> {
 
 impl<'a> Perform for FuzzPerformer<'a> {
     fn print_ascii_run(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.grid.write_char(b as char);
-        }
+        self.grid.write_ascii_run(bytes);
     }
 
     fn print(&mut self, c: char) {

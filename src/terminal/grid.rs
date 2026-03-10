@@ -343,6 +343,63 @@ impl Grid {
         }
     }
 
+    /// Bulk-write a run of printable ASCII bytes at the current cursor position.
+    ///
+    /// Semantically equivalent to calling `write_char` for each byte, but
+    /// amortises per-character overhead: `mark_dirty` is called once per row
+    /// touched, and the cell index is incremented rather than recomputed.
+    pub fn write_ascii_run(&mut self, bytes: &[u8]) {
+        let cols = self.cols as usize;
+        let attr = self.attr;
+
+        let mut i = 0;
+        while i < bytes.len() {
+            // Handle pending wrap from a previous write
+            if self.cursor_pending_wrap {
+                if self.mode.contains(TermMode::AUTO_WRAP) {
+                    self.cursor_col = 0;
+                    if self.cursor_row == self.scroll_bottom {
+                        self.scroll_up(1);
+                    } else if self.cursor_row < self.rows - 1 {
+                        self.cursor_row += 1;
+                    }
+                }
+                self.cursor_pending_wrap = false;
+            }
+
+            let row = self.cursor_row;
+            let col = self.cursor_col as usize;
+
+            // How many chars fit on the remainder of this row?
+            let space = cols - col;
+            let n = space.min(bytes.len() - i);
+
+            // Write cells in a tight loop — one index increment per char
+            let base = row as usize * cols + col;
+            for j in 0..n {
+                let cell = &mut self.cells[base + j];
+                cell.codepoint = bytes[i + j] as u16;
+                cell.flags = attr.flags;
+                cell.fg_index = attr.fg_index;
+                cell.bg_index = attr.bg_index;
+                cell.fg_rgb = attr.fg_rgb;
+                cell.bg_rgb = attr.bg_rgb;
+            }
+            self.mark_dirty(row);
+
+            i += n;
+
+            // Advance cursor
+            if col + n >= cols {
+                // Filled to end of row — park cursor on last col, set pending wrap
+                self.cursor_col = self.cols - 1;
+                self.cursor_pending_wrap = true;
+            } else {
+                self.cursor_col = (col + n) as u16;
+            }
+        }
+    }
+
     /// Write a character at the current cursor position with current attributes.
     pub fn write_char(&mut self, c: char) {
         if self.cursor_pending_wrap {
