@@ -71,7 +71,9 @@ impl CsiFastParser {
                 if buf.len() >= 4 {
                     let final_byte = buf[3];
                     if final_byte == b'm' {
-                        performer.sgr(&[(b0 - b'0') as u16, (b2 - b'0') as u16]);
+                        // \x1b[N;Mm — compound SGR (e.g., \x1b[1;7m bold+inverse)
+                        performer.sgr_single((b0 - b'0') as u16);
+                        performer.sgr_single((b2 - b'0') as u16);
                         return Some(4);
                     }
                     if final_byte == b'H' {
@@ -83,7 +85,9 @@ impl CsiFastParser {
                     let p1 = ((b2 - b'0') * 10 + (buf[3] - b'0')) as u16;
                     let final_byte = buf[4];
                     if final_byte == b'm' {
-                        performer.sgr(&[(b0 - b'0') as u16, p1]);
+                        // \x1b[N;NNm — compound SGR (e.g., \x1b[1;32m bold+green)
+                        performer.sgr_single((b0 - b'0') as u16);
+                        performer.sgr_single(p1);
                         return Some(5);
                     }
                     if final_byte == b'H' {
@@ -99,7 +103,9 @@ impl CsiFastParser {
                 let b3 = buf[3];
                 if b3.is_ascii_digit() {
                     if buf[4] == b'm' {
-                        performer.sgr(&[p0, (b3 - b'0') as u16]);
+                        // \x1b[NN;Nm — compound SGR (e.g., \x1b[41;7m)
+                        performer.sgr_single(p0);
+                        performer.sgr_single((b3 - b'0') as u16);
                         return Some(5);
                     }
                     if buf[4] == b'H' {
@@ -109,7 +115,9 @@ impl CsiFastParser {
                     if buf.len() >= 6 && buf[4].is_ascii_digit() {
                         let p1 = ((b3 - b'0') * 10 + (buf[4] - b'0')) as u16;
                         if buf[5] == b'm' {
-                            performer.sgr(&[p0, p1]);
+                            // \x1b[NN;NNm — compound SGR (e.g., \x1b[41;37m)
+                            performer.sgr_single(p0);
+                            performer.sgr_single(p1);
                             return Some(6);
                         }
                         if buf[5] == b'H' {

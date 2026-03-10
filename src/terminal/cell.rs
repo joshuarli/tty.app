@@ -17,6 +17,7 @@ bitflags::bitflags! {
     }
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct Cell {
     pub codepoint: u16,
@@ -39,6 +40,9 @@ impl Default for Cell {
         }
     }
 }
+
+// Cell and CellData (GPU) must both be 16 bytes for memcpy-based render upload.
+const _: () = assert!(std::mem::size_of::<Cell>() == 16, "Cell must be 16 bytes");
 
 impl Cell {
     /// Create a blank cell with the given SGR background attributes.

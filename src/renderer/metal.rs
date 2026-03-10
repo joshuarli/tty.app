@@ -263,8 +263,11 @@ impl MetalRenderer {
         // Build CellData for dirty rows from Grid cells + atlas glyph positions.
         // Cell (terminal domain) and CellData (GPU) are decoupled — atlas coords
         // are resolved here at render time rather than stored in every Cell.
+        // Cell (#[repr(C)], 16 bytes) and CellData (#[repr(C)], 16 bytes) share
+        // the same layout except bytes 6-7: Cell has padding, CellData has atlas
+        // coords. We memcpy the full 16 bytes then patch the atlas position.
         let cols = self.cols.min(grid.cols as u32) as usize;
-        let dst_base = self.cell_buffers[cur].contents() as *mut CellData;
+        let dst_base = self.cell_buffers[cur].contents() as *mut u8;
         let dst_stride = self.cols as usize;
         for (row, pending) in self.pending[cur].iter().enumerate() {
             if *pending {
@@ -278,20 +281,16 @@ impl MetalRenderer {
                         atlas.get_cached(cell.codepoint, wide)
                     };
                     // SAFETY: dst_base points to a Metal shared buffer sized for
-                    // self.cols * self.rows CellData entries. row < self.rows and
+                    // self.cols * self.rows * 16 bytes. row < self.rows and
                     // col < cols <= self.cols, so the offset is in bounds.
+                    // Cell is #[repr(C)] and 16 bytes — same as CellData.
                     unsafe {
-                        let dst = dst_base.add(row * dst_stride + col);
-                        *dst = CellData {
-                            codepoint: cell.codepoint,
-                            flags: cell.flags.bits(),
-                            fg_index: cell.fg_index,
-                            bg_index: cell.bg_index,
-                            atlas_x: pos.x,
-                            atlas_y: pos.y,
-                            fg_rgb: cell.fg_rgb,
-                            bg_rgb: cell.bg_rgb,
-                        };
+                        let dst = dst_base.add((row * dst_stride + col) * 16);
+                        let src = cell as *const _ as *const u8;
+                        std::ptr::copy_nonoverlapping(src, dst, 16);
+                        // Patch atlas coords at bytes 6-7 (Cell padding → atlas_x, atlas_y)
+                        *dst.add(6) = pos.x;
+                        *dst.add(7) = pos.y;
                     }
                 }
             }

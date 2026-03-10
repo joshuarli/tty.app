@@ -1604,17 +1604,13 @@ fn bench_pipeline(c: &mut Criterion) {
                         let cell = &grid.cells[src_start + col];
                         let offset = (row as usize * cols as usize + col) * 16;
                         // SAFETY: gpu_buf is sized for total * 16 bytes
+                        // Cell is #[repr(C)], 16 bytes — memcpy + patch atlas bytes
                         unsafe {
                             let p = dst.add(offset);
-                            // Pack: codepoint(2) + flags(2) + fg_idx(1) + bg_idx(1) + pad(2) + fg_rgb(4) + bg_rgb(4)
-                            *(p as *mut u16) = cell.codepoint;
-                            *(p.add(2) as *mut u16) = cell.flags.bits();
-                            *p.add(4) = cell.fg_index;
-                            *p.add(5) = cell.bg_index;
+                            let src = cell as *const Cell as *const u8;
+                            std::ptr::copy_nonoverlapping(src, p, 16);
                             *p.add(6) = 0; // atlas_x placeholder
                             *p.add(7) = 0; // atlas_y placeholder
-                            *(p.add(8) as *mut u32) = cell.fg_rgb;
-                            *(p.add(12) as *mut u32) = cell.bg_rgb;
                         }
                     }
                 }
