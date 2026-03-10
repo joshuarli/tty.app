@@ -322,12 +322,161 @@ impl<'a> Perform for BenchPerformer<'a> {
     fn erase_chars(&mut self, _n: u16) {}
 
     fn sgr(&mut self, params: &[u16]) {
-        for &p in params {
-            match p {
-                0 => self.grid.attr = Cell::default(),
+        let mut i = 0;
+        while i < params.len() {
+            match params[i] {
+                0 => {
+                    self.grid.attr.flags = CellFlags::empty();
+                    self.grid.attr.fg_index = 7;
+                    self.grid.attr.bg_index = 0;
+                    self.grid.attr.fg_rgb = 0x00CCCCCC;
+                    self.grid.attr.bg_rgb = 0x00000000;
+                }
                 1 => self.grid.attr.flags.insert(CellFlags::BOLD),
+                2 => self.grid.attr.flags.insert(CellFlags::DIM),
+                3 => self.grid.attr.flags.insert(CellFlags::ITALIC),
+                4 => self.grid.attr.flags.insert(CellFlags::UNDERLINE),
+                7 => self.grid.attr.flags.insert(CellFlags::INVERSE),
+                8 => self.grid.attr.flags.insert(CellFlags::HIDDEN),
+                9 => self.grid.attr.flags.insert(CellFlags::STRIKE),
+                21 | 22 => {
+                    self.grid.attr.flags.remove(CellFlags::BOLD);
+                    self.grid.attr.flags.remove(CellFlags::DIM);
+                }
+                23 => self.grid.attr.flags.remove(CellFlags::ITALIC),
+                24 => self.grid.attr.flags.remove(CellFlags::UNDERLINE),
+                27 => self.grid.attr.flags.remove(CellFlags::INVERSE),
+                28 => self.grid.attr.flags.remove(CellFlags::HIDDEN),
+                29 => self.grid.attr.flags.remove(CellFlags::STRIKE),
+                30..=37 => self.grid.attr.fg_index = (params[i] - 30) as u8,
+                38 => {
+                    i += 1;
+                    if i < params.len() {
+                        match params[i] {
+                            5 => {
+                                i += 1;
+                                if i < params.len() {
+                                    self.grid.attr.fg_index = params[i] as u8;
+                                }
+                            }
+                            2 => {
+                                if i + 3 < params.len() {
+                                    let r = params[i + 1] as u32;
+                                    let g = params[i + 2] as u32;
+                                    let b = params[i + 3] as u32;
+                                    self.grid.attr.fg_rgb = (r << 16) | (g << 8) | b;
+                                    self.grid.attr.fg_index = 0xFF;
+                                    i += 3;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                39 => {
+                    self.grid.attr.fg_index = 7;
+                    self.grid.attr.fg_rgb = 0x00CCCCCC;
+                }
+                40..=47 => self.grid.attr.bg_index = (params[i] - 40) as u8,
+                48 => {
+                    i += 1;
+                    if i < params.len() {
+                        match params[i] {
+                            5 => {
+                                i += 1;
+                                if i < params.len() {
+                                    self.grid.attr.bg_index = params[i] as u8;
+                                }
+                            }
+                            2 => {
+                                if i + 3 < params.len() {
+                                    let r = params[i + 1] as u32;
+                                    let g = params[i + 2] as u32;
+                                    let b = params[i + 3] as u32;
+                                    self.grid.attr.bg_rgb = (r << 16) | (g << 8) | b;
+                                    self.grid.attr.bg_index = 0xFF;
+                                    i += 3;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                49 => {
+                    self.grid.attr.bg_index = 0;
+                    self.grid.attr.bg_rgb = 0x00000000;
+                }
+                90..=97 => self.grid.attr.fg_index = (params[i] - 90 + 8) as u8,
+                100..=107 => self.grid.attr.bg_index = (params[i] - 100 + 8) as u8,
                 _ => {}
             }
+            i += 1;
+        }
+    }
+
+    #[inline]
+    fn sgr_reset(&mut self) {
+        self.grid.attr.flags = CellFlags::empty();
+        self.grid.attr.fg_index = 7;
+        self.grid.attr.bg_index = 0;
+        self.grid.attr.fg_rgb = 0x00CCCCCC;
+        self.grid.attr.bg_rgb = 0x00000000;
+    }
+
+    #[inline]
+    fn sgr_single(&mut self, code: u16) {
+        match code {
+            0 => self.sgr_reset(),
+            1 => self.grid.attr.flags.insert(CellFlags::BOLD),
+            2 => self.grid.attr.flags.insert(CellFlags::DIM),
+            3 => self.grid.attr.flags.insert(CellFlags::ITALIC),
+            4 => self.grid.attr.flags.insert(CellFlags::UNDERLINE),
+            7 => self.grid.attr.flags.insert(CellFlags::INVERSE),
+            8 => self.grid.attr.flags.insert(CellFlags::HIDDEN),
+            9 => self.grid.attr.flags.insert(CellFlags::STRIKE),
+            21 | 22 => {
+                self.grid.attr.flags.remove(CellFlags::BOLD);
+                self.grid.attr.flags.remove(CellFlags::DIM);
+            }
+            23 => self.grid.attr.flags.remove(CellFlags::ITALIC),
+            24 => self.grid.attr.flags.remove(CellFlags::UNDERLINE),
+            27 => self.grid.attr.flags.remove(CellFlags::INVERSE),
+            28 => self.grid.attr.flags.remove(CellFlags::HIDDEN),
+            29 => self.grid.attr.flags.remove(CellFlags::STRIKE),
+            30..=37 => self.grid.attr.fg_index = (code - 30) as u8,
+            39 => {
+                self.grid.attr.fg_index = 7;
+                self.grid.attr.fg_rgb = 0x00CCCCCC;
+            }
+            40..=47 => self.grid.attr.bg_index = (code - 40) as u8,
+            49 => {
+                self.grid.attr.bg_index = 0;
+                self.grid.attr.bg_rgb = 0x00000000;
+            }
+            90..=97 => self.grid.attr.fg_index = (code - 90 + 8) as u8,
+            100..=107 => self.grid.attr.bg_index = (code - 100 + 8) as u8,
+            _ => {}
+        }
+    }
+
+    #[inline]
+    fn color_256(&mut self, fg: bool, index: u16) {
+        if fg {
+            self.grid.attr.fg_index = index as u8;
+        } else {
+            self.grid.attr.bg_index = index as u8;
+        }
+    }
+
+    #[inline]
+    fn color_rgb(&mut self, fg: bool, r: u16, g: u16, b: u16) {
+        let rgb = (r as u32) << 16 | (g as u32) << 8 | b as u32;
+        if fg {
+            self.grid.attr.fg_rgb = rgb;
+            self.grid.attr.fg_index = 0xFF;
+        } else {
+            self.grid.attr.bg_rgb = rgb;
+            self.grid.attr.bg_index = 0xFF;
         }
     }
 

@@ -22,136 +22,136 @@ impl CsiFastParser {
 
         let b0 = buf[0];
 
-        // \x1b[K — erase to end of line (the most common EL form)
+        // Digit-first branch: the common case for SGR, CUP, 256-color, truecolor.
+        // Checking digits first avoids branch mispredictions in color-heavy output
+        // where most CSI sequences start with a digit.
+        if b0.is_ascii_digit() {
+            if buf.len() < 2 {
+                return None;
+            }
+            let b1 = buf[1];
+
+            // \x1b[0m — SGR reset (the single most common CSI sequence)
+            if b0 == b'0' && b1 == b'm' {
+                performer.sgr_reset();
+                return Some(2);
+            }
+
+            // \x1b[Nm — single digit SGR
+            if b1 == b'm' {
+                performer.sgr_single((b0 - b'0') as u16);
+                return Some(2);
+            }
+
+            // \x1b[NK — erase in line with mode
+            if b1 == b'K' {
+                performer.erase_in_line((b0 - b'0') as u16);
+                return Some(2);
+            }
+
+            // \x1b[NJ — erase in display with mode
+            if b1 == b'J' {
+                performer.erase_in_display((b0 - b'0') as u16);
+                return Some(2);
+            }
+
+            if buf.len() < 3 {
+                return None;
+            }
+            let b2 = buf[2];
+
+            // \x1b[NNm — two digit SGR (fg 30-37, bg 40-47, etc.)
+            if b1.is_ascii_digit() && b2 == b'm' {
+                performer.sgr_single(((b0 - b'0') * 10 + (b1 - b'0')) as u16);
+                return Some(3);
+            }
+
+            // \x1b[N;... — single digit first param + semicolon
+            if b1 == b';' && b2.is_ascii_digit() {
+                if buf.len() >= 4 {
+                    let final_byte = buf[3];
+                    if final_byte == b'm' {
+                        performer.sgr(&[(b0 - b'0') as u16, (b2 - b'0') as u16]);
+                        return Some(4);
+                    }
+                    if final_byte == b'H' {
+                        performer.cursor_position((b0 - b'0') as u16, (b2 - b'0') as u16);
+                        return Some(4);
+                    }
+                }
+                if buf.len() >= 5 && buf[3].is_ascii_digit() {
+                    let p1 = ((b2 - b'0') * 10 + (buf[3] - b'0')) as u16;
+                    let final_byte = buf[4];
+                    if final_byte == b'm' {
+                        performer.sgr(&[(b0 - b'0') as u16, p1]);
+                        return Some(5);
+                    }
+                    if final_byte == b'H' {
+                        performer.cursor_position((b0 - b'0') as u16, p1);
+                        return Some(5);
+                    }
+                }
+            }
+
+            // \x1b[NN;... — two digit first param + semicolon
+            if buf.len() >= 5 && b1.is_ascii_digit() && b2 == b';' {
+                let p0 = ((b0 - b'0') * 10 + (b1 - b'0')) as u16;
+                let b3 = buf[3];
+                if b3.is_ascii_digit() {
+                    if buf[4] == b'm' {
+                        performer.sgr(&[p0, (b3 - b'0') as u16]);
+                        return Some(5);
+                    }
+                    if buf[4] == b'H' {
+                        performer.cursor_position(p0, (b3 - b'0') as u16);
+                        return Some(5);
+                    }
+                    if buf.len() >= 6 && buf[4].is_ascii_digit() {
+                        let p1 = ((b3 - b'0') * 10 + (buf[4] - b'0')) as u16;
+                        if buf[5] == b'm' {
+                            performer.sgr(&[p0, p1]);
+                            return Some(6);
+                        }
+                        if buf[5] == b'H' {
+                            performer.cursor_position(p0, p1);
+                            return Some(6);
+                        }
+                        if buf.len() >= 7 && buf[5].is_ascii_digit() && buf[6] == b'H' {
+                            let p1 = p1 * 10 + (buf[5] - b'0') as u16;
+                            performer.cursor_position(p0, p1);
+                            return Some(7);
+                        }
+                    }
+                }
+
+                // 256-color: \x1b[38;5;Nm or \x1b[48;5;Nm
+                if (p0 == 38 || p0 == 48) && b3 == b'5' && buf[4] == b';' {
+                    if let Some(consumed) = Self::parse_color_index(&buf[5..]) {
+                        performer.color_256(p0 == 38, consumed.0);
+                        return Some(5 + consumed.1);
+                    }
+                }
+
+                // Truecolor: \x1b[38;2;R;G;Bm or \x1b[48;2;R;G;Bm
+                if (p0 == 38 || p0 == 48) && b3 == b'2' && buf[4] == b';' {
+                    if let Some((r, g, b, consumed)) = Self::parse_rgb(&buf[5..]) {
+                        performer.color_rgb(p0 == 38, r, g, b);
+                        return Some(5 + consumed);
+                    }
+                }
+            }
+
+            return None;
+        }
+
+        // Non-digit leading byte: K, H (the common non-digit CSI sequences)
         if b0 == b'K' {
             performer.erase_in_line(0);
             return Some(1);
         }
-
-        // \x1b[H — cursor home (no params = 1;1)
         if b0 == b'H' {
             performer.cursor_position(1, 1);
             return Some(1);
-        }
-
-        if buf.len() < 2 {
-            return None;
-        }
-        let b1 = buf[1];
-
-        // \x1b[NK — erase in line with mode (0K, 1K, 2K)
-        if b0.is_ascii_digit() && b1 == b'K' {
-            performer.erase_in_line((b0 - b'0') as u16);
-            return Some(2);
-        }
-
-        // \x1b[NJ — erase in display with mode
-        if b0.is_ascii_digit() && b1 == b'J' {
-            performer.erase_in_display((b0 - b'0') as u16);
-            return Some(2);
-        }
-
-        // \x1b[Nm — single digit SGR (reset, bold, italic, underline, inverse, etc.)
-        if b0.is_ascii_digit() && b1 == b'm' {
-            performer.sgr(&[(b0 - b'0') as u16]);
-            return Some(2);
-        }
-
-        if buf.len() < 3 {
-            return None;
-        }
-        let b2 = buf[2];
-
-        // \x1b[NNm — two digit (fg 30-37, bg 40-47, etc.)
-        if b0.is_ascii_digit() && b1.is_ascii_digit() && b2 == b'm' {
-            performer.sgr(&[((b0 - b'0') * 10 + (b1 - b'0')) as u16]);
-            return Some(3);
-        }
-
-        // \x1b[N;... — single digit first param + semicolon
-        if b0.is_ascii_digit() && b1 == b';' && b2.is_ascii_digit() {
-            if buf.len() >= 4 {
-                let final_byte = buf[3];
-                if final_byte == b'm' {
-                    // \x1b[N;Mm — SGR
-                    performer.sgr(&[(b0 - b'0') as u16, (b2 - b'0') as u16]);
-                    return Some(4);
-                }
-                if final_byte == b'H' {
-                    // \x1b[N;MH — CUP (cursor position)
-                    performer.cursor_position((b0 - b'0') as u16, (b2 - b'0') as u16);
-                    return Some(4);
-                }
-            }
-            if buf.len() >= 5 && buf[3].is_ascii_digit() {
-                let p1 = ((b2 - b'0') * 10 + (buf[3] - b'0')) as u16;
-                let final_byte = buf[4];
-                if final_byte == b'm' {
-                    // \x1b[N;NNm (e.g., \x1b[1;32m bold green)
-                    performer.sgr(&[(b0 - b'0') as u16, p1]);
-                    return Some(5);
-                }
-                if final_byte == b'H' {
-                    // \x1b[N;NNH — CUP (e.g., \x1b[1;40H)
-                    performer.cursor_position((b0 - b'0') as u16, p1);
-                    return Some(5);
-                }
-            }
-        }
-
-        // \x1b[NN;... — two digit first param + semicolon
-        if buf.len() >= 5 && b0.is_ascii_digit() && b1.is_ascii_digit() && b2 == b';' {
-            let p0 = ((b0 - b'0') * 10 + (b1 - b'0')) as u16;
-            let b3 = buf[3];
-            if b3.is_ascii_digit() {
-                if buf[4] == b'm' {
-                    // \x1b[NN;Nm (e.g., \x1b[41;7m)
-                    performer.sgr(&[p0, (b3 - b'0') as u16]);
-                    return Some(5);
-                }
-                if buf[4] == b'H' {
-                    // \x1b[NN;NH — CUP (e.g., \x1b[12;1H)
-                    performer.cursor_position(p0, (b3 - b'0') as u16);
-                    return Some(5);
-                }
-                if buf.len() >= 6 && buf[4].is_ascii_digit() {
-                    let p1 = ((b3 - b'0') * 10 + (buf[4] - b'0')) as u16;
-                    if buf[5] == b'm' {
-                        // \x1b[NN;NNm (e.g., \x1b[41;37m)
-                        performer.sgr(&[p0, p1]);
-                        return Some(6);
-                    }
-                    if buf[5] == b'H' {
-                        // \x1b[NN;NNH — CUP (e.g., \x1b[24;80H)
-                        performer.cursor_position(p0, p1);
-                        return Some(6);
-                    }
-                    if buf.len() >= 7 && buf[5].is_ascii_digit() && buf[6] == b'H' {
-                        // \x1b[NN;NNNH — CUP with 3-digit col (e.g., \x1b[12;120H)
-                        let p1 = p1 * 10 + (buf[5] - b'0') as u16;
-                        performer.cursor_position(p0, p1);
-                        return Some(7);
-                    }
-                }
-            }
-
-            // 256-color: \x1b[38;5;Nm or \x1b[48;5;Nm
-            // Pattern: NN;N;... where NN is 38 or 48, N is 5
-            if (p0 == 38 || p0 == 48) && b3 == b'5' && buf[4] == b';' {
-                if let Some(consumed) = Self::parse_color_index(&buf[5..]) {
-                    let idx = consumed.0;
-                    performer.sgr(&[p0, 5, idx]);
-                    return Some(5 + consumed.1);
-                }
-            }
-
-            // Truecolor: \x1b[38;2;R;G;Bm or \x1b[48;2;R;G;Bm
-            if (p0 == 38 || p0 == 48) && b3 == b'2' && buf[4] == b';' {
-                if let Some((r, g, b, consumed)) = Self::parse_rgb(&buf[5..]) {
-                    performer.sgr(&[p0, 2, r, g, b]);
-                    return Some(5 + consumed);
-                }
-            }
         }
 
         None
@@ -319,8 +319,10 @@ impl CsiFastParser {
         match final_byte {
             // SGR (Select Graphic Rendition)
             b'm' => {
-                if params.is_empty() {
-                    performer.sgr(&[0]);
+                if params.is_empty() || (params.len() == 1 && params[0] == 0) {
+                    performer.sgr_reset();
+                } else if params.len() == 1 {
+                    performer.sgr_single(params[0]);
                 } else {
                     performer.sgr(params);
                 }

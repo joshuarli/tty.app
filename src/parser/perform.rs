@@ -37,6 +37,42 @@ pub trait Perform {
     /// SGR (Select Graphic Rendition) with raw params
     fn sgr(&mut self, params: &[u16]);
 
+    /// SGR reset (\x1b[0m). Default delegates to sgr(&[0]).
+    /// Override for zero-overhead attribute reset.
+    #[inline]
+    fn sgr_reset(&mut self) {
+        self.sgr(&[0]);
+    }
+
+    /// Single-param SGR (\x1b[Nm or \x1b[NNm). Default delegates to sgr(&[code]).
+    /// Override to avoid the param-slice + loop overhead.
+    #[inline]
+    fn sgr_single(&mut self, code: u16) {
+        self.sgr(&[code]);
+    }
+
+    /// 256-color: \x1b[38;5;Nm (fg=true) or \x1b[48;5;Nm (fg=false).
+    /// Default delegates to sgr(); override for zero-overhead color setting.
+    #[inline]
+    fn color_256(&mut self, fg: bool, index: u16) {
+        if fg {
+            self.sgr(&[38, 5, index]);
+        } else {
+            self.sgr(&[48, 5, index]);
+        }
+    }
+
+    /// Truecolor: \x1b[38;2;R;G;Bm (fg=true) or \x1b[48;2;R;G;Bm (fg=false).
+    /// Default delegates to sgr(); override for zero-overhead color setting.
+    #[inline]
+    fn color_rgb(&mut self, fg: bool, r: u16, g: u16, b: u16) {
+        if fg {
+            self.sgr(&[38, 2, r, g, b]);
+        } else {
+            self.sgr(&[48, 2, r, g, b]);
+        }
+    }
+
     /// Set/reset modes
     fn set_mode(&mut self, params: &[u16], private: bool);
     fn reset_mode(&mut self, params: &[u16], private: bool);

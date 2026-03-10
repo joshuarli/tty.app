@@ -403,6 +403,72 @@ impl<'a> Perform for TermPerformer<'a> {
         }
     }
 
+    #[inline]
+    fn sgr_reset(&mut self) {
+        self.grid.attr.flags = CellFlags::empty();
+        self.grid.attr.fg_index = 7;
+        self.grid.attr.bg_index = 0;
+        self.grid.attr.fg_rgb = config::DEFAULT_FG;
+        self.grid.attr.bg_rgb = config::DEFAULT_BG;
+    }
+
+    #[inline]
+    fn sgr_single(&mut self, code: u16) {
+        match code {
+            0 => self.sgr_reset(),
+            1 => self.grid.attr.flags.insert(CellFlags::BOLD),
+            2 => self.grid.attr.flags.insert(CellFlags::DIM),
+            3 => self.grid.attr.flags.insert(CellFlags::ITALIC),
+            4 => self.grid.attr.flags.insert(CellFlags::UNDERLINE),
+            7 => self.grid.attr.flags.insert(CellFlags::INVERSE),
+            8 => self.grid.attr.flags.insert(CellFlags::HIDDEN),
+            9 => self.grid.attr.flags.insert(CellFlags::STRIKE),
+            21 | 22 => {
+                self.grid.attr.flags.remove(CellFlags::BOLD);
+                self.grid.attr.flags.remove(CellFlags::DIM);
+            }
+            23 => self.grid.attr.flags.remove(CellFlags::ITALIC),
+            24 => self.grid.attr.flags.remove(CellFlags::UNDERLINE),
+            27 => self.grid.attr.flags.remove(CellFlags::INVERSE),
+            28 => self.grid.attr.flags.remove(CellFlags::HIDDEN),
+            29 => self.grid.attr.flags.remove(CellFlags::STRIKE),
+            30..=37 => self.grid.attr.fg_index = (code - 30) as u8,
+            39 => {
+                self.grid.attr.fg_index = 7;
+                self.grid.attr.fg_rgb = config::DEFAULT_FG;
+            }
+            40..=47 => self.grid.attr.bg_index = (code - 40) as u8,
+            49 => {
+                self.grid.attr.bg_index = 0;
+                self.grid.attr.bg_rgb = config::DEFAULT_BG;
+            }
+            90..=97 => self.grid.attr.fg_index = (code - 90 + 8) as u8,
+            100..=107 => self.grid.attr.bg_index = (code - 100 + 8) as u8,
+            _ => {}
+        }
+    }
+
+    #[inline]
+    fn color_256(&mut self, fg: bool, index: u16) {
+        if fg {
+            self.grid.attr.fg_index = index as u8;
+        } else {
+            self.grid.attr.bg_index = index as u8;
+        }
+    }
+
+    #[inline]
+    fn color_rgb(&mut self, fg: bool, r: u16, g: u16, b: u16) {
+        let rgb = (r as u32) << 16 | (g as u32) << 8 | b as u32;
+        if fg {
+            self.grid.attr.fg_rgb = rgb;
+            self.grid.attr.fg_index = 0xFF;
+        } else {
+            self.grid.attr.bg_rgb = rgb;
+            self.grid.attr.bg_index = 0xFF;
+        }
+    }
+
     fn sgr_colon(&mut self, raw: &[u8]) {
         // Split on ';' into independent SGR attributes, then split each on ':'
         for attr_bytes in raw.split(|&b| b == b';') {
