@@ -9,6 +9,74 @@ use crate::parser::perform::Perform;
 pub struct CsiFastParser;
 
 impl CsiFastParser {
+    /// Ultra-fast inline SGR for the ~90% of SGR sequences that are 1-2 params
+    /// with 1-2 digits each. Avoids the generic parameter parsing loop entirely.
+    ///
+    /// Input starts AFTER "ESC [". Returns Some(bytes_consumed) on success.
+    #[inline(always)]
+    pub fn try_sgr_fast<P: Perform>(buf: &[u8], performer: &mut P) -> Option<usize> {
+        if buf.len() < 2 {
+            return None;
+        }
+
+        let b0 = buf[0];
+        let b1 = buf[1];
+
+        // \x1b[Nm — single digit (reset, bold, italic, underline, inverse, etc.)
+        if b0.is_ascii_digit() && b1 == b'm' {
+            performer.sgr(&[(b0 - b'0') as u16]);
+            return Some(2);
+        }
+
+        if buf.len() < 3 {
+            return None;
+        }
+        let b2 = buf[2];
+
+        // \x1b[NNm — two digit (fg 30-37, bg 40-47, etc.)
+        if b0.is_ascii_digit() && b1.is_ascii_digit() && b2 == b'm' {
+            performer.sgr(&[((b0 - b'0') * 10 + (b1 - b'0')) as u16]);
+            return Some(3);
+        }
+
+        // \x1b[N;... — single digit first param + semicolon
+        if b0.is_ascii_digit() && b1 == b';' && b2.is_ascii_digit() {
+            if buf.len() >= 4 && buf[3] == b'm' {
+                // \x1b[N;Mm
+                performer.sgr(&[(b0 - b'0') as u16, (b2 - b'0') as u16]);
+                return Some(4);
+            }
+            if buf.len() >= 5 && buf[3].is_ascii_digit() && buf[4] == b'm' {
+                // \x1b[N;NNm (e.g., \x1b[1;32m bold green)
+                performer.sgr(&[
+                    (b0 - b'0') as u16,
+                    ((b2 - b'0') * 10 + (buf[3] - b'0')) as u16,
+                ]);
+                return Some(5);
+            }
+        }
+
+        // \x1b[NN;... — two digit first param + semicolon
+        if buf.len() >= 5 && b0.is_ascii_digit() && b1.is_ascii_digit() && b2 == b';' {
+            let p0 = ((b0 - b'0') * 10 + (b1 - b'0')) as u16;
+            let b3 = buf[3];
+            if b3.is_ascii_digit() {
+                if buf[4] == b'm' {
+                    // \x1b[NN;Nm (e.g., \x1b[41;7m)
+                    performer.sgr(&[p0, (b3 - b'0') as u16]);
+                    return Some(5);
+                }
+                if buf.len() >= 6 && buf[4].is_ascii_digit() && buf[5] == b'm' {
+                    // \x1b[NN;NNm (e.g., \x1b[41;37m)
+                    performer.sgr(&[p0, ((b3 - b'0') * 10 + (buf[4] - b'0')) as u16]);
+                    return Some(6);
+                }
+            }
+        }
+
+        None
+    }
+
     /// Try to parse a CSI sequence starting after "ESC [".
     /// Returns Some(consumed_bytes) on success, None to bail to state machine.
     pub fn try_parse<P: Perform>(buf: &[u8], performer: &mut P) -> Option<usize> {

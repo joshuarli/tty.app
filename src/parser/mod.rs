@@ -119,21 +119,19 @@ impl Parser {
             let byte = data[pos];
 
             if byte == 0x1B && pos + 1 < len && data[pos + 1] == b'[' {
-                // ESC [ detected — try CSI fast path
-                pos += 2; // skip ESC [
-                let remaining = &data[pos..];
-                match CsiFastParser::try_parse(remaining, performer) {
-                    Some(consumed) => {
-                        pos += consumed;
-                        continue;
-                    }
-                    None => {
-                        // CSI fast path failed, feed ESC and [ to state machine
-                        self.state_machine.advance(0x1B, performer);
-                        self.state_machine.advance(b'[', performer);
-                        continue;
-                    }
+                // ESC [ detected — enter tight styled text loop.
+                // Handles this CSI plus subsequent text + CSI without returning
+                // to the outer loop for each transition.
+                let consumed = Self::process_styled_run(&data[pos..], performer);
+                if consumed > 0 {
+                    pos += consumed;
+                    continue;
                 }
+                // First CSI not handleable — feed ESC [ to state machine
+                self.state_machine.advance(0x1B, performer);
+                self.state_machine.advance(b'[', performer);
+                pos += 2;
+                continue;
             }
 
             // Printable ASCII (scalar fallback for short runs / when not aligned)
@@ -172,6 +170,71 @@ impl Parser {
             self.state_machine.advance(byte, performer);
             pos += 1;
         }
+    }
+
+    /// Process styled text: interleaved printable ASCII, CSI sequences, and
+    /// line endings (CR/LF) in a tight inner loop. Avoids the overhead of
+    /// returning to the main parser loop for each text↔CSI transition.
+    ///
+    /// Returns the number of bytes consumed. Bails (returns current position)
+    /// when it hits something it can't handle inline: UTF-8 high bytes, bare
+    /// ESC without `[`, incomplete CSI, or non-CR/LF control characters.
+    fn process_styled_run<P: Perform>(data: &[u8], performer: &mut P) -> usize {
+        let len = data.len();
+        let mut pos = 0;
+
+        while pos < len {
+            let b = data[pos];
+
+            // Printable ASCII run — use SIMD when possible
+            if b >= 0x20 && b < 0x7F {
+                let start = pos;
+                let remaining = &data[pos..];
+                if remaining.len() >= 16 {
+                    let (ascii_end, _) = SimdScanner::scan(remaining);
+                    pos += ascii_end;
+                } else {
+                    pos += 1;
+                    while pos < len && data[pos] >= 0x20 && data[pos] < 0x7F {
+                        pos += 1;
+                    }
+                }
+                performer.print_ascii_run(&data[start..pos]);
+                continue;
+            }
+
+            // ESC [ — CSI sequence
+            if b == 0x1B && pos + 2 < len && data[pos + 1] == b'[' {
+                let csi_buf = &data[pos + 2..];
+
+                // Try ultra-fast inline SGR first (handles ~90% of SGR sequences)
+                if let Some(consumed) = CsiFastParser::try_sgr_fast(csi_buf, performer) {
+                    pos += 2 + consumed;
+                    continue;
+                }
+
+                // Try full CSI fast path
+                if let Some(consumed) = CsiFastParser::try_parse(csi_buf, performer) {
+                    pos += 2 + consumed;
+                    continue;
+                }
+
+                // CSI not recognized or incomplete — bail to main loop
+                break;
+            }
+
+            // CR/LF — handle inline to stay in the tight loop across line boundaries
+            if b == 0x0A || b == 0x0D {
+                performer.execute(b);
+                pos += 1;
+                continue;
+            }
+
+            // Anything else (UTF-8, other controls, bare ESC) — bail to main loop
+            break;
+        }
+
+        pos
     }
 
     /// Process a mixed text run (ASCII + UTF-8) in a tight loop.
