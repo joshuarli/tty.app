@@ -165,7 +165,11 @@ impl<'a> Perform for TermPerformer<'a> {
     }
 
     fn cursor_forward(&mut self, n: u16) {
-        self.grid.cursor_col = self.grid.cursor_col.saturating_add(n).min(self.grid.cols - 1);
+        self.grid.cursor_col = self
+            .grid
+            .cursor_col
+            .saturating_add(n)
+            .min(self.grid.cols - 1);
         self.grid.cursor_pending_wrap = false;
     }
 
@@ -866,7 +870,7 @@ struct App {
     selection_start: Option<(u16, u16)>, // (col, row)
     selection_end: Option<(u16, u16)>,   // (col, row)
     // Previously rendered selection range for targeted clearing
-    prev_sel_rows: Option<(u16, u16)>,   // (first_row, last_row) inclusive
+    prev_sel_rows: Option<(u16, u16)>, // (first_row, last_row) inclusive
     mouse_pressed: bool,
     cursor_pos: (f64, f64), // Physical pixel position of mouse cursor
 
@@ -1431,9 +1435,11 @@ impl App {
         let sign = if lines > 0 { 1.0 } else { -1.0 };
         self.scroll_accumulator -= count as f64 * cell_height_pts * sign;
 
-        let mouse_mode = self.shared.grid.mode.intersects(
-            TermMode::MOUSE_BUTTON | TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL,
-        );
+        let mouse_mode = self
+            .shared
+            .grid
+            .mode
+            .intersects(TermMode::MOUSE_BUTTON | TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL);
 
         if mouse_mode {
             let cell = self.pixel_to_cell(self.cursor_pos.0, self.cursor_pos.1);

@@ -98,7 +98,11 @@ impl<'a> Perform for TestPerformer<'a> {
     }
 
     fn cursor_forward(&mut self, n: u16) {
-        self.grid.cursor_col = self.grid.cursor_col.saturating_add(n).min(self.grid.cols - 1);
+        self.grid.cursor_col = self
+            .grid
+            .cursor_col
+            .saturating_add(n)
+            .min(self.grid.cols - 1);
         self.grid.cursor_pending_wrap = false;
     }
 

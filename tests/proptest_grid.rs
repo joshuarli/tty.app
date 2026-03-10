@@ -16,7 +16,6 @@ use tty::terminal::scrollback::Scrollback;
 struct TestPerformer<'a> {
     grid: &'a mut Grid,
     scrollback: &'a mut Scrollback,
-    response_buf: &'a mut Vec<u8>,
 }
 
 impl<'a> Perform for TestPerformer<'a> {
@@ -97,7 +96,11 @@ impl<'a> Perform for TestPerformer<'a> {
     }
 
     fn cursor_forward(&mut self, n: u16) {
-        self.grid.cursor_col = self.grid.cursor_col.saturating_add(n).min(self.grid.cols - 1);
+        self.grid.cursor_col = self
+            .grid
+            .cursor_col
+            .saturating_add(n)
+            .min(self.grid.cols - 1);
         self.grid.cursor_pending_wrap = false;
     }
 
@@ -251,12 +254,18 @@ impl<'a> Perform for TestPerformer<'a> {
     fn osc_dispatch(&mut self, _params: &[&[u8]]) {}
     fn esc_dispatch(&mut self, _intermediates: &[u8], _byte: u8) {}
     fn csi_dispatch(&mut self, _params: &[u16], _intermediates: &[u8], _ignore: bool, _byte: u8) {}
-    fn save_cursor(&mut self) { self.grid.save_cursor(); }
-    fn restore_cursor(&mut self) { self.grid.restore_cursor(); }
+    fn save_cursor(&mut self) {
+        self.grid.save_cursor();
+    }
+    fn restore_cursor(&mut self) {
+        self.grid.restore_cursor();
+    }
     fn device_status_report(&mut self, _mode: u16) {}
     fn repeat_char(&mut self, n: u16) {
         let c = self.grid.last_char;
-        for _ in 0..n { self.grid.write_char(c); }
+        for _ in 0..n {
+            self.grid.write_char(c);
+        }
     }
     fn sgr_colon(&mut self, _raw: &[u8]) {}
 }
@@ -265,11 +274,9 @@ impl<'a> Perform for TestPerformer<'a> {
 
 fn parse_bytes(grid: &mut Grid, scrollback: &mut Scrollback, data: &[u8]) {
     let mut parser = Parser::new();
-    let mut response_buf = Vec::new();
     let mut performer = TestPerformer {
         grid,
         scrollback,
-        response_buf: &mut response_buf,
     };
     parser.parse(data, &mut performer);
 }
@@ -372,7 +379,6 @@ proptest! {
         let mut grid = Grid::new(80, 24);
         let mut scrollback = Scrollback::new(100);
         let mut parser = Parser::new();
-        let mut response_buf = Vec::new();
 
         let mut pos = 0;
         for &size in &chunk_sizes {
@@ -381,7 +387,6 @@ proptest! {
             let mut performer = TestPerformer {
                 grid: &mut grid,
                 scrollback: &mut scrollback,
-                response_buf: &mut response_buf,
             };
             parser.parse(&data[pos..end], &mut performer);
             pos = end;
@@ -392,7 +397,6 @@ proptest! {
             let mut performer = TestPerformer {
                 grid: &mut grid,
                 scrollback: &mut scrollback,
-                response_buf: &mut response_buf,
             };
             parser.parse(&data[pos..], &mut performer);
         }

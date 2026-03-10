@@ -35,6 +35,7 @@ pub fn clipboard_has_image() -> bool {
 
 /// Place raw image data on the clipboard with the given UTI type.
 /// Used by tests and by the paste-image path.
+#[allow(dead_code)]
 pub fn set_clipboard_image(data: &[u8], uti: &str) {
     let pb = NSPasteboard::generalPasteboard();
     pb.clearContents();

@@ -178,12 +178,12 @@ impl Grid {
         let cols = self.cols as usize;
 
         // Push evicted rows directly into scrollback (no intermediate Vec)
-        if self.scroll_top == 0 {
-            if let Some(sb) = scrollback {
-                for row in 0..n {
-                    let start = row as usize * cols;
-                    sb.push_slice(&self.cells[start..start + cols]);
-                }
+        if self.scroll_top == 0
+            && let Some(sb) = scrollback
+        {
+            for row in 0..n {
+                let start = row as usize * cols;
+                sb.push_slice(&self.cells[start..start + cols]);
             }
         }
 

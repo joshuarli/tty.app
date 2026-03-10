@@ -181,10 +181,7 @@ impl MetalRenderer {
             cell_buffers,
             current_buffer: 0,
             buffer_ready,
-            pending: [
-                bitvec![1; rows as usize],
-                bitvec![1; rows as usize],
-            ],
+            pending: [bitvec![1; rows as usize], bitvec![1; rows as usize]],
             palette_buffer,
             uniform_buffer,
             atlas_texture,
