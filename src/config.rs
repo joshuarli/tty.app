@@ -16,10 +16,7 @@ pub const PADDING: u32 = 16;
 /// Maximum scrollback lines
 pub const SCROLLBACK_LINES: usize = 10_000;
 
-/// Default foreground color (palette index 7)
-pub const DEFAULT_FG: u32 = 0x00ffffff;
-
-/// Default background color (palette index 0)
+/// Default background color (palette index 0) — used for frame padding in shader
 pub const DEFAULT_BG: u32 = 0x00000000;
 
 /// xterm-256color palette: ANSI 0-15 (tweaked), 16-231 (6x6x6 cube), 232-255 (grayscale)
@@ -74,3 +71,23 @@ pub const PALETTE: [u32; 256] = {
 
     p
 };
+
+/// Map an RGB color to the nearest xterm-256 palette index.
+/// Used when truecolor sequences (38;2;R;G;B) are received — we degrade to palette.
+pub fn rgb_to_palette(r: u8, g: u8, b: u8) -> u8 {
+    // Grayscale shortcut
+    if r == g && g == b {
+        if r < 8 {
+            return 0;
+        }
+        if r > 248 {
+            return 15;
+        }
+        return (((r as u16 - 8) * 24 / 240) + 232) as u8;
+    }
+    // Map to 6x6x6 color cube (indices 16-231)
+    let ri = ((r as u16 + 25) / 51).min(5);
+    let gi = ((g as u16 + 25) / 51).min(5);
+    let bi = ((b as u16 + 25) / 51).min(5);
+    (16 + 36 * ri + 6 * gi + bi) as u8
+}

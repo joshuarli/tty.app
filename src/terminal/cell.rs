@@ -1,5 +1,3 @@
-use crate::config;
-
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct CellFlags: u16 {
@@ -22,10 +20,8 @@ bitflags::bitflags! {
 pub struct Cell {
     pub codepoint: u16,
     pub flags: CellFlags,
-    pub fg_index: u8,
-    pub bg_index: u8,
-    pub fg_rgb: u32,
-    pub bg_rgb: u32,
+    pub fg_index: u16,
+    pub bg_index: u16,
 }
 
 impl Default for Cell {
@@ -35,14 +31,12 @@ impl Default for Cell {
             flags: CellFlags::empty(),
             fg_index: 7, // default fg = palette 7
             bg_index: 0, // default bg = palette 0
-            fg_rgb: config::DEFAULT_FG,
-            bg_rgb: config::DEFAULT_BG,
         }
     }
 }
 
-// Cell and CellData (GPU) must both be 16 bytes for memcpy-based render upload.
-const _: () = assert!(std::mem::size_of::<Cell>() == 16, "Cell must be 16 bytes");
+// Cell and CellData (GPU) must both be 8 bytes for efficient render upload.
+const _: () = assert!(std::mem::size_of::<Cell>() == 8, "Cell must be 8 bytes");
 
 impl Cell {
     /// Create a blank cell with the given SGR background attributes.
@@ -53,8 +47,6 @@ impl Cell {
             flags: CellFlags::empty(),
             fg_index: attr.fg_index,
             bg_index: attr.bg_index,
-            fg_rgb: attr.fg_rgb,
-            bg_rgb: attr.bg_rgb,
         }
     }
 }

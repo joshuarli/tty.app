@@ -90,7 +90,7 @@ fn main() {
 
     for (name, test_fn) in tests {
         print!("test {name} ... ");
-        let result = std::panic::catch_unwind(|| test_fn());
+        let result = std::panic::catch_unwind(test_fn);
         match result {
             Ok(()) => {
                 println!("ok");

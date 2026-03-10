@@ -187,7 +187,7 @@ impl Parser {
             let b = data[pos];
 
             // Printable ASCII run — use SIMD when possible
-            if b >= 0x20 && b < 0x7F {
+            if (0x20..0x7F).contains(&b) {
                 let start = pos;
                 let remaining = &data[pos..];
                 if remaining.len() >= 16 {

@@ -29,10 +29,8 @@ bitflags::bitflags! {
 pub struct SavedCursor {
     pub row: u16,
     pub col: u16,
-    pub fg_index: u8,
-    pub bg_index: u8,
-    pub fg_rgb: u32,
-    pub bg_rgb: u32,
+    pub fg_index: u16,
+    pub bg_index: u16,
     pub flags: CellFlags,
     pub charset_g0: u8,
     pub charset_g1: u8,
@@ -43,6 +41,10 @@ pub struct Grid {
     pub cols: u16,
     pub rows: u16,
     pub dirty: BitVec,
+
+    /// Ring buffer offset: physical row for logical row 0.
+    /// Enables O(n*cols) full-screen scroll instead of O(rows*cols) memmove.
+    ring_offset: usize,
 
     // Cursor
     pub cursor_row: u16,
@@ -79,6 +81,7 @@ pub struct Grid {
 
     // Alternate screen buffer
     alt_cells: Vec<Cell>,
+    alt_ring_offset: usize,
     main_cursor: SavedCursor,
 }
 
@@ -104,6 +107,7 @@ impl Grid {
             cols,
             rows,
             dirty,
+            ring_offset: 0,
             cursor_row: 0,
             cursor_col: 0,
             cursor_pending_wrap: false,
@@ -119,18 +123,32 @@ impl Grid {
             sync_start: None,
             saved_cursor: SavedCursor::default(),
             alt_cells: Vec::new(),
+            alt_ring_offset: 0,
             main_cursor: SavedCursor::default(),
         }
     }
 
+    /// Map a logical row to the start index in the cells vec.
+    #[inline(always)]
+    pub fn row_start(&self, logical_row: u16) -> usize {
+        ((logical_row as usize + self.ring_offset) % self.rows as usize) * self.cols as usize
+    }
+
+    /// Get a slice of cells for a logical row.
+    #[inline]
+    pub fn row_slice(&self, logical_row: u16) -> &[Cell] {
+        let start = self.row_start(logical_row);
+        &self.cells[start..start + self.cols as usize]
+    }
+
     #[inline]
     pub fn cell(&self, row: u16, col: u16) -> &Cell {
-        &self.cells[row as usize * self.cols as usize + col as usize]
+        &self.cells[self.row_start(row) + col as usize]
     }
 
     #[inline]
     pub fn cell_mut(&mut self, row: u16, col: u16) -> &mut Cell {
-        let idx = row as usize * self.cols as usize + col as usize;
+        let idx = self.row_start(row) + col as usize;
         &mut self.cells[idx]
     }
 
@@ -152,10 +170,10 @@ impl Grid {
     /// Clear row range [from..to) using current SGR background color.
     pub fn clear_rows(&mut self, from: u16, to: u16) {
         let blank = Cell::blank(&self.attr);
+        let cols = self.cols as usize;
         for row in from..to.min(self.rows) {
-            let start = row as usize * self.cols as usize;
-            let end = start + self.cols as usize;
-            self.cells[start..end].fill(blank);
+            let start = self.row_start(row);
+            self.cells[start..start + cols].fill(blank);
             self.mark_dirty(row);
         }
     }
@@ -163,9 +181,8 @@ impl Grid {
     /// Clear columns [from_col..to_col) using current SGR background color.
     pub fn clear_cols(&mut self, row: u16, from_col: u16, to_col: u16) {
         let blank = Cell::blank(&self.attr);
-        let cols = self.cols;
-        let start = row as usize * cols as usize + from_col as usize;
-        let end = row as usize * cols as usize + to_col.min(cols) as usize;
+        let start = self.row_start(row) + from_col as usize;
+        let end = self.row_start(row) + to_col.min(self.cols) as usize;
         self.cells[start..end].fill(blank);
         self.mark_dirty(row);
     }
@@ -181,25 +198,44 @@ impl Grid {
         if self.scroll_top == 0
             && let Some(sb) = scrollback
         {
-            for row in 0..n {
-                let start = row as usize * cols;
+            for i in 0..n {
+                let start = self.row_start(i);
                 sb.push_slice(&self.cells[start..start + cols]);
             }
         }
 
-        // memmove cells up
-        let src_start = (self.scroll_top + n) as usize * cols;
-        let dst_start = self.scroll_top as usize * cols;
-        let count = ((self.scroll_bottom - self.scroll_top + 1 - n) as usize) * cols;
-        self.cells
-            .copy_within(src_start..src_start + count, dst_start);
+        if self.scroll_top == 0 && self.scroll_bottom == self.rows - 1 {
+            // Full-screen scroll: O(n*cols) ring buffer bump
+            self.ring_offset = (self.ring_offset + n as usize) % self.rows as usize;
 
-        // Clear new rows at bottom of scroll region (use current bg color)
-        let blank = Cell::blank(&self.attr);
-        let clear_from = self.scroll_bottom + 1 - n;
-        for row in clear_from..=self.scroll_bottom {
-            let start = row as usize * cols;
-            self.cells[start..start + cols].fill(blank);
+            // Clear the new bottom rows (old top rows, now at logical bottom)
+            let blank = Cell::blank(&self.attr);
+            for i in 0..n {
+                let row = self.rows - n + i;
+                let start = self.row_start(row);
+                self.cells[start..start + cols].fill(blank);
+            }
+        } else if n > self.scroll_bottom - self.scroll_top {
+            // Scroll entire region: just clear it
+            let blank = Cell::blank(&self.attr);
+            for i in self.scroll_top..=self.scroll_bottom {
+                let start = self.row_start(i);
+                self.cells[start..start + cols].fill(blank);
+            }
+        } else {
+            // Partial scroll region: copy row by row
+            for i in self.scroll_top..=self.scroll_bottom - n {
+                let src = self.row_start(i + n);
+                let dst = self.row_start(i);
+                self.cells.copy_within(src..src + cols, dst);
+            }
+
+            // Clear new rows at bottom of scroll region
+            let blank = Cell::blank(&self.attr);
+            for i in (self.scroll_bottom + 1 - n)..=self.scroll_bottom {
+                let start = self.row_start(i);
+                self.cells[start..start + cols].fill(blank);
+            }
         }
 
         // Mark affected rows dirty
@@ -219,18 +255,31 @@ impl Grid {
         let n = n.min(self.scroll_bottom - self.scroll_top + 1);
         let cols = self.cols as usize;
 
-        // memmove cells down
-        let src_start = self.scroll_top as usize * cols;
-        let dst_start = (self.scroll_top + n) as usize * cols;
-        let count = ((self.scroll_bottom - self.scroll_top + 1 - n) as usize) * cols;
-        self.cells
-            .copy_within(src_start..src_start + count, dst_start);
+        if self.scroll_top == 0 && self.scroll_bottom == self.rows - 1 {
+            // Full-screen: ring buffer bump backward
+            self.ring_offset =
+                (self.ring_offset + self.rows as usize - n as usize) % self.rows as usize;
 
-        // Clear new rows at top of scroll region (use current bg color)
-        let blank = Cell::blank(&self.attr);
-        for row in self.scroll_top..self.scroll_top + n {
-            let start = row as usize * cols;
-            self.cells[start..start + cols].fill(blank);
+            // Clear the new top rows
+            let blank = Cell::blank(&self.attr);
+            for i in 0..n {
+                let start = self.row_start(i);
+                self.cells[start..start + cols].fill(blank);
+            }
+        } else {
+            // Partial: copy row by row (from bottom to top to avoid clobbering)
+            for i in (self.scroll_top + n..=self.scroll_bottom).rev() {
+                let src = self.row_start(i - n);
+                let dst = self.row_start(i);
+                self.cells.copy_within(src..src + cols, dst);
+            }
+
+            // Clear new rows at top of scroll region
+            let blank = Cell::blank(&self.attr);
+            for i in self.scroll_top..self.scroll_top + n {
+                let start = self.row_start(i);
+                self.cells[start..start + cols].fill(blank);
+            }
         }
 
         for row in self.scroll_top..=self.scroll_bottom {
@@ -253,6 +302,10 @@ impl Grid {
         self.alt_cells.resize(total, Cell::default());
         std::mem::swap(&mut self.cells, &mut self.alt_cells);
 
+        // Save main ring offset, reset for alt screen
+        self.alt_ring_offset = self.ring_offset;
+        self.ring_offset = 0;
+
         self.cursor_row = 0;
         self.cursor_col = 0;
         self.mark_all_dirty();
@@ -267,6 +320,10 @@ impl Grid {
         std::mem::swap(&mut self.cells, &mut self.alt_cells);
         self.alt_cells.clear();
 
+        // Restore main ring offset
+        self.ring_offset = self.alt_ring_offset;
+        self.alt_ring_offset = 0;
+
         self.restore_cursor_from(&self.main_cursor.clone());
         self.mark_all_dirty();
     }
@@ -277,8 +334,6 @@ impl Grid {
             col: self.cursor_col,
             fg_index: self.attr.fg_index,
             bg_index: self.attr.bg_index,
-            fg_rgb: self.attr.fg_rgb,
-            bg_rgb: self.attr.bg_rgb,
             flags: self.attr.flags,
             charset_g0: self.charset_g0,
             charset_g1: self.charset_g1,
@@ -303,8 +358,6 @@ impl Grid {
         self.cursor_col = saved.col.min(self.cols.saturating_sub(1));
         self.attr.fg_index = saved.fg_index;
         self.attr.bg_index = saved.bg_index;
-        self.attr.fg_rgb = saved.fg_rgb;
-        self.attr.bg_rgb = saved.bg_rgb;
         self.attr.flags = saved.flags;
         self.charset_g0 = saved.charset_g0;
         self.charset_g1 = saved.charset_g1;
@@ -317,7 +370,8 @@ impl Grid {
         let copy_cols = self.cols.min(new_cols) as usize;
 
         for row in 0..copy_rows {
-            let src_start = row * self.cols as usize;
+            // Use row_start to handle ring buffer offset
+            let src_start = self.row_start(row as u16);
             let dst_start = row * new_cols as usize;
             new_cells[dst_start..dst_start + copy_cols]
                 .copy_from_slice(&self.cells[src_start..src_start + copy_cols]);
@@ -326,6 +380,7 @@ impl Grid {
         self.cells = new_cells;
         self.cols = new_cols;
         self.rows = new_rows;
+        self.ring_offset = 0; // Flatten ring on resize
         self.dirty = bitvec![1; new_rows as usize];
 
         // Reset scroll region to full screen
@@ -375,15 +430,13 @@ impl Grid {
             let n = space.min(bytes.len() - i);
 
             // Write cells in a tight loop — one index increment per char
-            let base = row as usize * cols + col;
+            let base = self.row_start(row) + col;
             for j in 0..n {
                 let cell = &mut self.cells[base + j];
                 cell.codepoint = bytes[i + j] as u16;
                 cell.flags = attr.flags;
                 cell.fg_index = attr.fg_index;
                 cell.bg_index = attr.bg_index;
-                cell.fg_rgb = attr.fg_rgb;
-                cell.bg_rgb = attr.bg_rgb;
             }
             self.mark_dirty(row);
 
@@ -417,15 +470,13 @@ impl Grid {
         let row = self.cursor_row;
         let col = self.cursor_col;
 
-        let idx = row as usize * self.cols as usize + col as usize;
+        let idx = self.row_start(row) + col as usize;
         let attr = self.attr;
         let cell = &mut self.cells[idx];
         cell.codepoint = c as u16;
         cell.flags = attr.flags;
         cell.fg_index = attr.fg_index;
         cell.bg_index = attr.bg_index;
-        cell.fg_rgb = attr.fg_rgb;
-        cell.bg_rgb = attr.bg_rgb;
         self.mark_dirty(row);
 
         // Advance cursor
@@ -470,7 +521,7 @@ impl Grid {
         let col = self.cursor_col;
 
         let attr = self.attr;
-        let idx = row as usize * self.cols as usize + col as usize;
+        let idx = self.row_start(row) + col as usize;
 
         // First cell
         let cell = &mut self.cells[idx];
@@ -478,8 +529,6 @@ impl Grid {
         cell.flags = attr.flags | CellFlags::WIDE;
         cell.fg_index = attr.fg_index;
         cell.bg_index = attr.bg_index;
-        cell.fg_rgb = attr.fg_rgb;
-        cell.bg_rgb = attr.bg_rgb;
 
         // Continuation cell
         let cell2 = &mut self.cells[idx + 1];
@@ -487,8 +536,6 @@ impl Grid {
         cell2.flags = CellFlags::WIDE_CONT;
         cell2.fg_index = attr.fg_index;
         cell2.bg_index = attr.bg_index;
-        cell2.fg_rgb = attr.fg_rgb;
-        cell2.bg_rgb = attr.bg_rgb;
 
         self.mark_dirty(row);
 

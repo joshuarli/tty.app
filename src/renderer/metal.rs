@@ -12,7 +12,7 @@ use objc2_app_kit::NSView;
 
 use crate::config;
 use crate::renderer::atlas::Atlas;
-use crate::terminal::cell::CellFlags;
+use crate::terminal::cell::{Cell, CellFlags};
 use crate::terminal::grid::Grid;
 
 /// Uniforms passed to the compute shader. Must match Metal Uniforms struct.
@@ -33,7 +33,7 @@ pub struct Uniforms {
     pub frame_bg: u32,
 }
 
-/// GPU-side cell data. Must match Metal CellData struct exactly (16 bytes).
+/// GPU-side cell data. Must match Metal CellData struct exactly (8 bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CellData {
@@ -43,12 +43,10 @@ pub struct CellData {
     pub bg_index: u8,
     pub atlas_x: u8,
     pub atlas_y: u8,
-    pub fg_rgb: u32,
-    pub bg_rgb: u32,
 }
 
 const CELL_DATA_SIZE: usize = mem::size_of::<CellData>();
-const _: () = assert!(CELL_DATA_SIZE == 16, "CellData must be 16 bytes");
+const _: () = assert!(CELL_DATA_SIZE == 8, "CellData must be 8 bytes");
 
 /// Number of cell buffers for pipelining (CPU uploads to one while GPU reads the other).
 const NUM_BUFFERS: usize = 2;
@@ -271,9 +269,8 @@ impl MetalRenderer {
         let dst_stride = self.cols as usize;
         for (row, pending) in self.pending[cur].iter().enumerate() {
             if *pending {
-                let src_start = row * grid.cols as usize;
-                let src_row = &grid.cells[src_start..src_start + cols];
-                for (col, cell) in src_row.iter().enumerate() {
+                let src_row = grid.row_slice(row as u16);
+                for (col, cell) in src_row[..cols].iter().enumerate() {
                     let wide = cell.flags.contains(CellFlags::WIDE);
                     let pos = if cell.codepoint < 0x80 {
                         atlas.get_ascii(cell.codepoint as u8)
@@ -281,14 +278,15 @@ impl MetalRenderer {
                         atlas.get_cached(cell.codepoint, wide)
                     };
                     // SAFETY: dst_base points to a Metal shared buffer sized for
-                    // self.cols * self.rows * 16 bytes. row < self.rows and
+                    // self.cols * self.rows * 8 bytes. row < self.rows and
                     // col < cols <= self.cols, so the offset is in bounds.
-                    // Cell is #[repr(C)] and 16 bytes — same as CellData.
                     unsafe {
-                        let dst = dst_base.add((row * dst_stride + col) * 16);
-                        let src = cell as *const _ as *const u8;
-                        std::ptr::copy_nonoverlapping(src, dst, 16);
-                        // Patch atlas coords at bytes 6-7 (Cell padding → atlas_x, atlas_y)
+                        let dst = dst_base.add((row * dst_stride + col) * CELL_DATA_SIZE);
+                        // Copy codepoint + flags (first 4 bytes match Cell layout)
+                        *(dst as *mut u32) = *(cell as *const Cell as *const u32);
+                        // Pack fg/bg indices (u16 → u8) and atlas coords
+                        *dst.add(4) = cell.fg_index as u8;
+                        *dst.add(5) = cell.bg_index as u8;
                         *dst.add(6) = pos.x;
                         *dst.add(7) = pos.y;
                     }

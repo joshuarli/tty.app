@@ -133,19 +133,23 @@ impl CsiFastParser {
                 }
 
                 // 256-color: \x1b[38;5;Nm or \x1b[48;5;Nm
-                if (p0 == 38 || p0 == 48) && b3 == b'5' && buf[4] == b';' {
-                    if let Some(consumed) = Self::parse_color_index(&buf[5..]) {
-                        performer.color_256(p0 == 38, consumed.0);
-                        return Some(5 + consumed.1);
-                    }
+                if (p0 == 38 || p0 == 48)
+                    && b3 == b'5'
+                    && buf[4] == b';'
+                    && let Some(consumed) = Self::parse_color_index(&buf[5..])
+                {
+                    performer.color_256(p0 == 38, consumed.0);
+                    return Some(5 + consumed.1);
                 }
 
                 // Truecolor: \x1b[38;2;R;G;Bm or \x1b[48;2;R;G;Bm
-                if (p0 == 38 || p0 == 48) && b3 == b'2' && buf[4] == b';' {
-                    if let Some((r, g, b, consumed)) = Self::parse_rgb(&buf[5..]) {
-                        performer.color_rgb(p0 == 38, r, g, b);
-                        return Some(5 + consumed);
-                    }
+                if (p0 == 38 || p0 == 48)
+                    && b3 == b'2'
+                    && buf[4] == b';'
+                    && let Some((r, g, b, consumed)) = Self::parse_rgb(&buf[5..])
+                {
+                    performer.color_rgb(p0 == 38, r, g, b);
+                    return Some(5 + consumed);
                 }
             }
 
@@ -190,7 +194,7 @@ impl CsiFastParser {
     fn parse_rgb(buf: &[u8]) -> Option<(u16, u16, u16, usize)> {
         let mut pos = 0;
         let mut components = [0u16; 3];
-        for c in 0..3 {
+        for (c, component) in components.iter_mut().enumerate() {
             if pos >= buf.len() || !buf[pos].is_ascii_digit() {
                 return None;
             }
@@ -200,7 +204,7 @@ impl CsiFastParser {
                 val = val * 10 + (buf[pos] - b'0') as u16;
                 pos += 1;
             }
-            components[c] = val;
+            *component = val;
             if c < 2 {
                 if pos >= buf.len() || buf[pos] != b';' {
                     return None;

@@ -276,7 +276,7 @@ impl<'a> Perform for TermPerformer<'a> {
         let cols = self.grid.cols;
         let n = n.min(cols - col);
 
-        let row_start = row as usize * cols as usize;
+        let row_start = self.grid.row_start(row);
         let src = row_start + col as usize;
         let dst = row_start + (col + n) as usize;
         let count = (cols - col - n) as usize;
@@ -292,7 +292,7 @@ impl<'a> Perform for TermPerformer<'a> {
         let cols = self.grid.cols;
         let n = n.min(cols - col);
 
-        let row_start = row as usize * cols as usize;
+        let row_start = self.grid.row_start(row);
         let dst = row_start + col as usize;
         let src = row_start + (col + n) as usize;
         let count = (cols - col - n) as usize;
@@ -318,8 +318,6 @@ impl<'a> Perform for TermPerformer<'a> {
                     self.grid.attr.flags = CellFlags::empty();
                     self.grid.attr.fg_index = 7;
                     self.grid.attr.bg_index = 0;
-                    self.grid.attr.fg_rgb = config::DEFAULT_FG;
-                    self.grid.attr.bg_rgb = config::DEFAULT_BG;
                 }
                 1 => self.grid.attr.flags.insert(CellFlags::BOLD),
                 2 => self.grid.attr.flags.insert(CellFlags::DIM),
@@ -337,7 +335,7 @@ impl<'a> Perform for TermPerformer<'a> {
                 27 => self.grid.attr.flags.remove(CellFlags::INVERSE),
                 28 => self.grid.attr.flags.remove(CellFlags::HIDDEN),
                 29 => self.grid.attr.flags.remove(CellFlags::STRIKE),
-                30..=37 => self.grid.attr.fg_index = (params[i] - 30) as u8,
+                30..=37 => self.grid.attr.fg_index = params[i] - 30,
                 38 => {
                     i += 1;
                     if i < params.len() {
@@ -345,16 +343,17 @@ impl<'a> Perform for TermPerformer<'a> {
                             5 => {
                                 i += 1;
                                 if i < params.len() {
-                                    self.grid.attr.fg_index = params[i] as u8;
+                                    self.grid.attr.fg_index = params[i];
                                 }
                             }
                             2 => {
                                 if i + 3 < params.len() {
-                                    let r = params[i + 1] as u32;
-                                    let g = params[i + 2] as u32;
-                                    let b = params[i + 3] as u32;
-                                    self.grid.attr.fg_rgb = (r << 16) | (g << 8) | b;
-                                    self.grid.attr.fg_index = 0xFF;
+                                    self.grid.attr.fg_index =
+                                        config::rgb_to_palette(
+                                            params[i + 1] as u8,
+                                            params[i + 2] as u8,
+                                            params[i + 3] as u8,
+                                        ) as u16;
                                     i += 3;
                                 }
                             }
@@ -362,11 +361,8 @@ impl<'a> Perform for TermPerformer<'a> {
                         }
                     }
                 }
-                39 => {
-                    self.grid.attr.fg_index = 7;
-                    self.grid.attr.fg_rgb = config::DEFAULT_FG;
-                }
-                40..=47 => self.grid.attr.bg_index = (params[i] - 40) as u8,
+                39 => self.grid.attr.fg_index = 7,
+                40..=47 => self.grid.attr.bg_index = params[i] - 40,
                 48 => {
                     i += 1;
                     if i < params.len() {
@@ -374,16 +370,17 @@ impl<'a> Perform for TermPerformer<'a> {
                             5 => {
                                 i += 1;
                                 if i < params.len() {
-                                    self.grid.attr.bg_index = params[i] as u8;
+                                    self.grid.attr.bg_index = params[i];
                                 }
                             }
                             2 => {
                                 if i + 3 < params.len() {
-                                    let r = params[i + 1] as u32;
-                                    let g = params[i + 2] as u32;
-                                    let b = params[i + 3] as u32;
-                                    self.grid.attr.bg_rgb = (r << 16) | (g << 8) | b;
-                                    self.grid.attr.bg_index = 0xFF;
+                                    self.grid.attr.bg_index =
+                                        config::rgb_to_palette(
+                                            params[i + 1] as u8,
+                                            params[i + 2] as u8,
+                                            params[i + 3] as u8,
+                                        ) as u16;
                                     i += 3;
                                 }
                             }
@@ -391,12 +388,9 @@ impl<'a> Perform for TermPerformer<'a> {
                         }
                     }
                 }
-                49 => {
-                    self.grid.attr.bg_index = 0;
-                    self.grid.attr.bg_rgb = config::DEFAULT_BG;
-                }
-                90..=97 => self.grid.attr.fg_index = (params[i] - 90 + 8) as u8,
-                100..=107 => self.grid.attr.bg_index = (params[i] - 100 + 8) as u8,
+                49 => self.grid.attr.bg_index = 0,
+                90..=97 => self.grid.attr.fg_index = params[i] - 90 + 8,
+                100..=107 => self.grid.attr.bg_index = params[i] - 100 + 8,
                 _ => {}
             }
             i += 1;
@@ -408,8 +402,6 @@ impl<'a> Perform for TermPerformer<'a> {
         self.grid.attr.flags = CellFlags::empty();
         self.grid.attr.fg_index = 7;
         self.grid.attr.bg_index = 0;
-        self.grid.attr.fg_rgb = config::DEFAULT_FG;
-        self.grid.attr.bg_rgb = config::DEFAULT_BG;
     }
 
     #[inline]
@@ -432,18 +424,12 @@ impl<'a> Perform for TermPerformer<'a> {
             27 => self.grid.attr.flags.remove(CellFlags::INVERSE),
             28 => self.grid.attr.flags.remove(CellFlags::HIDDEN),
             29 => self.grid.attr.flags.remove(CellFlags::STRIKE),
-            30..=37 => self.grid.attr.fg_index = (code - 30) as u8,
-            39 => {
-                self.grid.attr.fg_index = 7;
-                self.grid.attr.fg_rgb = config::DEFAULT_FG;
-            }
-            40..=47 => self.grid.attr.bg_index = (code - 40) as u8,
-            49 => {
-                self.grid.attr.bg_index = 0;
-                self.grid.attr.bg_rgb = config::DEFAULT_BG;
-            }
-            90..=97 => self.grid.attr.fg_index = (code - 90 + 8) as u8,
-            100..=107 => self.grid.attr.bg_index = (code - 100 + 8) as u8,
+            30..=37 => self.grid.attr.fg_index = code - 30,
+            39 => self.grid.attr.fg_index = 7,
+            40..=47 => self.grid.attr.bg_index = code - 40,
+            49 => self.grid.attr.bg_index = 0,
+            90..=97 => self.grid.attr.fg_index = code - 90 + 8,
+            100..=107 => self.grid.attr.bg_index = code - 100 + 8,
             _ => {}
         }
     }
@@ -451,21 +437,19 @@ impl<'a> Perform for TermPerformer<'a> {
     #[inline]
     fn color_256(&mut self, fg: bool, index: u16) {
         if fg {
-            self.grid.attr.fg_index = index as u8;
+            self.grid.attr.fg_index = index;
         } else {
-            self.grid.attr.bg_index = index as u8;
+            self.grid.attr.bg_index = index;
         }
     }
 
     #[inline]
     fn color_rgb(&mut self, fg: bool, r: u16, g: u16, b: u16) {
-        let rgb = (r as u32) << 16 | (g as u32) << 8 | b as u32;
+        let index = config::rgb_to_palette(r as u8, g as u8, b as u8) as u16;
         if fg {
-            self.grid.attr.fg_rgb = rgb;
-            self.grid.attr.fg_index = 0xFF;
+            self.grid.attr.fg_index = index;
         } else {
-            self.grid.attr.bg_rgb = rgb;
-            self.grid.attr.bg_index = 0xFF;
+            self.grid.attr.bg_index = index;
         }
     }
 
@@ -506,30 +490,27 @@ impl<'a> Perform for TermPerformer<'a> {
                 38 => {
                     // Foreground color: 38:5:N or 38:2:[CS]:R:G:B
                     if subs.len() >= 3 && subs[1] == 5 {
-                        self.grid.attr.fg_index = subs[2] as u8;
+                        self.grid.attr.fg_index = subs[2];
                     } else if subs.len() >= 5 && subs[1] == 2 {
-                        // 38:2:CS:R:G:B or 38:2::R:G:B (empty CS = 0)
                         let (r, g, b) = if subs.len() >= 6 {
-                            (subs[3] as u32, subs[4] as u32, subs[5] as u32)
+                            (subs[3] as u8, subs[4] as u8, subs[5] as u8)
                         } else {
-                            (subs[2] as u32, subs[3] as u32, subs[4] as u32)
+                            (subs[2] as u8, subs[3] as u8, subs[4] as u8)
                         };
-                        self.grid.attr.fg_rgb = (r << 16) | (g << 8) | b;
-                        self.grid.attr.fg_index = 0xFF;
+                        self.grid.attr.fg_index = config::rgb_to_palette(r, g, b) as u16;
                     }
                 }
                 48 => {
                     // Background color: 48:5:N or 48:2:[CS]:R:G:B
                     if subs.len() >= 3 && subs[1] == 5 {
-                        self.grid.attr.bg_index = subs[2] as u8;
+                        self.grid.attr.bg_index = subs[2];
                     } else if subs.len() >= 5 && subs[1] == 2 {
                         let (r, g, b) = if subs.len() >= 6 {
-                            (subs[3] as u32, subs[4] as u32, subs[5] as u32)
+                            (subs[3] as u8, subs[4] as u8, subs[5] as u8)
                         } else {
-                            (subs[2] as u32, subs[3] as u32, subs[4] as u32)
+                            (subs[2] as u8, subs[3] as u8, subs[4] as u8)
                         };
-                        self.grid.attr.bg_rgb = (r << 16) | (g << 8) | b;
-                        self.grid.attr.bg_index = 0xFF;
+                        self.grid.attr.bg_index = config::rgb_to_palette(r, g, b) as u16;
                     }
                 }
                 58 => {
@@ -1263,7 +1244,7 @@ impl App {
         if let Some((first, last)) = self.prev_sel_rows {
             let cols = self.shared.grid.cols as usize;
             for row in first..=last.min(self.shared.grid.rows - 1) {
-                let start = row as usize * cols;
+                let start = self.shared.grid.row_start(row);
                 for cell in &mut self.shared.grid.cells[start..start + cols] {
                     cell.flags.remove(CellFlags::SELECTED);
                 }

@@ -195,7 +195,7 @@ impl<'a> Perform for TestPerformer<'a> {
         let col = self.grid.cursor_col;
         let cols = self.grid.cols;
         let n = n.min(cols - col);
-        let row_start = row as usize * cols as usize;
+        let row_start = self.grid.row_start(row);
         for c in (col + n..cols).rev() {
             self.grid.cells[row_start + c as usize] = self.grid.cells[row_start + (c - n) as usize];
         }
@@ -211,7 +211,7 @@ impl<'a> Perform for TestPerformer<'a> {
         let col = self.grid.cursor_col;
         let cols = self.grid.cols;
         let n = n.min(cols - col);
-        let row_start = row as usize * cols as usize;
+        let row_start = self.grid.row_start(row);
         for c in col..cols - n {
             self.grid.cells[row_start + c as usize] = self.grid.cells[row_start + (c + n) as usize];
         }
@@ -228,7 +228,7 @@ impl<'a> Perform for TestPerformer<'a> {
         let cols = self.grid.cols;
         let n = n.min(cols - col);
         let attr = self.grid.attr;
-        let row_start = row as usize * cols as usize;
+        let row_start = self.grid.row_start(row);
         for c in col..col + n {
             self.grid.cells[row_start + c as usize] = Cell::blank(&attr);
         }
@@ -254,8 +254,6 @@ impl<'a> Perform for TestPerformer<'a> {
                     self.grid.attr.flags = CellFlags::empty();
                     self.grid.attr.fg_index = 7;
                     self.grid.attr.bg_index = 0;
-                    self.grid.attr.fg_rgb = config::DEFAULT_FG;
-                    self.grid.attr.bg_rgb = config::DEFAULT_BG;
                 }
                 1 => self.grid.attr.flags.insert(CellFlags::BOLD),
                 2 => self.grid.attr.flags.insert(CellFlags::DIM),
@@ -273,7 +271,7 @@ impl<'a> Perform for TestPerformer<'a> {
                 27 => self.grid.attr.flags.remove(CellFlags::INVERSE),
                 28 => self.grid.attr.flags.remove(CellFlags::HIDDEN),
                 29 => self.grid.attr.flags.remove(CellFlags::STRIKE),
-                30..=37 => self.grid.attr.fg_index = (params[i] - 30) as u8,
+                30..=37 => self.grid.attr.fg_index = params[i] - 30,
                 38 => {
                     i += 1;
                     if i < params.len() {
@@ -281,16 +279,16 @@ impl<'a> Perform for TestPerformer<'a> {
                             5 => {
                                 i += 1;
                                 if i < params.len() {
-                                    self.grid.attr.fg_index = params[i] as u8;
+                                    self.grid.attr.fg_index = params[i];
                                 }
                             }
                             2 => {
                                 if i + 3 < params.len() {
-                                    let r = params[i + 1] as u32;
-                                    let g = params[i + 2] as u32;
-                                    let b = params[i + 3] as u32;
-                                    self.grid.attr.fg_rgb = (r << 16) | (g << 8) | b;
-                                    self.grid.attr.fg_index = 0xFF;
+                                    self.grid.attr.fg_index = config::rgb_to_palette(
+                                        params[i + 1] as u8,
+                                        params[i + 2] as u8,
+                                        params[i + 3] as u8,
+                                    ) as u16;
                                     i += 3;
                                 }
                             }
@@ -298,11 +296,8 @@ impl<'a> Perform for TestPerformer<'a> {
                         }
                     }
                 }
-                39 => {
-                    self.grid.attr.fg_index = 7;
-                    self.grid.attr.fg_rgb = config::DEFAULT_FG;
-                }
-                40..=47 => self.grid.attr.bg_index = (params[i] - 40) as u8,
+                39 => self.grid.attr.fg_index = 7,
+                40..=47 => self.grid.attr.bg_index = params[i] - 40,
                 48 => {
                     i += 1;
                     if i < params.len() {
@@ -310,16 +305,16 @@ impl<'a> Perform for TestPerformer<'a> {
                             5 => {
                                 i += 1;
                                 if i < params.len() {
-                                    self.grid.attr.bg_index = params[i] as u8;
+                                    self.grid.attr.bg_index = params[i];
                                 }
                             }
                             2 => {
                                 if i + 3 < params.len() {
-                                    let r = params[i + 1] as u32;
-                                    let g = params[i + 2] as u32;
-                                    let b = params[i + 3] as u32;
-                                    self.grid.attr.bg_rgb = (r << 16) | (g << 8) | b;
-                                    self.grid.attr.bg_index = 0xFF;
+                                    self.grid.attr.bg_index = config::rgb_to_palette(
+                                        params[i + 1] as u8,
+                                        params[i + 2] as u8,
+                                        params[i + 3] as u8,
+                                    ) as u16;
                                     i += 3;
                                 }
                             }
@@ -327,12 +322,9 @@ impl<'a> Perform for TestPerformer<'a> {
                         }
                     }
                 }
-                49 => {
-                    self.grid.attr.bg_index = 0;
-                    self.grid.attr.bg_rgb = config::DEFAULT_BG;
-                }
-                90..=97 => self.grid.attr.fg_index = (params[i] - 90 + 8) as u8,
-                100..=107 => self.grid.attr.bg_index = (params[i] - 100 + 8) as u8,
+                49 => self.grid.attr.bg_index = 0,
+                90..=97 => self.grid.attr.fg_index = params[i] - 90 + 8,
+                100..=107 => self.grid.attr.bg_index = params[i] - 100 + 8,
                 _ => {}
             }
             i += 1;
@@ -659,9 +651,7 @@ impl Term {
 
     /// Read the codepoints of a row as a string (trimming trailing spaces).
     fn row_text(&self, row: u16) -> String {
-        let cols = self.grid.cols as usize;
-        let start = row as usize * cols;
-        let cells = &self.grid.cells[start..start + cols];
+        let cells = self.grid.row_slice(row);
         let s: String = cells
             .iter()
             .map(|c| {
@@ -1011,10 +1001,12 @@ fn sgr_foreground_colors() {
     // 256-color (38;5;200)
     t.feed(b"\x1B[38;5;200mX\x1B[0m");
     assert_eq!(t.cell(0, 1).fg_index, 200);
-    // 24-bit RGB (38;2;255;128;0)
+    // 24-bit RGB (38;2;255;128;0) — degrades to nearest palette index
     t.feed(b"\x1B[38;2;255;128;0mY\x1B[0m");
-    assert_eq!(t.cell(0, 2).fg_index, 0xFF);
-    assert_eq!(t.cell(0, 2).fg_rgb, 0x00FF8000);
+    assert_eq!(
+        t.cell(0, 2).fg_index,
+        config::rgb_to_palette(255, 128, 0) as u16
+    );
 }
 
 #[test]

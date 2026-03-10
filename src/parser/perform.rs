@@ -63,14 +63,12 @@ pub trait Perform {
     }
 
     /// Truecolor: \x1b[38;2;R;G;Bm (fg=true) or \x1b[48;2;R;G;Bm (fg=false).
-    /// Default delegates to sgr(); override for zero-overhead color setting.
+    /// Degrades to nearest 256-color palette index (no truecolor support).
+    /// Default delegates to color_256 via rgb_to_palette.
     #[inline]
     fn color_rgb(&mut self, fg: bool, r: u16, g: u16, b: u16) {
-        if fg {
-            self.sgr(&[38, 2, r, g, b]);
-        } else {
-            self.sgr(&[48, 2, r, g, b]);
-        }
+        let index = crate::config::rgb_to_palette(r as u8, g as u8, b as u8) as u16;
+        self.color_256(fg, index);
     }
 
     /// Set/reset modes

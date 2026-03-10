@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// Must match Rust CellData layout exactly (16 bytes)
+// Must match Rust CellData layout exactly (8 bytes)
 struct CellData {
     ushort codepoint;
     ushort flags;
@@ -9,8 +9,6 @@ struct CellData {
     uchar  bg_index;
     uchar  atlas_x;
     uchar  atlas_y;
-    uint   fg_rgb;
-    uint   bg_rgb;
 };
 
 struct Uniforms {
@@ -118,14 +116,6 @@ static inline half4 unpack_rgb(uint rgb) {
     );
 }
 
-static inline half4 resolve_color(uchar index, uint rgb,
-                                   device const half4* palette) {
-    if (index == 0xFF) {
-        return unpack_rgb(rgb);
-    }
-    return palette[index];
-}
-
 static inline bool draw_box_line(uint cp, uint px, uint py,
                                   uint cw, uint ch) {
     if (cp < 0x2500 || cp > 0x257F) return false;
@@ -200,8 +190,8 @@ kernel void render(
 
     // Wide continuation — the cell carries the owner's colors and atlas coords
     if (cell.flags & FLAG_WIDE_CONT) {
-        half4 fg = resolve_color(cell.fg_index, cell.fg_rgb, palette);
-        half4 bg = resolve_color(cell.bg_index, cell.bg_rgb, palette);
+        half4 fg = palette[cell.fg_index];
+        half4 bg = palette[cell.bg_index];
         if (cell.flags & FLAG_INVERSE) { half4 tmp = fg; fg = bg; bg = tmp; }
         if (cell.flags & FLAG_HIDDEN) fg = bg;
         // Offset px to sample the right half of the wide glyph
@@ -220,9 +210,9 @@ kernel void render(
         fg_idx += 8;
     }
 
-    // Resolve fg/bg
-    half4 fg = resolve_color(fg_idx, cell.fg_rgb, palette);
-    half4 bg = resolve_color(cell.bg_index, cell.bg_rgb, palette);
+    // Resolve fg/bg from palette
+    half4 fg = palette[fg_idx];
+    half4 bg = palette[cell.bg_index];
 
     // Hidden: make fg match bg
     if (cell.flags & FLAG_HIDDEN) {
