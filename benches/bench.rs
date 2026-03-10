@@ -485,6 +485,171 @@ fn make_tui_mixed(n: usize) -> Vec<u8> {
     buf
 }
 
+/// SGR-dense colored output — simulates `git diff --color` or compiler errors.
+/// Every line has multiple color changes, stressing SGR parsing throughput.
+fn make_git_diff_color(n: usize) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(n * 120);
+    for i in 0..n {
+        match i % 5 {
+            0 => {
+                // Diff header: bold white
+                buf.extend_from_slice(b"\x1b[1;37mdiff --git a/src/parser/mod.rs b/src/parser/mod.rs\x1b[0m");
+            }
+            1 => {
+                // Hunk header: cyan
+                buf.extend_from_slice(b"\x1b[36m@@ -120,7 +120,9 @@ impl Parser {\x1b[0m");
+            }
+            2 => {
+                // Context line: default
+                buf.extend_from_slice(b"         let byte = data[pos];");
+            }
+            3 => {
+                // Removed line: red bg + red fg
+                buf.extend_from_slice(b"\x1b[31m-        ");
+                buf.extend_from_slice(b"\x1b[41;37mold_code\x1b[31m(foo, bar, baz);\x1b[0m");
+            }
+            _ => {
+                // Added line: green bg + green fg
+                buf.extend_from_slice(b"\x1b[32m+        ");
+                buf.extend_from_slice(b"\x1b[42;37mnew_code\x1b[32m(foo, bar, baz, qux);\x1b[0m");
+            }
+        }
+        buf.extend_from_slice(b"\r\n");
+    }
+    buf
+}
+
+/// Dense scroll — short lines that force a scroll on nearly every line.
+/// Isolates scroll_up + scrollback push throughput (the `cat huge.log` workload).
+fn make_dense_scroll(n: usize) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(n * 20);
+    for i in 0..n {
+        // Short log-style lines: "[INFO] message_1234"
+        buf.extend_from_slice(b"[INFO] message_");
+        buf.extend_from_slice(format!("{i}").as_bytes());
+        buf.push(b'\n');
+    }
+    buf
+}
+
+/// Full-screen redraw — CUP to each row, write content, clear to EOL.
+/// Simulates htop/vim/tmux screen refresh (the dominant TUI rendering pattern).
+fn make_fullscreen_redraw(n: usize, cols: u16, rows: u16) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(n * rows as usize * (cols as usize + 20));
+    for frame in 0..n {
+        // Hide cursor during redraw (common optimization)
+        buf.extend_from_slice(b"\x1b[?25l");
+        for row in 1..=rows {
+            // CUP to row start
+            buf.extend_from_slice(format!("\x1b[{row};1H").as_bytes());
+            // Write content — alternate between status-like and content-like
+            if row == 1 || row == rows {
+                // Status bars: SGR color + text + reset
+                buf.extend_from_slice(b"\x1b[7m"); // inverse
+                for j in 0..cols {
+                    buf.push(b' ' + ((frame * 79 + j as usize) % 95) as u8);
+                }
+                buf.extend_from_slice(b"\x1b[0m");
+            } else {
+                // Content: plain text
+                for j in 0..(cols - 1) {
+                    buf.push(b' ' + ((row as usize * 79 + j as usize + frame) % 95) as u8);
+                }
+            }
+            // Erase to end of line (clear any leftover from previous frame)
+            buf.extend_from_slice(b"\x1b[K");
+        }
+        // Show cursor
+        buf.extend_from_slice(b"\x1b[?25h");
+    }
+    buf
+}
+
+/// Claude Code CLI-style TUI: streaming markdown with spinner updates and status bar.
+/// Interleaves: streaming text (ASCII + emoji/UTF-8), spinner animation at a fixed
+/// position, and periodic status bar redraws with save/restore cursor.
+fn make_claude_code_tui(n: usize) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(n * 200);
+    let spinners = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+    for i in 0..n {
+        match i % 8 {
+            0..=3 => {
+                // Streaming markdown text line (mixed ASCII + occasional UTF-8/emoji)
+                match i % 4 {
+                    0 => {
+                        // Code block line
+                        buf.extend_from_slice(b"\x1b[38;5;245m");
+                        buf.extend_from_slice(b"  fn process_data(&mut self, input: &[u8]) -> Result<()> {");
+                        buf.extend_from_slice(b"\x1b[0m\r\n");
+                    }
+                    1 => {
+                        // Bullet point with emoji
+                        buf.extend_from_slice(b"  ");
+                        buf.extend_from_slice("• ".as_bytes());
+                        buf.extend_from_slice(b"\x1b[1m");
+                        buf.extend_from_slice(b"Fixed the parser");
+                        buf.extend_from_slice(b"\x1b[0m");
+                        buf.extend_from_slice(" — reduced latency by ".as_bytes());
+                        buf.extend_from_slice(b"\x1b[32m");
+                        buf.extend_from_slice(b"42%");
+                        buf.extend_from_slice(b"\x1b[0m ");
+                        buf.extend_from_slice("✓".as_bytes());
+                        buf.extend_from_slice(b"\r\n");
+                    }
+                    2 => {
+                        // Plain text continuation
+                        buf.extend_from_slice(b"    The implementation uses SIMD intrinsics for");
+                        buf.extend_from_slice(b" bulk classification of byte ranges.\r\n");
+                    }
+                    _ => {
+                        // Heading with bold
+                        buf.extend_from_slice(b"\x1b[1;4m");
+                        buf.extend_from_slice(b"## Performance Results");
+                        buf.extend_from_slice(b"\x1b[0m\r\n");
+                    }
+                }
+            }
+            4 | 5 => {
+                // Spinner update: save cursor, jump to spinner position, write, restore
+                let spin = spinners[i % spinners.len()];
+                buf.extend_from_slice(b"\x1b7"); // DECSC (save cursor)
+                buf.extend_from_slice(b"\x1b[1;1H"); // CUP to row 1
+                buf.extend_from_slice(b"\x1b[36m"); // cyan
+                buf.extend_from_slice(spin.as_bytes());
+                buf.extend_from_slice(b" Thinking");
+                for _ in 0..(i % 4) {
+                    buf.push(b'.');
+                }
+                buf.extend_from_slice(b"\x1b[K"); // clear rest of line
+                buf.extend_from_slice(b"\x1b[0m");
+                buf.extend_from_slice(b"\x1b8"); // DECRC (restore cursor)
+            }
+            6 => {
+                // Status bar redraw: save, jump to bottom, inverse video, write, restore
+                buf.extend_from_slice(b"\x1b7"); // save
+                buf.extend_from_slice(b"\x1b[24;1H"); // jump to row 24
+                buf.extend_from_slice(b"\x1b[7m"); // inverse
+                buf.extend_from_slice(
+                    format!(" tokens: {:<6} | cost: ${:.4} | elapsed: {}s ",
+                        i * 47, i as f64 * 0.0003, i / 10
+                    ).as_bytes()
+                );
+                buf.extend_from_slice(b"\x1b[K"); // fill rest with inverse
+                buf.extend_from_slice(b"\x1b[0m");
+                buf.extend_from_slice(b"\x1b8"); // restore
+            }
+            _ => {
+                // OSC title update (window title with progress)
+                buf.extend_from_slice(b"\x1b]0;");
+                buf.extend_from_slice(format!("Claude Code - working ({i}/{n})").as_bytes());
+                buf.push(0x07); // BEL terminates OSC
+            }
+        }
+    }
+    buf
+}
+
 /// Realistic terminal output: ls-like colored listing.
 fn make_ls_output(n: usize) -> Vec<u8> {
     let mut buf = Vec::with_capacity(n * 100);
@@ -599,6 +764,60 @@ fn bench_parser(c: &mut Criterion) {
                 black_box(&grid);
             });
         });
+
+        // SGR-dense: git diff --color style (frequent color changes per line)
+        let diff = make_git_diff_color(size);
+        group.throughput(Throughput::Bytes(diff.len() as u64));
+        group.bench_with_input(BenchmarkId::new("git_diff_color", size), &diff, |b, data| {
+            b.iter(|| {
+                let mut grid = Grid::new(120, 40);
+                let mut sb = Scrollback::new(1000);
+                parse_bytes(&mut grid, &mut sb, data);
+                black_box(&grid);
+            });
+        });
+
+        // Dense scroll: short lines, isolates scroll_up + scrollback throughput
+        let scroll = make_dense_scroll(size);
+        group.throughput(Throughput::Bytes(scroll.len() as u64));
+        group.bench_with_input(BenchmarkId::new("dense_scroll", size), &scroll, |b, data| {
+            b.iter(|| {
+                let mut grid = Grid::new(80, 24);
+                let mut sb = Scrollback::new(1000);
+                parse_bytes(&mut grid, &mut sb, data);
+                black_box(&grid);
+            });
+        });
+
+        // Claude Code CLI-style TUI: streaming text + spinner + status bar
+        let claude = make_claude_code_tui(size);
+        group.throughput(Throughput::Bytes(claude.len() as u64));
+        group.bench_with_input(BenchmarkId::new("claude_code_tui", size), &claude, |b, data| {
+            b.iter(|| {
+                let mut grid = Grid::new(120, 24);
+                let mut sb = Scrollback::new(1000);
+                parse_bytes(&mut grid, &mut sb, data);
+                black_box(&grid);
+            });
+        });
+    }
+
+    // Full-screen redraw (outside the size loop — measured in frames, not lines)
+    for &frames in &[10, 100] {
+        let redraw = make_fullscreen_redraw(frames, 120, 40);
+        group.throughput(Throughput::Bytes(redraw.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("fullscreen_redraw_120x40", frames),
+            &redraw,
+            |b, data| {
+                b.iter(|| {
+                    let mut grid = Grid::new(120, 40);
+                    let mut sb = Scrollback::new(0);
+                    parse_bytes(&mut grid, &mut sb, data);
+                    black_box(&grid);
+                });
+            },
+        );
     }
 
     group.finish();
@@ -649,6 +868,36 @@ fn bench_simd(c: &mut Criterion) {
         });
     });
 
+    // scan_text: mixed ASCII + UTF-8 (no control chars, no DEL)
+    let mixed_text: Vec<u8> = "ABCDabcd日本語テスト café über"
+        .as_bytes()
+        .iter()
+        .cycle()
+        .take(4096)
+        .copied()
+        .collect();
+    group.throughput(Throughput::Bytes(mixed_text.len() as u64));
+    group.bench_function("scan_text_mixed_4k", |b| {
+        b.iter(|| {
+            black_box(SimdScanner::scan_text(black_box(&mixed_text)));
+        });
+    });
+
+    // scan_text: pure high bytes (UTF-8 continuation-heavy)
+    let utf8_text: Vec<u8> = "日本語テスト中文测试한국어αβγδ"
+        .as_bytes()
+        .iter()
+        .cycle()
+        .take(4096)
+        .copied()
+        .collect();
+    group.throughput(Throughput::Bytes(utf8_text.len() as u64));
+    group.bench_function("scan_text_utf8_4k", |b| {
+        b.iter(|| {
+            black_box(SimdScanner::scan_text(black_box(&utf8_text)));
+        });
+    });
+
     group.finish();
 }
 
@@ -677,6 +926,28 @@ fn bench_grid(c: &mut Criterion) {
                 let mut grid = Grid::new(cols, rows);
                 for _ in 0..total {
                     grid.write_char('A');
+                }
+                black_box(&grid);
+            });
+        });
+    }
+
+    // write_ascii_run throughput — bulk write path (the hot path for ASCII content)
+    for &(cols, rows) in &[(80, 24), (200, 50)] {
+        let line: Vec<u8> = (0..cols).map(|i| b' ' + (i % 95) as u8).collect();
+        let total = cols as u64 * rows as u64;
+        group.throughput(Throughput::Elements(total));
+        group.bench_function(format!("write_ascii_run_{cols}x{rows}"), |b| {
+            b.iter(|| {
+                let mut grid = Grid::new(cols, rows);
+                for _ in 0..rows {
+                    grid.write_ascii_run(&line);
+                    // Newline: CR + LF
+                    grid.cursor_col = 0;
+                    grid.cursor_pending_wrap = false;
+                    if grid.cursor_row < grid.rows - 1 {
+                        grid.cursor_row += 1;
+                    }
                 }
                 black_box(&grid);
             });
@@ -831,6 +1102,27 @@ fn bench_end_to_end(c: &mut Criterion) {
             let mut sb = Scrollback::new(10_000);
             let mut parser = Parser::new();
             for chunk in ls_data.chunks(64) {
+                let mut performer = BenchPerformer {
+                    grid: &mut grid,
+                    scrollback: &mut sb,
+                };
+                parser.parse(chunk, &mut performer);
+            }
+            black_box(&grid);
+        });
+    });
+
+    // UTF-8 heavy content in 4K chunks — exercises Utf8Assembler cross-chunk path.
+    // Multi-byte chars will be split at arbitrary 4096-byte boundaries, forcing the
+    // assembler to buffer partial sequences across parse() calls.
+    let utf8_data = make_utf8_heavy(10_000);
+    group.throughput(Throughput::Bytes(utf8_data.len() as u64));
+    group.bench_function("utf8_10k_4k_chunks", |b| {
+        b.iter(|| {
+            let mut grid = Grid::new(80, 24);
+            let mut sb = Scrollback::new(1000);
+            let mut parser = Parser::new();
+            for chunk in utf8_data.chunks(4096) {
                 let mut performer = BenchPerformer {
                     grid: &mut grid,
                     scrollback: &mut sb,
