@@ -650,6 +650,157 @@ fn make_claude_code_tui(n: usize) -> Vec<u8> {
     buf
 }
 
+/// tmux 2-pane redraw: CUP to each row per pane, text with SGR colors, EL,
+/// box-drawing pane borders. Simulates what tmux sends on every screen refresh.
+fn make_tmux_pane_redraw(frames: usize, cols: u16, rows: u16) -> Vec<u8> {
+    let pane_cols = (cols / 2 - 1) as usize; // each pane minus border
+    let mut buf = Vec::with_capacity(frames * rows as usize * (cols as usize + 40));
+
+    for frame in 0..frames {
+        // Hide cursor during redraw
+        buf.extend_from_slice(b"\x1b[?25l");
+
+        for row in 1..=rows {
+            // --- Left pane content ---
+            buf.extend_from_slice(format!("\x1b[{row};1H").as_bytes());
+            if row == 1 {
+                // Colored prompt line
+                buf.extend_from_slice(b"\x1b[1;32muser@host\x1b[0m:\x1b[1;34m~/dev\x1b[0m$ ");
+                buf.extend_from_slice(b"cargo build");
+            } else if row == rows {
+                // Status-like line
+                buf.extend_from_slice(b"\x1b[38;5;240m");
+                for j in 0..pane_cols {
+                    buf.push(b' ' + ((frame + j) % 95) as u8);
+                }
+                buf.extend_from_slice(b"\x1b[0m");
+            } else {
+                // Regular output with occasional color
+                if (row as usize + frame) % 3 == 0 {
+                    buf.extend_from_slice(b"\x1b[33mwarning\x1b[0m: unused variable `x`");
+                } else {
+                    buf.extend_from_slice(b"   Compiling tty v0.1.4 (/Users/josh/dev/tty)");
+                }
+            }
+            buf.extend_from_slice(b"\x1b[K"); // erase to EOL
+
+            // --- Pane border (box-drawing, positioned mid-screen) ---
+            let border_col = pane_cols + 1;
+            buf.extend_from_slice(format!("\x1b[{row};{border_col}H").as_bytes());
+            buf.extend_from_slice(b"\x1b[90m"); // dim gray
+            buf.extend_from_slice("│".as_bytes());
+            buf.extend_from_slice(b"\x1b[0m");
+
+            // --- Right pane content ---
+            let right_col = pane_cols + 2;
+            buf.extend_from_slice(format!("\x1b[{row};{right_col}H").as_bytes());
+            if row == 1 {
+                buf.extend_from_slice(b"\x1b[1;32muser@host\x1b[0m:\x1b[1;34m~/dev\x1b[0m$ ");
+                buf.extend_from_slice(b"vim src/main.rs");
+            } else {
+                // Syntax-highlighted code using 256 colors
+                buf.extend_from_slice(b"\x1b[38;5;245m");
+                buf.extend_from_slice(format!("{:>4} ", row).as_bytes());
+                buf.extend_from_slice(b"\x1b[38;5;203m");
+                buf.extend_from_slice(b"fn ");
+                buf.extend_from_slice(b"\x1b[38;5;149m");
+                buf.extend_from_slice(format!("func_{frame}").as_bytes());
+                buf.extend_from_slice(b"\x1b[0m() {{");
+            }
+            buf.extend_from_slice(b"\x1b[K");
+        }
+
+        // tmux status bar at bottom
+        buf.extend_from_slice(format!("\x1b[{};1H", rows + 1).as_bytes());
+        buf.extend_from_slice(b"\x1b[7m"); // inverse
+        buf.extend_from_slice(b" [0] bash  [1] vim* ");
+        for _ in 0..40 {
+            buf.push(b' ');
+        }
+        buf.extend_from_slice(b"\x1b[0m");
+
+        // Show cursor
+        buf.extend_from_slice(b"\x1b[?25h");
+    }
+    buf
+}
+
+/// 256-color heavy output — simulates bat/delta/syntax-highlighted code.
+/// Dense \x1b[38;5;Nm sequences (3-param SGR) on every token.
+fn make_256color_heavy(n: usize) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(n * 120);
+    let colors: &[u8] = &[203, 149, 245, 39, 214, 170, 81, 222, 156, 197];
+    for i in 0..n {
+        // Line number in dim
+        buf.extend_from_slice(b"\x1b[38;5;240m");
+        buf.extend_from_slice(format!("{:>4} ", i + 1).as_bytes());
+        // Keyword in one color
+        let c1 = colors[i % colors.len()];
+        buf.extend_from_slice(format!("\x1b[38;5;{c1}m").as_bytes());
+        buf.extend_from_slice(b"fn ");
+        // Identifier in another color
+        let c2 = colors[(i + 3) % colors.len()];
+        buf.extend_from_slice(format!("\x1b[38;5;{c2}m").as_bytes());
+        buf.extend_from_slice(b"process_data");
+        // Punctuation in default
+        buf.extend_from_slice(b"\x1b[0m(");
+        // Type in another color
+        let c3 = colors[(i + 5) % colors.len()];
+        buf.extend_from_slice(format!("\x1b[38;5;{c3}m").as_bytes());
+        buf.extend_from_slice(b"&[u8]");
+        // Reset + closing
+        buf.extend_from_slice(b"\x1b[0m) -> ");
+        let c4 = colors[(i + 7) % colors.len()];
+        buf.extend_from_slice(format!("\x1b[38;5;{c4}m").as_bytes());
+        buf.extend_from_slice(b"Result");
+        buf.extend_from_slice(b"\x1b[0m<()> {{\r\n");
+    }
+    buf
+}
+
+/// Truecolor heavy output — simulates modern syntax highlighters using
+/// \x1b[38;2;R;G;Bm (5-param SGR) on every token.
+fn make_truecolor_heavy(n: usize) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(n * 160);
+    let colors: &[(u8, u8, u8)] = &[
+        (255, 85, 85),   // red
+        (85, 255, 85),   // green
+        (85, 85, 255),   // blue
+        (255, 255, 85),  // yellow
+        (255, 85, 255),  // magenta
+        (85, 255, 255),  // cyan
+        (200, 160, 100), // tan
+        (140, 200, 255), // light blue
+    ];
+    for i in 0..n {
+        // Line number with truecolor
+        let (r, g, b) = (100, 100, 100);
+        buf.extend_from_slice(format!("\x1b[38;2;{r};{g};{b}m").as_bytes());
+        buf.extend_from_slice(format!("{:>4} ", i + 1).as_bytes());
+        // Keyword
+        let (r, g, b) = colors[i % colors.len()];
+        buf.extend_from_slice(format!("\x1b[38;2;{r};{g};{b}m").as_bytes());
+        buf.extend_from_slice(b"let ");
+        // Variable
+        let (r, g, b) = colors[(i + 2) % colors.len()];
+        buf.extend_from_slice(format!("\x1b[38;2;{r};{g};{b}m").as_bytes());
+        buf.extend_from_slice(b"result");
+        // Operator
+        buf.extend_from_slice(b"\x1b[0m = ");
+        // Function call
+        let (r, g, b) = colors[(i + 4) % colors.len()];
+        buf.extend_from_slice(format!("\x1b[38;2;{r};{g};{b}m").as_bytes());
+        buf.extend_from_slice(b"parse");
+        buf.extend_from_slice(b"\x1b[0m(");
+        // String literal
+        let (r, g, b) = colors[(i + 6) % colors.len()];
+        buf.extend_from_slice(format!("\x1b[38;2;{r};{g};{b}m").as_bytes());
+        buf.extend_from_slice(b"\"hello world\"");
+        buf.extend_from_slice(b"\x1b[0m);\r\n");
+    }
+    buf
+}
+
 /// Realistic terminal output: ls-like colored listing.
 fn make_ls_output(n: usize) -> Vec<u8> {
     let mut buf = Vec::with_capacity(n * 100);
@@ -818,6 +969,52 @@ fn bench_parser(c: &mut Criterion) {
                 });
             },
         );
+    }
+
+    // tmux 2-pane redraw (outside size loop — measured in frames)
+    for &frames in &[10, 100] {
+        let tmux = make_tmux_pane_redraw(frames, 160, 40);
+        group.throughput(Throughput::Bytes(tmux.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("tmux_pane_redraw_160x40", frames),
+            &tmux,
+            |b, data| {
+                b.iter(|| {
+                    let mut grid = Grid::new(160, 40);
+                    let mut sb = Scrollback::new(0);
+                    parse_bytes(&mut grid, &mut sb, data);
+                    black_box(&grid);
+                });
+            },
+        );
+    }
+
+    // 256-color heavy (bat/delta style syntax highlighting)
+    for &size in &[1_000, 10_000] {
+        let c256 = make_256color_heavy(size);
+        group.throughput(Throughput::Bytes(c256.len() as u64));
+        group.bench_with_input(BenchmarkId::new("256color_heavy", size), &c256, |b, data| {
+            b.iter(|| {
+                let mut grid = Grid::new(120, 40);
+                let mut sb = Scrollback::new(1000);
+                parse_bytes(&mut grid, &mut sb, data);
+                black_box(&grid);
+            });
+        });
+    }
+
+    // Truecolor heavy (modern syntax highlighters)
+    for &size in &[1_000, 10_000] {
+        let tc = make_truecolor_heavy(size);
+        group.throughput(Throughput::Bytes(tc.len() as u64));
+        group.bench_with_input(BenchmarkId::new("truecolor_heavy", size), &tc, |b, data| {
+            b.iter(|| {
+                let mut grid = Grid::new(120, 40);
+                let mut sb = Scrollback::new(1000);
+                parse_bytes(&mut grid, &mut sb, data);
+                black_box(&grid);
+            });
+        });
     }
 
     group.finish();

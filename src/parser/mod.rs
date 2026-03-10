@@ -172,13 +172,14 @@ impl Parser {
         }
     }
 
-    /// Process styled text: interleaved printable ASCII, CSI sequences, and
-    /// line endings (CR/LF) in a tight inner loop. Avoids the overhead of
+    /// Process styled text: interleaved printable ASCII, UTF-8, CSI sequences,
+    /// and line endings (CR/LF) in a tight inner loop. Avoids the overhead of
     /// returning to the main parser loop for each text↔CSI transition.
     ///
     /// Returns the number of bytes consumed. Bails (returns current position)
-    /// when it hits something it can't handle inline: UTF-8 high bytes, bare
-    /// ESC without `[`, incomplete CSI, or non-CR/LF control characters.
+    /// when it hits something it can't handle inline: bare ESC without `[`,
+    /// incomplete CSI, incomplete UTF-8 at end of buffer, or non-CR/LF
+    /// control characters.
     fn process_styled_run<P: Perform>(data: &[u8], performer: &mut P) -> usize {
         let len = data.len();
         let mut pos = 0;
@@ -208,7 +209,7 @@ impl Parser {
                 let csi_buf = &data[pos + 2..];
 
                 // Try ultra-fast inline SGR first (handles ~90% of SGR sequences)
-                if let Some(consumed) = CsiFastParser::try_sgr_fast(csi_buf, performer) {
+                if let Some(consumed) = CsiFastParser::try_csi_inline(csi_buf, performer) {
                     pos += 2 + consumed;
                     continue;
                 }
@@ -223,6 +224,25 @@ impl Parser {
                 break;
             }
 
+            // UTF-8 multi-byte sequence — handle inline so pane borders,
+            // emoji, and other non-ASCII text stay in the tight loop.
+            if b >= 0xC0 {
+                match Self::decode_utf8(&data[pos..]) {
+                    Some((ch, consumed)) => {
+                        performer.print(ch);
+                        pos += consumed;
+                        continue;
+                    }
+                    None => break, // incomplete at buffer end — bail for assembler
+                }
+            }
+            if b >= 0x80 {
+                // Stray continuation byte (0x80..0xBF)
+                performer.print('\u{FFFD}');
+                pos += 1;
+                continue;
+            }
+
             // CR/LF — handle inline to stay in the tight loop across line boundaries
             if b == 0x0A || b == 0x0D {
                 performer.execute(b);
@@ -230,7 +250,7 @@ impl Parser {
                 continue;
             }
 
-            // Anything else (UTF-8, other controls, bare ESC) — bail to main loop
+            // Anything else (other controls, bare ESC) — bail to main loop
             break;
         }
 

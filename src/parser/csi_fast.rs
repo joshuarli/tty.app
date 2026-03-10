@@ -9,20 +9,49 @@ use crate::parser::perform::Perform;
 pub struct CsiFastParser;
 
 impl CsiFastParser {
-    /// Ultra-fast inline SGR for the ~90% of SGR sequences that are 1-2 params
-    /// with 1-2 digits each. Avoids the generic parameter parsing loop entirely.
+    /// Ultra-fast inline matching for the most common CSI sequences:
+    /// SGR (1-2 params, 256-color, truecolor), CUP, and EL.
+    /// Avoids the generic parameter parsing loop entirely.
     ///
     /// Input starts AFTER "ESC [". Returns Some(bytes_consumed) on success.
     #[inline(always)]
-    pub fn try_sgr_fast<P: Perform>(buf: &[u8], performer: &mut P) -> Option<usize> {
-        if buf.len() < 2 {
+    pub fn try_csi_inline<P: Perform>(buf: &[u8], performer: &mut P) -> Option<usize> {
+        if buf.is_empty() {
             return None;
         }
 
         let b0 = buf[0];
+
+        // \x1b[K — erase to end of line (the most common EL form)
+        if b0 == b'K' {
+            performer.erase_in_line(0);
+            return Some(1);
+        }
+
+        // \x1b[H — cursor home (no params = 1;1)
+        if b0 == b'H' {
+            performer.cursor_position(1, 1);
+            return Some(1);
+        }
+
+        if buf.len() < 2 {
+            return None;
+        }
         let b1 = buf[1];
 
-        // \x1b[Nm — single digit (reset, bold, italic, underline, inverse, etc.)
+        // \x1b[NK — erase in line with mode (0K, 1K, 2K)
+        if b0.is_ascii_digit() && b1 == b'K' {
+            performer.erase_in_line((b0 - b'0') as u16);
+            return Some(2);
+        }
+
+        // \x1b[NJ — erase in display with mode
+        if b0.is_ascii_digit() && b1 == b'J' {
+            performer.erase_in_display((b0 - b'0') as u16);
+            return Some(2);
+        }
+
+        // \x1b[Nm — single digit SGR (reset, bold, italic, underline, inverse, etc.)
         if b0.is_ascii_digit() && b1 == b'm' {
             performer.sgr(&[(b0 - b'0') as u16]);
             return Some(2);
@@ -41,18 +70,32 @@ impl CsiFastParser {
 
         // \x1b[N;... — single digit first param + semicolon
         if b0.is_ascii_digit() && b1 == b';' && b2.is_ascii_digit() {
-            if buf.len() >= 4 && buf[3] == b'm' {
-                // \x1b[N;Mm
-                performer.sgr(&[(b0 - b'0') as u16, (b2 - b'0') as u16]);
-                return Some(4);
+            if buf.len() >= 4 {
+                let final_byte = buf[3];
+                if final_byte == b'm' {
+                    // \x1b[N;Mm — SGR
+                    performer.sgr(&[(b0 - b'0') as u16, (b2 - b'0') as u16]);
+                    return Some(4);
+                }
+                if final_byte == b'H' {
+                    // \x1b[N;MH — CUP (cursor position)
+                    performer.cursor_position((b0 - b'0') as u16, (b2 - b'0') as u16);
+                    return Some(4);
+                }
             }
-            if buf.len() >= 5 && buf[3].is_ascii_digit() && buf[4] == b'm' {
-                // \x1b[N;NNm (e.g., \x1b[1;32m bold green)
-                performer.sgr(&[
-                    (b0 - b'0') as u16,
-                    ((b2 - b'0') * 10 + (buf[3] - b'0')) as u16,
-                ]);
-                return Some(5);
+            if buf.len() >= 5 && buf[3].is_ascii_digit() {
+                let p1 = ((b2 - b'0') * 10 + (buf[3] - b'0')) as u16;
+                let final_byte = buf[4];
+                if final_byte == b'm' {
+                    // \x1b[N;NNm (e.g., \x1b[1;32m bold green)
+                    performer.sgr(&[(b0 - b'0') as u16, p1]);
+                    return Some(5);
+                }
+                if final_byte == b'H' {
+                    // \x1b[N;NNH — CUP (e.g., \x1b[1;40H)
+                    performer.cursor_position((b0 - b'0') as u16, p1);
+                    return Some(5);
+                }
             }
         }
 
@@ -66,15 +109,102 @@ impl CsiFastParser {
                     performer.sgr(&[p0, (b3 - b'0') as u16]);
                     return Some(5);
                 }
-                if buf.len() >= 6 && buf[4].is_ascii_digit() && buf[5] == b'm' {
-                    // \x1b[NN;NNm (e.g., \x1b[41;37m)
-                    performer.sgr(&[p0, ((b3 - b'0') * 10 + (buf[4] - b'0')) as u16]);
-                    return Some(6);
+                if buf[4] == b'H' {
+                    // \x1b[NN;NH — CUP (e.g., \x1b[12;1H)
+                    performer.cursor_position(p0, (b3 - b'0') as u16);
+                    return Some(5);
+                }
+                if buf.len() >= 6 && buf[4].is_ascii_digit() {
+                    let p1 = ((b3 - b'0') * 10 + (buf[4] - b'0')) as u16;
+                    if buf[5] == b'm' {
+                        // \x1b[NN;NNm (e.g., \x1b[41;37m)
+                        performer.sgr(&[p0, p1]);
+                        return Some(6);
+                    }
+                    if buf[5] == b'H' {
+                        // \x1b[NN;NNH — CUP (e.g., \x1b[24;80H)
+                        performer.cursor_position(p0, p1);
+                        return Some(6);
+                    }
+                    if buf.len() >= 7 && buf[5].is_ascii_digit() && buf[6] == b'H' {
+                        // \x1b[NN;NNNH — CUP with 3-digit col (e.g., \x1b[12;120H)
+                        let p1 = p1 * 10 + (buf[5] - b'0') as u16;
+                        performer.cursor_position(p0, p1);
+                        return Some(7);
+                    }
+                }
+            }
+
+            // 256-color: \x1b[38;5;Nm or \x1b[48;5;Nm
+            // Pattern: NN;N;... where NN is 38 or 48, N is 5
+            if (p0 == 38 || p0 == 48) && b3 == b'5' && buf[4] == b';' {
+                if let Some(consumed) = Self::parse_color_index(&buf[5..]) {
+                    let idx = consumed.0;
+                    performer.sgr(&[p0, 5, idx]);
+                    return Some(5 + consumed.1);
+                }
+            }
+
+            // Truecolor: \x1b[38;2;R;G;Bm or \x1b[48;2;R;G;Bm
+            if (p0 == 38 || p0 == 48) && b3 == b'2' && buf[4] == b';' {
+                if let Some((r, g, b, consumed)) = Self::parse_rgb(&buf[5..]) {
+                    performer.sgr(&[p0, 2, r, g, b]);
+                    return Some(5 + consumed);
                 }
             }
         }
 
         None
+    }
+
+    /// Parse a 1-3 digit number followed by 'm'. Returns (value, bytes_consumed).
+    #[inline(always)]
+    fn parse_color_index(buf: &[u8]) -> Option<(u16, usize)> {
+        if buf.is_empty() || !buf[0].is_ascii_digit() {
+            return None;
+        }
+        let mut val = (buf[0] - b'0') as u16;
+        let mut i = 1;
+        while i < buf.len() && i < 3 && buf[i].is_ascii_digit() {
+            val = val * 10 + (buf[i] - b'0') as u16;
+            i += 1;
+        }
+        if i < buf.len() && buf[i] == b'm' {
+            Some((val, i + 1))
+        } else {
+            None
+        }
+    }
+
+    /// Parse R;G;Bm (three 1-3 digit numbers separated by ';' ending with 'm').
+    /// Returns (r, g, b, bytes_consumed).
+    #[inline(always)]
+    fn parse_rgb(buf: &[u8]) -> Option<(u16, u16, u16, usize)> {
+        let mut pos = 0;
+        let mut components = [0u16; 3];
+        for c in 0..3 {
+            if pos >= buf.len() || !buf[pos].is_ascii_digit() {
+                return None;
+            }
+            let mut val = (buf[pos] - b'0') as u16;
+            pos += 1;
+            while pos < buf.len() && buf[pos].is_ascii_digit() && val < 1000 {
+                val = val * 10 + (buf[pos] - b'0') as u16;
+                pos += 1;
+            }
+            components[c] = val;
+            if c < 2 {
+                if pos >= buf.len() || buf[pos] != b';' {
+                    return None;
+                }
+                pos += 1; // consume ';'
+            }
+        }
+        if pos < buf.len() && buf[pos] == b'm' {
+            Some((components[0], components[1], components[2], pos + 1))
+        } else {
+            None
+        }
     }
 
     /// Try to parse a CSI sequence starting after "ESC [".
