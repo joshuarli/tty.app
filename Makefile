@@ -36,14 +36,14 @@ icon:
 	rm -rf icon.iconset
 
 release: release-bin icon
-	install -d $(APP)/Contents/MacOS
-	install -d $(APP)/Contents/Resources
-	install -m 644 Info.plist $(APP)/Contents/
-	install -m 644 icon.icns $(APP)/Contents/Resources/
-	install -m 755 target/$(TARGET)/release/$(NAME) $(APP)/Contents/MacOS/
+	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
+	cp Info.plist $(APP)/Contents/
+	cp icon.icns $(APP)/Contents/Resources/
+	cp target/$(TARGET)/release/$(NAME) $(APP)/Contents/MacOS/
+	zip -r $(NAME)-$(TARGET).zip $(APP)
 
 install: release
-	cp -R $(APP) /Applications/$(APP)
+	unzip -o $(NAME)-$(TARGET).zip -d /Applications
 	codesign --force --sign - /Applications/$(APP)
 	@echo "Installed to /Applications/$(APP)"
 
