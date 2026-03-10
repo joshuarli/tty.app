@@ -642,7 +642,9 @@ fn make_git_diff_color(n: usize) -> Vec<u8> {
         match i % 5 {
             0 => {
                 // Diff header: bold white
-                buf.extend_from_slice(b"\x1b[1;37mdiff --git a/src/parser/mod.rs b/src/parser/mod.rs\x1b[0m");
+                buf.extend_from_slice(
+                    b"\x1b[1;37mdiff --git a/src/parser/mod.rs b/src/parser/mod.rs\x1b[0m",
+                );
             }
             1 => {
                 // Hunk header: cyan
@@ -729,7 +731,9 @@ fn make_claude_code_tui(n: usize) -> Vec<u8> {
                     0 => {
                         // Code block line
                         buf.extend_from_slice(b"\x1b[38;5;245m");
-                        buf.extend_from_slice(b"  fn process_data(&mut self, input: &[u8]) -> Result<()> {");
+                        buf.extend_from_slice(
+                            b"  fn process_data(&mut self, input: &[u8]) -> Result<()> {",
+                        );
                         buf.extend_from_slice(b"\x1b[0m\r\n");
                     }
                     1 => {
@@ -780,9 +784,13 @@ fn make_claude_code_tui(n: usize) -> Vec<u8> {
                 buf.extend_from_slice(b"\x1b[24;1H"); // jump to row 24
                 buf.extend_from_slice(b"\x1b[7m"); // inverse
                 buf.extend_from_slice(
-                    format!(" tokens: {:<6} | cost: ${:.4} | elapsed: {}s ",
-                        i * 47, i as f64 * 0.0003, i / 10
-                    ).as_bytes()
+                    format!(
+                        " tokens: {:<6} | cost: ${:.4} | elapsed: {}s ",
+                        i * 47,
+                        i as f64 * 0.0003,
+                        i / 10
+                    )
+                    .as_bytes(),
                 );
                 buf.extend_from_slice(b"\x1b[K"); // fill rest with inverse
                 buf.extend_from_slice(b"\x1b[0m");
@@ -1068,38 +1076,50 @@ fn bench_parser(c: &mut Criterion) {
         // SGR-dense: git diff --color style (frequent color changes per line)
         let diff = make_git_diff_color(size);
         group.throughput(Throughput::Bytes(diff.len() as u64));
-        group.bench_with_input(BenchmarkId::new("git_diff_color", size), &diff, |b, data| {
-            b.iter(|| {
-                let mut grid = Grid::new(120, 40);
-                let mut sb = Scrollback::new(1000);
-                parse_bytes(&mut grid, &mut sb, data);
-                black_box(&grid);
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("git_diff_color", size),
+            &diff,
+            |b, data| {
+                b.iter(|| {
+                    let mut grid = Grid::new(120, 40);
+                    let mut sb = Scrollback::new(1000);
+                    parse_bytes(&mut grid, &mut sb, data);
+                    black_box(&grid);
+                });
+            },
+        );
 
         // Dense scroll: short lines, isolates scroll_up + scrollback throughput
         let scroll = make_dense_scroll(size);
         group.throughput(Throughput::Bytes(scroll.len() as u64));
-        group.bench_with_input(BenchmarkId::new("dense_scroll", size), &scroll, |b, data| {
-            b.iter(|| {
-                let mut grid = Grid::new(80, 24);
-                let mut sb = Scrollback::new(1000);
-                parse_bytes(&mut grid, &mut sb, data);
-                black_box(&grid);
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("dense_scroll", size),
+            &scroll,
+            |b, data| {
+                b.iter(|| {
+                    let mut grid = Grid::new(80, 24);
+                    let mut sb = Scrollback::new(1000);
+                    parse_bytes(&mut grid, &mut sb, data);
+                    black_box(&grid);
+                });
+            },
+        );
 
         // Claude Code CLI-style TUI: streaming text + spinner + status bar
         let claude = make_claude_code_tui(size);
         group.throughput(Throughput::Bytes(claude.len() as u64));
-        group.bench_with_input(BenchmarkId::new("claude_code_tui", size), &claude, |b, data| {
-            b.iter(|| {
-                let mut grid = Grid::new(120, 24);
-                let mut sb = Scrollback::new(1000);
-                parse_bytes(&mut grid, &mut sb, data);
-                black_box(&grid);
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("claude_code_tui", size),
+            &claude,
+            |b, data| {
+                b.iter(|| {
+                    let mut grid = Grid::new(120, 24);
+                    let mut sb = Scrollback::new(1000);
+                    parse_bytes(&mut grid, &mut sb, data);
+                    black_box(&grid);
+                });
+            },
+        );
     }
 
     // Full-screen redraw (outside the size loop — measured in frames, not lines)
@@ -1142,14 +1162,18 @@ fn bench_parser(c: &mut Criterion) {
     for &size in &[1_000, 10_000] {
         let c256 = make_256color_heavy(size);
         group.throughput(Throughput::Bytes(c256.len() as u64));
-        group.bench_with_input(BenchmarkId::new("256color_heavy", size), &c256, |b, data| {
-            b.iter(|| {
-                let mut grid = Grid::new(120, 40);
-                let mut sb = Scrollback::new(1000);
-                parse_bytes(&mut grid, &mut sb, data);
-                black_box(&grid);
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("256color_heavy", size),
+            &c256,
+            |b, data| {
+                b.iter(|| {
+                    let mut grid = Grid::new(120, 40);
+                    let mut sb = Scrollback::new(1000);
+                    parse_bytes(&mut grid, &mut sb, data);
+                    black_box(&grid);
+                });
+            },
+        );
     }
 
     // Truecolor heavy (modern syntax highlighters)
@@ -1205,7 +1229,13 @@ fn bench_simd(c: &mut Criterion) {
 
     // Control-heavy input (every 8th byte is a control)
     let control_heavy: Vec<u8> = (0..4096)
-        .map(|i| if i % 8 == 0 { 0x0A } else { b'A' + (i % 26) as u8 })
+        .map(|i| {
+            if i % 8 == 0 {
+                0x0A
+            } else {
+                b'A' + (i % 26) as u8
+            }
+        })
         .collect();
     group.throughput(Throughput::Bytes(control_heavy.len() as u64));
     group.bench_function("control_every_8", |b| {
@@ -1529,7 +1559,12 @@ fn bench_pipeline(c: &mut Criterion) {
                 };
                 for i in 0..n {
                     let c = (i % 256) as u16;
-                    perf.color_rgb(black_box(true), black_box(c), black_box(128), black_box(255 - c));
+                    perf.color_rgb(
+                        black_box(true),
+                        black_box(c),
+                        black_box(128),
+                        black_box(255 - c),
+                    );
                 }
                 black_box(perf.grid.attr);
             });

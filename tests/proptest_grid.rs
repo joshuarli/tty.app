@@ -272,10 +272,7 @@ impl<'a> Perform for TestPerformer<'a> {
 
 fn parse_bytes(grid: &mut Grid, scrollback: &mut Scrollback, data: &[u8]) {
     let mut parser = Parser::new();
-    let mut performer = TestPerformer {
-        grid,
-        scrollback,
-    };
+    let mut performer = TestPerformer { grid, scrollback };
     parser.parse(data, &mut performer);
 }
 

@@ -74,8 +74,14 @@ fn main() {
 
     let tests: &[(&str, fn())] = &[
         ("text_paste_works", text_paste_works),
-        ("image_on_clipboard_is_detected_as_png", image_on_clipboard_is_detected_as_png),
-        ("image_on_clipboard_is_detected_as_tiff", image_on_clipboard_is_detected_as_tiff),
+        (
+            "image_on_clipboard_is_detected_as_png",
+            image_on_clipboard_is_detected_as_png,
+        ),
+        (
+            "image_on_clipboard_is_detected_as_tiff",
+            image_on_clipboard_is_detected_as_tiff,
+        ),
         ("text_clipboard_is_not_image", text_clipboard_is_not_image),
     ];
 

@@ -99,8 +99,7 @@ impl Parser {
                 if remaining.len() >= 16 && remaining[0] >= 0x80 {
                     let text_end = SimdScanner::scan_text(remaining);
                     if text_end > 0 {
-                        let consumed =
-                            Self::process_text_run(&remaining[..text_end], performer);
+                        let consumed = Self::process_text_run(&remaining[..text_end], performer);
                         pos += consumed;
                         if pos >= len {
                             break;
