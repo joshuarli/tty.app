@@ -1370,6 +1370,332 @@ fn bench_grid(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// Pipeline benchmarks — isolate individual stages of parse → attr → write → dirty
+// ---------------------------------------------------------------------------
+
+fn bench_pipeline(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pipeline");
+
+    // --- Stage 1: Cell write cost (grid.write_ascii_run) ---
+
+    // Uniform attributes: same attr for entire run. Best case for the write loop
+    // since attr fields are identical every iteration.
+    {
+        let cols: u16 = 120;
+        let rows: u16 = 40;
+        let line: Vec<u8> = (0..cols).map(|i| b' ' + (i % 95) as u8).collect();
+        let total = cols as u64 * rows as u64;
+        group.throughput(Throughput::Elements(total));
+        group.bench_function("write_uniform_attr_120x40", |b| {
+            b.iter(|| {
+                let mut grid = Grid::new(cols, rows);
+                grid.attr.fg_index = 2; // green
+                for _ in 0..rows {
+                    grid.write_ascii_run(&line);
+                    grid.cursor_col = 0;
+                    grid.cursor_pending_wrap = false;
+                    if grid.cursor_row < grid.rows - 1 {
+                        grid.cursor_row += 1;
+                    }
+                }
+                black_box(&grid);
+            });
+        });
+    }
+
+    // Alternating attributes: change fg color every 10 chars.
+    // Shows cost of attr-change overhead in the write path.
+    {
+        let cols: u16 = 120;
+        let rows: u16 = 40;
+        let total = cols as u64 * rows as u64;
+        group.throughput(Throughput::Elements(total));
+        group.bench_function("write_alternating_attr_120x40", |b| {
+            b.iter(|| {
+                let mut grid = Grid::new(cols, rows);
+                let chunk: Vec<u8> = (0..10).map(|i| b'A' + i).collect();
+                for row in 0..rows {
+                    for seg in 0..12 {
+                        grid.attr.fg_index = ((row as u8 * 12 + seg) % 8) + 30;
+                        grid.write_ascii_run(&chunk);
+                    }
+                    grid.cursor_col = 0;
+                    grid.cursor_pending_wrap = false;
+                    if grid.cursor_row < grid.rows - 1 {
+                        grid.cursor_row += 1;
+                    }
+                }
+                black_box(&grid);
+            });
+        });
+    }
+
+    // --- Stage 2: SGR dispatch cost ---
+
+    // Measure raw sgr_reset throughput (no parsing, no grid write).
+    // This isolates the attribute-set cost.
+    {
+        let n = 100_000u64;
+        group.throughput(Throughput::Elements(n));
+        group.bench_function("sgr_reset_100k", |b| {
+            let mut grid = Grid::new(80, 24);
+            let mut sb = Scrollback::new(0);
+            b.iter(|| {
+                let mut perf = BenchPerformer {
+                    grid: &mut grid,
+                    scrollback: &mut sb,
+                };
+                for _ in 0..n {
+                    perf.sgr_single(1); // set bold (to give reset work to do)
+                    perf.sgr_reset();
+                }
+                black_box(perf.grid.attr);
+            });
+        });
+    }
+
+    // Measure sgr_single throughput for basic fg colors (30-37).
+    {
+        let n = 100_000u64;
+        group.throughput(Throughput::Elements(n));
+        group.bench_function("sgr_single_fg_100k", |b| {
+            let mut grid = Grid::new(80, 24);
+            let mut sb = Scrollback::new(0);
+            b.iter(|| {
+                let mut perf = BenchPerformer {
+                    grid: &mut grid,
+                    scrollback: &mut sb,
+                };
+                for i in 0..n {
+                    perf.sgr_single(black_box(30 + (i % 8) as u16));
+                }
+                black_box(perf.grid.attr);
+            });
+        });
+    }
+
+    // Measure sgr() with multi-param slice (the generic path for \x1b[1;32m etc).
+    {
+        let n = 100_000u64;
+        group.throughput(Throughput::Elements(n));
+        group.bench_function("sgr_multi_param_100k", |b| {
+            let mut grid = Grid::new(80, 24);
+            let mut sb = Scrollback::new(0);
+            let params_list: Vec<[u16; 2]> = (0..8).map(|i| [1, 30 + i]).collect();
+            b.iter(|| {
+                let mut perf = BenchPerformer {
+                    grid: &mut grid,
+                    scrollback: &mut sb,
+                };
+                for i in 0..n {
+                    perf.sgr(black_box(&params_list[(i % 8) as usize]));
+                }
+                black_box(perf.grid.attr);
+            });
+        });
+    }
+
+    // Measure color_256 throughput (the dedicated path).
+    {
+        let n = 100_000u64;
+        group.throughput(Throughput::Elements(n));
+        group.bench_function("color_256_100k", |b| {
+            let mut grid = Grid::new(80, 24);
+            let mut sb = Scrollback::new(0);
+            b.iter(|| {
+                let mut perf = BenchPerformer {
+                    grid: &mut grid,
+                    scrollback: &mut sb,
+                };
+                for i in 0..n {
+                    perf.color_256(black_box(true), black_box((i % 256) as u16));
+                }
+                black_box(perf.grid.attr);
+            });
+        });
+    }
+
+    // Measure color_rgb throughput (the dedicated path).
+    {
+        let n = 100_000u64;
+        group.throughput(Throughput::Elements(n));
+        group.bench_function("color_rgb_100k", |b| {
+            let mut grid = Grid::new(80, 24);
+            let mut sb = Scrollback::new(0);
+            b.iter(|| {
+                let mut perf = BenchPerformer {
+                    grid: &mut grid,
+                    scrollback: &mut sb,
+                };
+                for i in 0..n {
+                    let c = (i % 256) as u16;
+                    perf.color_rgb(black_box(true), black_box(c), black_box(128), black_box(255 - c));
+                }
+                black_box(perf.grid.attr);
+            });
+        });
+    }
+
+    // --- Stage 3: SGR + write cycle (the real inner loop) ---
+
+    // The common TUI pattern: set color, write a few chars, reset.
+    // Measures the combined cost of attribute dispatch + cell writes.
+    {
+        let iterations = 1_000u64;
+        let text = b"Hello, world!"; // 13 chars
+        // Per iteration: sgr_single(32) + write_ascii_run(13) + sgr_reset
+        let total_chars = iterations * text.len() as u64;
+        group.throughput(Throughput::Elements(total_chars));
+        group.bench_function("sgr_write_reset_cycle_1k", |b| {
+            b.iter(|| {
+                let mut grid = Grid::new(120, 40);
+                let mut sb = Scrollback::new(0);
+                let mut perf = BenchPerformer {
+                    grid: &mut grid,
+                    scrollback: &mut sb,
+                };
+                for i in 0..iterations {
+                    perf.sgr_single(30 + (i % 8) as u16);
+                    perf.grid.write_ascii_run(text);
+                    perf.sgr_reset();
+                    // newline every ~9 segments
+                    if i % 9 == 8 {
+                        perf.grid.cursor_col = 0;
+                        perf.grid.cursor_pending_wrap = false;
+                        if perf.grid.cursor_row < perf.grid.rows - 1 {
+                            perf.grid.cursor_row += 1;
+                        }
+                    }
+                }
+                black_box(&perf.grid);
+            });
+        });
+    }
+
+    // --- Stage 4: Cell → CellData conversion (render upload simulation) ---
+
+    // Simulates the CPU side of render_frame: iterating dirty rows and
+    // converting Cell to a packed GPU struct.
+    // CellData isn't in lib.rs, so we replicate the conversion inline.
+    {
+        let cols: u16 = 120;
+        let rows: u16 = 40;
+        let total = cols as u64 * rows as u64;
+        group.throughput(Throughput::Elements(total));
+        group.bench_function("cell_to_gpu_all_dirty_120x40", |b| {
+            // Pre-fill grid with varied content
+            let mut grid = Grid::new(cols, rows);
+            let mut sb = Scrollback::new(0);
+            let data = make_tmux_pane_redraw(1, cols, rows);
+            parse_bytes(&mut grid, &mut sb, &data);
+            grid.mark_all_dirty();
+
+            // Destination buffer (simulates Metal shared buffer)
+            let mut gpu_buf = vec![0u32; total as usize * 4]; // 16 bytes per cell
+
+            b.iter(|| {
+                let dst = gpu_buf.as_mut_ptr() as *mut u8;
+                for row in 0..rows {
+                    if !grid.dirty[row as usize] {
+                        continue;
+                    }
+                    let src_start = row as usize * cols as usize;
+                    for col in 0..cols as usize {
+                        let cell = &grid.cells[src_start + col];
+                        let offset = (row as usize * cols as usize + col) * 16;
+                        // SAFETY: gpu_buf is sized for total * 16 bytes
+                        unsafe {
+                            let p = dst.add(offset);
+                            // Pack: codepoint(2) + flags(2) + fg_idx(1) + bg_idx(1) + pad(2) + fg_rgb(4) + bg_rgb(4)
+                            *(p as *mut u16) = cell.codepoint;
+                            *(p.add(2) as *mut u16) = cell.flags.bits();
+                            *p.add(4) = cell.fg_index;
+                            *p.add(5) = cell.bg_index;
+                            *p.add(6) = 0; // atlas_x placeholder
+                            *p.add(7) = 0; // atlas_y placeholder
+                            *(p.add(8) as *mut u32) = cell.fg_rgb;
+                            *(p.add(12) as *mut u32) = cell.bg_rgb;
+                        }
+                    }
+                }
+                black_box(&gpu_buf);
+            });
+        });
+
+        // Same but only 25% of rows dirty (typical partial update)
+        let dirty_cells = (rows / 4 + 1) as u64 * cols as u64;
+        group.throughput(Throughput::Elements(dirty_cells));
+        group.bench_function("cell_to_gpu_25pct_dirty_120x40", |b| {
+            let mut grid = Grid::new(cols, rows);
+            let mut sb = Scrollback::new(0);
+            let data = make_tmux_pane_redraw(1, cols, rows);
+            parse_bytes(&mut grid, &mut sb, &data);
+            // Mark only every 4th row dirty
+            grid.clear_dirty();
+            for row in (0..rows).step_by(4) {
+                grid.mark_dirty(row);
+            }
+
+            let mut gpu_buf = vec![0u32; total as usize * 4];
+
+            b.iter(|| {
+                let dst = gpu_buf.as_mut_ptr() as *mut u8;
+                for row in 0..rows {
+                    if !grid.dirty[row as usize] {
+                        continue;
+                    }
+                    let src_start = row as usize * cols as usize;
+                    for col in 0..cols as usize {
+                        let cell = &grid.cells[src_start + col];
+                        let offset = (row as usize * cols as usize + col) * 16;
+                        unsafe {
+                            let p = dst.add(offset);
+                            *(p as *mut u16) = cell.codepoint;
+                            *(p.add(2) as *mut u16) = cell.flags.bits();
+                            *p.add(4) = cell.fg_index;
+                            *p.add(5) = cell.bg_index;
+                            *p.add(6) = 0;
+                            *p.add(7) = 0;
+                            *(p.add(8) as *mut u32) = cell.fg_rgb;
+                            *(p.add(12) as *mut u32) = cell.bg_rgb;
+                        }
+                    }
+                }
+                black_box(&gpu_buf);
+            });
+        });
+    }
+
+    // --- Stage 5: mark_dirty overhead ---
+    {
+        let rows: u16 = 40;
+        group.bench_function("mark_dirty_all_rows_40", |b| {
+            let mut grid = Grid::new(120, rows);
+            b.iter(|| {
+                for row in 0..rows {
+                    grid.mark_dirty(row);
+                }
+                black_box(&grid.dirty);
+                grid.clear_dirty();
+            });
+        });
+
+        group.bench_function("mark_dirty_scattered_10_of_40", |b| {
+            let mut grid = Grid::new(120, rows);
+            b.iter(|| {
+                for row in (0..rows).step_by(4) {
+                    grid.mark_dirty(row);
+                }
+                black_box(&grid.dirty);
+                grid.clear_dirty();
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Scrollback benchmarks
 // ---------------------------------------------------------------------------
 
@@ -1605,6 +1931,7 @@ criterion_group!(
     bench_parser,
     bench_simd,
     bench_grid,
+    bench_pipeline,
     bench_scrollback,
     bench_end_to_end,
     bench_alloc_audit,
