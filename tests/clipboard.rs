@@ -1,3 +1,6 @@
+use objc2::MainThreadMarker;
+use objc2_app_kit::NSApplication;
+
 use tty::clipboard::{clipboard_has_image, get_clipboard, set_clipboard, set_clipboard_image};
 
 /// Minimal valid 1×1 red PNG (68 bytes).
@@ -14,21 +17,15 @@ const PNG_1PX: &[u8] = &[
     0xAE, 0x42, 0x60, 0x82, //
 ];
 
-// These tests mutate the system clipboard, so they must not run in parallel.
-// `cargo test -- --test-threads=1` or run this file alone.
-
-#[test]
 fn text_paste_works() {
     set_clipboard("hello");
     assert_eq!(get_clipboard().as_deref(), Some("hello"));
     assert!(!clipboard_has_image());
 }
 
-#[test]
 fn image_on_clipboard_is_detected_as_png() {
     set_clipboard_image(PNG_1PX, "public.png");
 
-    // No text should be returned.
     assert!(
         get_clipboard().is_none(),
         "get_clipboard() should return None when only image data is on the clipboard, \
@@ -36,14 +33,12 @@ fn image_on_clipboard_is_detected_as_png() {
         get_clipboard()
     );
 
-    // Image should be detected.
     assert!(
         clipboard_has_image(),
         "clipboard_has_image() should return true for PNG data"
     );
 }
 
-#[test]
 fn image_on_clipboard_is_detected_as_tiff() {
     // Simulate a macOS screenshot (TIFF on clipboard). We don't need valid TIFF
     // bytes — clipboard_has_image() only checks that dataForType returns Some.
@@ -60,7 +55,6 @@ fn image_on_clipboard_is_detected_as_tiff() {
     );
 }
 
-#[test]
 fn text_clipboard_is_not_image() {
     set_clipboard("just text");
 
@@ -69,4 +63,42 @@ fn text_clipboard_is_not_image() {
         !clipboard_has_image(),
         "clipboard_has_image() should be false when only text is present"
     );
+}
+
+// Custom harness: NSPasteboard requires an initialized NSApplication on the
+// main thread. The default test harness runs tests on worker threads, which
+// causes SIGABRT. Using harness = false lets us run from main() directly.
+fn main() {
+    let mtm = MainThreadMarker::new().expect("clipboard tests must run on the main thread");
+    let _ = NSApplication::sharedApplication(mtm);
+
+    let tests: &[(&str, fn())] = &[
+        ("text_paste_works", text_paste_works),
+        ("image_on_clipboard_is_detected_as_png", image_on_clipboard_is_detected_as_png),
+        ("image_on_clipboard_is_detected_as_tiff", image_on_clipboard_is_detected_as_tiff),
+        ("text_clipboard_is_not_image", text_clipboard_is_not_image),
+    ];
+
+    let mut passed = 0;
+    let mut failed = 0;
+
+    for (name, test_fn) in tests {
+        print!("test {name} ... ");
+        let result = std::panic::catch_unwind(|| test_fn());
+        match result {
+            Ok(()) => {
+                println!("ok");
+                passed += 1;
+            }
+            Err(_) => {
+                println!("FAILED");
+                failed += 1;
+            }
+        }
+    }
+
+    println!("\ntest result: {passed} passed; {failed} failed");
+    if failed > 0 {
+        std::process::exit(1);
+    }
 }
