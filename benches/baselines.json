@@ -1,0 +1,356 @@
+[
+  {
+    "baseline": "v1-write-ascii-run",
+    "commit": "7d8da00",
+    "description": "Add criterion benchmarks and bulk Grid::write_ascii_run",
+    "benchmarks": {
+      "alloc_audit/grid_new_80x24": {
+        "mean_ns": 1183.0,
+        "std_dev_ns": 4.5,
+        "median_ns": 1183.2
+      },
+      "alloc_audit/parse_ascii_1k": {
+        "mean_ns": 1065148.3,
+        "std_dev_ns": 88397.3,
+        "median_ns": 1043903.6
+      },
+      "alloc_audit/parse_ls_1k_with_sb": {
+        "mean_ns": 1243153.6,
+        "std_dev_ns": 46785.8,
+        "median_ns": 1234876.9
+      },
+      "end_to_end/ls_10k_4k_chunks": {
+        "mean_ns": 14119470.8,
+        "std_dev_ns": 178980.0,
+        "median_ns": 14111703.0
+      },
+      "end_to_end/ls_10k_64b_chunks": {
+        "mean_ns": 14147831.7,
+        "std_dev_ns": 190035.7,
+        "median_ns": 14140541.6
+      },
+      "end_to_end/ls_10k_single_parse": {
+        "mean_ns": 14063380.6,
+        "std_dev_ns": 178553.9,
+        "median_ns": 14061713.4
+      },
+      "grid/alt_screen_roundtrip_80x24": {
+        "mean_ns": 1118.7,
+        "std_dev_ns": 47.0,
+        "median_ns": 1109.9
+      },
+      "grid/clear_rows_full_80x24": {
+        "mean_ns": 1368.6,
+        "std_dev_ns": 285.8,
+        "median_ns": 1294.7
+      },
+      "grid/new_120x40": {
+        "mean_ns": 2871.2,
+        "std_dev_ns": 31.0,
+        "median_ns": 2865.7
+      },
+      "grid/new_200x50": {
+        "mean_ns": 6019.1,
+        "std_dev_ns": 366.0,
+        "median_ns": 5954.2
+      },
+      "grid/new_80x24": {
+        "mean_ns": 1185.1,
+        "std_dev_ns": 8.6,
+        "median_ns": 1184.7
+      },
+      "grid/resize_200x50_to_80x24": {
+        "mean_ns": 7854.9,
+        "std_dev_ns": 562.6,
+        "median_ns": 7741.1
+      },
+      "grid/resize_80x24_to_120x40": {
+        "mean_ns": 4537.1,
+        "std_dev_ns": 418.5,
+        "median_ns": 4443.8
+      },
+      "grid/scroll_down_1_80x24": {
+        "mean_ns": 500.8,
+        "std_dev_ns": 40.1,
+        "median_ns": 490.0
+      },
+      "grid/scroll_up_10_80x24": {
+        "mean_ns": 1131.5,
+        "std_dev_ns": 95.9,
+        "median_ns": 1106.4
+      },
+      "grid/scroll_up_1_80x24": {
+        "mean_ns": 533.9,
+        "std_dev_ns": 47.2,
+        "median_ns": 521.3
+      },
+      "grid/write_char_200x50": {
+        "mean_ns": 29860.0,
+        "std_dev_ns": 4029.1,
+        "median_ns": 29220.7
+      },
+      "grid/write_char_80x24": {
+        "mean_ns": 5644.0,
+        "std_dev_ns": 442.1,
+        "median_ns": 5561.3
+      },
+      "parser/ascii/1000": {
+        "mean_ns": 1018996.3,
+        "std_dev_ns": 5724.5,
+        "median_ns": 1018376.5
+      },
+      "parser/ascii/10000": {
+        "mean_ns": 10213560.9,
+        "std_dev_ns": 50474.4,
+        "median_ns": 10200066.6
+      },
+      "parser/ls_output/1000": {
+        "mean_ns": 1198332.6,
+        "std_dev_ns": 6682.9,
+        "median_ns": 1197897.0
+      },
+      "parser/ls_output/10000": {
+        "mean_ns": 12005995.7,
+        "std_dev_ns": 172036.1,
+        "median_ns": 11957904.2
+      },
+      "parser/mixed_csi/1000": {
+        "mean_ns": 160346.0,
+        "std_dev_ns": 745.5,
+        "median_ns": 160316.9
+      },
+      "parser/mixed_csi/10000": {
+        "mean_ns": 1517317.7,
+        "std_dev_ns": 15432.8,
+        "median_ns": 1514457.0
+      },
+      "parser/utf8_heavy/1000": {
+        "mean_ns": 873396.0,
+        "std_dev_ns": 5825.5,
+        "median_ns": 872550.5
+      },
+      "parser/utf8_heavy/10000": {
+        "mean_ns": 8793525.0,
+        "std_dev_ns": 52134.6,
+        "median_ns": 8783847.2
+      },
+      "scrollback/push_1k_rows_cap_1k": {
+        "mean_ns": 76199.2,
+        "std_dev_ns": 4030.4,
+        "median_ns": 75537.4
+      },
+      "scrollback/push_steady_state": {
+        "mean_ns": 30.6,
+        "std_dev_ns": 0.9,
+        "median_ns": 30.5
+      },
+      "simd_scanner/control_every_8": {
+        "mean_ns": 2.3,
+        "std_dev_ns": 0.0,
+        "median_ns": 2.3
+      },
+      "simd_scanner/early_escape": {
+        "mean_ns": 2.3,
+        "std_dev_ns": 0.0,
+        "median_ns": 2.3
+      },
+      "simd_scanner/escape_at_63": {
+        "mean_ns": 2.7,
+        "std_dev_ns": 0.0,
+        "median_ns": 2.7
+      },
+      "simd_scanner/pure_ascii_4k": {
+        "mean_ns": 68.7,
+        "std_dev_ns": 1.3,
+        "median_ns": 69.3
+      }
+    }
+  },
+  {
+    "baseline": "v2-text-run-scan",
+    "commit": "f5beccd",
+    "description": "Add SIMD text-run scanning for mixed ASCII + UTF-8",
+    "benchmarks": {
+      "alloc_audit/grid_new_80x24": {
+        "mean_ns": 1187.7,
+        "std_dev_ns": 6.4,
+        "median_ns": 1187.4
+      },
+      "alloc_audit/parse_ascii_1k": {
+        "mean_ns": 1041157.4,
+        "std_dev_ns": 5541.8,
+        "median_ns": 1040761.5
+      },
+      "alloc_audit/parse_ls_1k_with_sb": {
+        "mean_ns": 1245191.3,
+        "std_dev_ns": 53670.7,
+        "median_ns": 1236392.2
+      },
+      "end_to_end/ls_10k_4k_chunks": {
+        "mean_ns": 14284152.0,
+        "std_dev_ns": 1061829.5,
+        "median_ns": 14128026.1
+      },
+      "end_to_end/ls_10k_64b_chunks": {
+        "mean_ns": 14200525.3,
+        "std_dev_ns": 172280.8,
+        "median_ns": 14168182.2
+      },
+      "end_to_end/ls_10k_single_parse": {
+        "mean_ns": 14277401.4,
+        "std_dev_ns": 853720.4,
+        "median_ns": 14130328.1
+      },
+      "grid/alt_screen_roundtrip_80x24": {
+        "mean_ns": 1113.5,
+        "std_dev_ns": 7.7,
+        "median_ns": 1112.0
+      },
+      "grid/clear_rows_full_80x24": {
+        "mean_ns": 1364.6,
+        "std_dev_ns": 101.6,
+        "median_ns": 1348.2
+      },
+      "grid/new_120x40": {
+        "mean_ns": 2918.2,
+        "std_dev_ns": 244.6,
+        "median_ns": 2858.1
+      },
+      "grid/new_200x50": {
+        "mean_ns": 6014.9,
+        "std_dev_ns": 347.8,
+        "median_ns": 5947.9
+      },
+      "grid/new_80x24": {
+        "mean_ns": 1201.5,
+        "std_dev_ns": 68.9,
+        "median_ns": 1186.5
+      },
+      "grid/resize_200x50_to_80x24": {
+        "mean_ns": 7742.2,
+        "std_dev_ns": 52.8,
+        "median_ns": 7732.0
+      },
+      "grid/resize_80x24_to_120x40": {
+        "mean_ns": 4472.7,
+        "std_dev_ns": 170.4,
+        "median_ns": 4444.2
+      },
+      "grid/scroll_down_1_80x24": {
+        "mean_ns": 493.3,
+        "std_dev_ns": 24.0,
+        "median_ns": 488.7
+      },
+      "grid/scroll_up_10_80x24": {
+        "mean_ns": 1118.8,
+        "std_dev_ns": 87.7,
+        "median_ns": 1102.1
+      },
+      "grid/scroll_up_1_80x24": {
+        "mean_ns": 532.1,
+        "std_dev_ns": 38.3,
+        "median_ns": 524.4
+      },
+      "grid/write_char_200x50": {
+        "mean_ns": 29869.9,
+        "std_dev_ns": 2325.2,
+        "median_ns": 29429.5
+      },
+      "grid/write_char_80x24": {
+        "mean_ns": 5835.0,
+        "std_dev_ns": 973.2,
+        "median_ns": 5555.4
+      },
+      "parser/ascii/1000": {
+        "mean_ns": 1041650.1,
+        "std_dev_ns": 5982.2,
+        "median_ns": 1041011.1
+      },
+      "parser/ascii/10000": {
+        "mean_ns": 10716457.0,
+        "std_dev_ns": 1022891.6,
+        "median_ns": 10510712.5
+      },
+      "parser/box_drawing/1000": {
+        "mean_ns": 1350835.4,
+        "std_dev_ns": 56918.8,
+        "median_ns": 1341748.6
+      },
+      "parser/box_drawing/10000": {
+        "mean_ns": 13777015.4,
+        "std_dev_ns": 77887.6,
+        "median_ns": 13784073.0
+      },
+      "parser/ls_output/1000": {
+        "mean_ns": 1281595.7,
+        "std_dev_ns": 162703.9,
+        "median_ns": 1238937.8
+      },
+      "parser/ls_output/10000": {
+        "mean_ns": 12450595.5,
+        "std_dev_ns": 666146.8,
+        "median_ns": 12317954.1
+      },
+      "parser/mixed_csi/1000": {
+        "mean_ns": 157726.4,
+        "std_dev_ns": 838.1,
+        "median_ns": 157751.8
+      },
+      "parser/mixed_csi/10000": {
+        "mean_ns": 1644880.1,
+        "std_dev_ns": 370367.1,
+        "median_ns": 1569997.3
+      },
+      "parser/tui_mixed/1000": {
+        "mean_ns": 1225982.2,
+        "std_dev_ns": 68484.0,
+        "median_ns": 1214430.3
+      },
+      "parser/tui_mixed/10000": {
+        "mean_ns": 12249751.2,
+        "std_dev_ns": 134611.2,
+        "median_ns": 12194841.7
+      },
+      "parser/utf8_heavy/1000": {
+        "mean_ns": 827688.3,
+        "std_dev_ns": 3709.3,
+        "median_ns": 827517.7
+      },
+      "parser/utf8_heavy/10000": {
+        "mean_ns": 8560285.5,
+        "std_dev_ns": 133717.1,
+        "median_ns": 8581916.7
+      },
+      "scrollback/push_1k_rows_cap_1k": {
+        "mean_ns": 75902.2,
+        "std_dev_ns": 1232.6,
+        "median_ns": 75984.7
+      },
+      "scrollback/push_steady_state": {
+        "mean_ns": 30.5,
+        "std_dev_ns": 0.2,
+        "median_ns": 30.5
+      },
+      "simd_scanner/control_every_8": {
+        "mean_ns": 2.3,
+        "std_dev_ns": 0.1,
+        "median_ns": 2.3
+      },
+      "simd_scanner/early_escape": {
+        "mean_ns": 2.3,
+        "std_dev_ns": 0.2,
+        "median_ns": 2.3
+      },
+      "simd_scanner/escape_at_63": {
+        "mean_ns": 2.7,
+        "std_dev_ns": 0.1,
+        "median_ns": 2.7
+      },
+      "simd_scanner/pure_ascii_4k": {
+        "mean_ns": 67.9,
+        "std_dev_ns": 0.3,
+        "median_ns": 67.8
+      }
+    }
+  }
+]
