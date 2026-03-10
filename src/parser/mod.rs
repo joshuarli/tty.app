@@ -91,6 +91,28 @@ impl Parser {
                         break;
                     }
                 }
+
+                // If we're now at a high byte, scan for a mixed text run
+                // (ASCII + UTF-8) and process it inline — avoids re-entering
+                // the outer loop for every UTF-8 character.
+                let remaining = &data[pos..];
+                if remaining.len() >= 16 && remaining[0] >= 0x80 {
+                    let text_end = SimdScanner::scan_text(remaining);
+                    if text_end > 0 {
+                        let consumed =
+                            Self::process_text_run(&remaining[..text_end], performer);
+                        pos += consumed;
+                        if pos >= len {
+                            break;
+                        }
+                        if consumed == text_end {
+                            continue;
+                        }
+                        // consumed < text_end: incomplete UTF-8 at end of text run.
+                        // Fall through to the scalar UTF-8 handler which will use
+                        // the assembler to buffer it for the next parse() call.
+                    }
+                }
             }
 
             // Process the next byte
@@ -149,6 +171,90 @@ impl Parser {
             // Control character or ESC — feed to state machine
             self.state_machine.advance(byte, performer);
             pos += 1;
+        }
+    }
+
+    /// Process a mixed text run (ASCII + UTF-8) in a tight loop.
+    ///
+    /// The input `data` must contain only "text" bytes (>= 0x20, != 0x7F) as
+    /// identified by `SimdScanner::scan_text`. Returns the number of bytes consumed.
+    /// May return less than `data.len()` if an incomplete UTF-8 sequence is at the end.
+    fn process_text_run<P: Perform>(data: &[u8], performer: &mut P) -> usize {
+        let len = data.len();
+        let mut pos = 0;
+
+        while pos < len {
+            if data[pos] < 0x80 {
+                // ASCII sub-run — batch via print_ascii_run
+                let start = pos;
+                pos += 1;
+                while pos < len && data[pos] < 0x80 {
+                    pos += 1;
+                }
+                performer.print_ascii_run(&data[start..pos]);
+            } else if data[pos] >= 0xC0 {
+                // UTF-8 lead byte — inline decode (no assembler)
+                match Self::decode_utf8(&data[pos..]) {
+                    Some((ch, consumed)) => {
+                        performer.print(ch);
+                        pos += consumed;
+                    }
+                    None => break, // incomplete at end of run
+                }
+            } else {
+                // Stray continuation byte (0x80..0xBF)
+                performer.print('\u{FFFD}');
+                pos += 1;
+            }
+        }
+
+        pos
+    }
+
+    /// Stateless inline UTF-8 decode. Does not buffer incomplete sequences.
+    /// Returns None if the sequence is incomplete (fewer bytes than expected).
+    #[inline]
+    fn decode_utf8(data: &[u8]) -> Option<(char, usize)> {
+        let first = data[0];
+        let expected = match first {
+            0xC0..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF7 => 4,
+            _ => return Some(('\u{FFFD}', 1)),
+        };
+
+        if data.len() < expected {
+            return None; // incomplete — caller will handle
+        }
+
+        for &byte in data.iter().take(expected).skip(1) {
+            if byte & 0xC0 != 0x80 {
+                return Some(('\u{FFFD}', 1));
+            }
+        }
+
+        let mask: u8 = match expected {
+            2 => 0x1F,
+            3 => 0x0F,
+            _ => 0x07,
+        };
+        let mut cp = (first & mask) as u32;
+        for byte in data.iter().take(expected).skip(1) {
+            cp = (cp << 6) | (byte & 0x3F) as u32;
+        }
+
+        let valid = match expected {
+            2 => cp >= 0x80,
+            3 => cp >= 0x800 && !(0xD800..=0xDFFF).contains(&cp),
+            4 => (0x10000..=0x10FFFF).contains(&cp),
+            _ => false,
+        };
+
+        if valid {
+            // SAFETY: validated above — overlong, surrogates, and out-of-range rejected.
+            Some((unsafe { char::from_u32_unchecked(cp) }, expected))
+        } else {
+            Some(('\u{FFFD}', 1))
         }
     }
 }

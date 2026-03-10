@@ -439,6 +439,52 @@ fn make_utf8_heavy(n: usize) -> Vec<u8> {
     buf
 }
 
+/// Pure box-drawing characters — worst case for UTF-8 per-char overhead.
+fn make_box_drawing(n: usize) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(n * 240);
+    // ─ = U+2500 = E2 94 80 (3 bytes each, 79 chars + newline per line)
+    for _ in 0..n {
+        for _ in 0..79 {
+            buf.extend_from_slice("─".as_bytes()); // 3 bytes
+        }
+        buf.push(b'\n');
+    }
+    buf
+}
+
+/// TUI-like output: box borders with ASCII content inside.
+fn make_tui_mixed(n: usize) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(n * 120);
+    for i in 0..n {
+        match i % 4 {
+            0 => {
+                // Top border: ┌─────────────────────────────────────────────┐
+                buf.extend_from_slice("┌".as_bytes());
+                for _ in 0..77 {
+                    buf.extend_from_slice("─".as_bytes());
+                }
+                buf.extend_from_slice("┐".as_bytes());
+            }
+            3 => {
+                // Bottom border
+                buf.extend_from_slice("└".as_bytes());
+                for _ in 0..77 {
+                    buf.extend_from_slice("─".as_bytes());
+                }
+                buf.extend_from_slice("┘".as_bytes());
+            }
+            _ => {
+                // Content: │ text content here                              │
+                buf.extend_from_slice("│".as_bytes());
+                buf.extend_from_slice(format!(" item {i:<73}").as_bytes());
+                buf.extend_from_slice("│".as_bytes());
+            }
+        }
+        buf.push(b'\n');
+    }
+    buf
+}
+
 /// Realistic terminal output: ls-like colored listing.
 fn make_ls_output(n: usize) -> Vec<u8> {
     let mut buf = Vec::with_capacity(n * 100);
@@ -510,6 +556,30 @@ fn bench_parser(c: &mut Criterion) {
         let utf8 = make_utf8_heavy(size);
         group.throughput(Throughput::Bytes(utf8.len() as u64));
         group.bench_with_input(BenchmarkId::new("utf8_heavy", size), &utf8, |b, data| {
+            b.iter(|| {
+                let mut grid = Grid::new(80, 24);
+                let mut sb = Scrollback::new(0);
+                parse_bytes(&mut grid, &mut sb, data);
+                black_box(&grid);
+            });
+        });
+
+        // Pure box-drawing (worst case for per-char UTF-8 overhead)
+        let boxes = make_box_drawing(size);
+        group.throughput(Throughput::Bytes(boxes.len() as u64));
+        group.bench_with_input(BenchmarkId::new("box_drawing", size), &boxes, |b, data| {
+            b.iter(|| {
+                let mut grid = Grid::new(80, 24);
+                let mut sb = Scrollback::new(0);
+                parse_bytes(&mut grid, &mut sb, data);
+                black_box(&grid);
+            });
+        });
+
+        // TUI-like: box borders + ASCII content
+        let tui = make_tui_mixed(size);
+        group.throughput(Throughput::Bytes(tui.len() as u64));
+        group.bench_with_input(BenchmarkId::new("tui_mixed", size), &tui, |b, data| {
             b.iter(|| {
                 let mut grid = Grid::new(80, 24);
                 let mut sb = Scrollback::new(0);

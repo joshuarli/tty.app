@@ -137,4 +137,94 @@ impl SimdScanner {
         }
         (pos, pos)
     }
+
+    /// Scan the buffer for a contiguous run of "text" bytes: anything that is
+    /// NOT a C0 control character (0x00..0x1F) and NOT DEL (0x7F).
+    ///
+    /// This extends beyond ASCII to include UTF-8 continuation and lead bytes,
+    /// allowing mixed ASCII + UTF-8 content to be processed in one pass.
+    #[cfg(target_arch = "aarch64")]
+    pub fn scan_text(buf: &[u8]) -> usize {
+        use core::arch::aarch64::*;
+
+        let len = buf.len();
+        let mut pos = 0;
+
+        // SAFETY: Same bounds reasoning as `scan()`. Additionally,
+        // `vceqq_u8` and `vmvnq_u8` are pure SIMD register operations.
+        unsafe {
+            let lo = vdupq_n_u8(0x20);
+            let del = vdupq_n_u8(0x7F);
+
+            while pos + 64 <= len {
+                let ptr = buf.as_ptr().add(pos);
+
+                let c0 = vld1q_u8(ptr);
+                let c1 = vld1q_u8(ptr.add(16));
+                let c2 = vld1q_u8(ptr.add(32));
+                let c3 = vld1q_u8(ptr.add(48));
+
+                // Check: byte >= 0x20 && byte != 0x7F
+                let ok0 = vandq_u8(vcgeq_u8(c0, lo), vmvnq_u8(vceqq_u8(c0, del)));
+                let ok1 = vandq_u8(vcgeq_u8(c1, lo), vmvnq_u8(vceqq_u8(c1, del)));
+                let ok2 = vandq_u8(vcgeq_u8(c2, lo), vmvnq_u8(vceqq_u8(c2, del)));
+                let ok3 = vandq_u8(vcgeq_u8(c3, lo), vmvnq_u8(vceqq_u8(c3, del)));
+
+                let all = vandq_u8(vandq_u8(ok0, ok1), vandq_u8(ok2, ok3));
+
+                if vminvq_u8(all) == 0xFF {
+                    pos += 64;
+                    continue;
+                }
+
+                if vminvq_u8(ok0) != 0xFF {
+                    return pos + Self::find_first_zero(ok0);
+                }
+                pos += 16;
+                if vminvq_u8(ok1) != 0xFF {
+                    return pos + Self::find_first_zero(ok1);
+                }
+                pos += 16;
+                if vminvq_u8(ok2) != 0xFF {
+                    return pos + Self::find_first_zero(ok2);
+                }
+                pos += 16;
+                return pos + Self::find_first_zero(ok3);
+            }
+
+            while pos + 16 <= len {
+                let c = vld1q_u8(buf.as_ptr().add(pos));
+                let ok = vandq_u8(vcgeq_u8(c, lo), vmvnq_u8(vceqq_u8(c, del)));
+                if vminvq_u8(ok) == 0xFF {
+                    pos += 16;
+                } else {
+                    return pos + Self::find_first_zero(ok);
+                }
+            }
+        }
+
+        // Scalar tail
+        while pos < len {
+            let b = buf[pos];
+            if b < 0x20 || b == 0x7F {
+                return pos;
+            }
+            pos += 1;
+        }
+
+        pos
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn scan_text(buf: &[u8]) -> usize {
+        let mut pos = 0;
+        while pos < buf.len() {
+            let b = buf[pos];
+            if b < 0x20 || b == 0x7F {
+                return pos;
+            }
+            pos += 1;
+        }
+        pos
+    }
 }
