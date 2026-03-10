@@ -31,7 +31,7 @@ impl<'a> Perform for TestPerformer<'a> {
     }
 
     fn print(&mut self, c: char) {
-        self.grid.write_char(c);
+        self.grid.write_char(c, 0, 0);
     }
 
     fn execute(&mut self, byte: u8) {
@@ -201,7 +201,7 @@ impl<'a> Perform for TestPerformer<'a> {
         }
         let attr = self.grid.attr;
         for c in col..col + n {
-            self.grid.cells[row_start + c as usize] = Cell::blank(&attr);
+            self.grid.cells[row_start + c as usize] = Cell::blank(&attr, [0, 0]);
         }
         self.grid.mark_dirty(row);
     }
@@ -217,7 +217,7 @@ impl<'a> Perform for TestPerformer<'a> {
         }
         let attr = self.grid.attr;
         for c in cols - n..cols {
-            self.grid.cells[row_start + c as usize] = Cell::blank(&attr);
+            self.grid.cells[row_start + c as usize] = Cell::blank(&attr, [0, 0]);
         }
         self.grid.mark_dirty(row);
     }
@@ -230,7 +230,7 @@ impl<'a> Perform for TestPerformer<'a> {
         let attr = self.grid.attr;
         let row_start = self.grid.row_start(row);
         for c in col..col + n {
-            self.grid.cells[row_start + c as usize] = Cell::blank(&attr);
+            self.grid.cells[row_start + c as usize] = Cell::blank(&attr, [0, 0]);
         }
         self.grid.mark_dirty(row);
     }
@@ -238,7 +238,7 @@ impl<'a> Perform for TestPerformer<'a> {
     fn repeat_char(&mut self, n: u16) {
         let c = self.grid.last_char;
         for _ in 0..n {
-            self.grid.write_char(c);
+            self.grid.write_char(c, 0, 0);
         }
     }
 
@@ -271,7 +271,7 @@ impl<'a> Perform for TestPerformer<'a> {
                 27 => self.grid.attr.flags.remove(CellFlags::INVERSE),
                 28 => self.grid.attr.flags.remove(CellFlags::HIDDEN),
                 29 => self.grid.attr.flags.remove(CellFlags::STRIKE),
-                30..=37 => self.grid.attr.fg_index = params[i] - 30,
+                30..=37 => self.grid.attr.fg_index = (params[i] - 30) as u8,
                 38 => {
                     i += 1;
                     if i < params.len() {
@@ -279,7 +279,7 @@ impl<'a> Perform for TestPerformer<'a> {
                             5 => {
                                 i += 1;
                                 if i < params.len() {
-                                    self.grid.attr.fg_index = params[i];
+                                    self.grid.attr.fg_index = params[i] as u8;
                                 }
                             }
                             2 => {
@@ -288,7 +288,7 @@ impl<'a> Perform for TestPerformer<'a> {
                                         params[i + 1] as u8,
                                         params[i + 2] as u8,
                                         params[i + 3] as u8,
-                                    ) as u16;
+                                    );
                                     i += 3;
                                 }
                             }
@@ -297,7 +297,7 @@ impl<'a> Perform for TestPerformer<'a> {
                     }
                 }
                 39 => self.grid.attr.fg_index = 7,
-                40..=47 => self.grid.attr.bg_index = params[i] - 40,
+                40..=47 => self.grid.attr.bg_index = (params[i] - 40) as u8,
                 48 => {
                     i += 1;
                     if i < params.len() {
@@ -305,7 +305,7 @@ impl<'a> Perform for TestPerformer<'a> {
                             5 => {
                                 i += 1;
                                 if i < params.len() {
-                                    self.grid.attr.bg_index = params[i];
+                                    self.grid.attr.bg_index = params[i] as u8;
                                 }
                             }
                             2 => {
@@ -314,7 +314,7 @@ impl<'a> Perform for TestPerformer<'a> {
                                         params[i + 1] as u8,
                                         params[i + 2] as u8,
                                         params[i + 3] as u8,
-                                    ) as u16;
+                                    );
                                     i += 3;
                                 }
                             }
@@ -323,8 +323,8 @@ impl<'a> Perform for TestPerformer<'a> {
                     }
                 }
                 49 => self.grid.attr.bg_index = 0,
-                90..=97 => self.grid.attr.fg_index = params[i] - 90 + 8,
-                100..=107 => self.grid.attr.bg_index = params[i] - 100 + 8,
+                90..=97 => self.grid.attr.fg_index = (params[i] - 90 + 8) as u8,
+                100..=107 => self.grid.attr.bg_index = (params[i] - 100 + 8) as u8,
                 _ => {}
             }
             i += 1;
@@ -1005,7 +1005,7 @@ fn sgr_foreground_colors() {
     t.feed(b"\x1B[38;2;255;128;0mY\x1B[0m");
     assert_eq!(
         t.cell(0, 2).fg_index,
-        config::rgb_to_palette(255, 128, 0) as u16
+        config::rgb_to_palette(255, 128, 0)
     );
 }
 

@@ -11,8 +11,7 @@ use metal::*;
 use objc2_app_kit::NSView;
 
 use crate::config;
-use crate::renderer::atlas::Atlas;
-use crate::terminal::cell::{Cell, CellFlags};
+use crate::terminal::cell::Cell;
 use crate::terminal::grid::Grid;
 
 /// Uniforms passed to the compute shader. Must match Metal Uniforms struct.
@@ -33,20 +32,8 @@ pub struct Uniforms {
     pub frame_bg: u32,
 }
 
-/// GPU-side cell data. Must match Metal CellData struct exactly (8 bytes).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct CellData {
-    pub codepoint: u16,
-    pub flags: u16,
-    pub fg_index: u8,
-    pub bg_index: u8,
-    pub atlas_x: u8,
-    pub atlas_y: u8,
-}
-
-const CELL_DATA_SIZE: usize = mem::size_of::<CellData>();
-const _: () = assert!(CELL_DATA_SIZE == 8, "CellData must be 8 bytes");
+const CELL_SIZE: usize = mem::size_of::<Cell>();
+const _: () = assert!(CELL_SIZE == 8, "Cell must be 8 bytes for GPU layout");
 
 /// Number of cell buffers for pipelining (CPU uploads to one while GPU reads the other).
 const NUM_BUFFERS: usize = 2;
@@ -137,8 +124,8 @@ impl MetalRenderer {
             .new_compute_pipeline_state_with_function(&function)
             .expect("failed to create compute pipeline");
 
-        // Double-buffered cell data
-        let buffer_size = (cols as usize * rows as usize * CELL_DATA_SIZE) as u64;
+        // Double-buffered cell data (Cell is the GPU format — no conversion needed)
+        let buffer_size = (cols as usize * rows as usize * CELL_SIZE) as u64;
         let cell_buffers = [
             device.new_buffer(buffer_size, MTLResourceOptions::StorageModeShared),
             device.new_buffer(buffer_size, MTLResourceOptions::StorageModeShared),
@@ -224,9 +211,8 @@ impl MetalRenderer {
 
     /// Render a frame. Only dispatches GPU work if content changed.
     /// Returns true if GPU work was dispatched, false if the frame was idle.
-    /// Cell data is built per-cell from Grid cells + atlas glyph positions.
-    /// Bold brightness and hidden attribute are handled in the shader.
-    pub fn render_frame(&mut self, grid: &mut Grid, atlas: &Atlas, cursor_visible: bool) -> bool {
+    /// Cell data is memcpy'd directly — Cell IS the GPU format.
+    pub fn render_frame(&mut self, grid: &mut Grid, cursor_visible: bool) -> bool {
         // Merge grid dirty rows into both per-buffer pending bitsets
         let cur = self.current_buffer;
         let mut had_new_dirty = false;
@@ -240,8 +226,6 @@ impl MetalRenderer {
         grid.clear_dirty();
 
         // Only render when there are NEW dirty rows or a deferred render to retry.
-        // Stale pending bits from the alternate buffer's catch-up are left for the
-        // next real update — avoids wasting a drawable on identical content.
         if !had_new_dirty && !self.needs_render {
             return false;
         }
@@ -258,38 +242,25 @@ impl MetalRenderer {
             return false;
         }
 
-        // Build CellData for dirty rows from Grid cells + atlas glyph positions.
-        // Cell (terminal domain) and CellData (GPU) are decoupled — atlas coords
-        // are resolved here at render time rather than stored in every Cell.
-        // Cell (#[repr(C)], 16 bytes) and CellData (#[repr(C)], 16 bytes) share
-        // the same layout except bytes 6-7: Cell has padding, CellData has atlas
-        // coords. We memcpy the full 16 bytes then patch the atlas position.
+        // Upload dirty rows — Cell IS the GPU format, so this is a raw memcpy per row.
         let cols = self.cols.min(grid.cols as u32) as usize;
+        let row_bytes = cols * CELL_SIZE;
+        let dst_stride = self.cols as usize * CELL_SIZE;
         let dst_base = self.cell_buffers[cur].contents() as *mut u8;
-        let dst_stride = self.cols as usize;
         for (row, pending) in self.pending[cur].iter().enumerate() {
             if *pending {
-                let src_row = grid.row_slice(row as u16);
-                for (col, cell) in src_row[..cols].iter().enumerate() {
-                    let wide = cell.flags.contains(CellFlags::WIDE);
-                    let pos = if cell.codepoint < 0x80 {
-                        atlas.get_ascii(cell.codepoint as u8)
-                    } else {
-                        atlas.get_cached(cell.codepoint, wide)
-                    };
-                    // SAFETY: dst_base points to a Metal shared buffer sized for
-                    // self.cols * self.rows * 8 bytes. row < self.rows and
-                    // col < cols <= self.cols, so the offset is in bounds.
-                    unsafe {
-                        let dst = dst_base.add((row * dst_stride + col) * CELL_DATA_SIZE);
-                        // Copy codepoint + flags (first 4 bytes match Cell layout)
-                        *(dst as *mut u32) = *(cell as *const Cell as *const u32);
-                        // Pack fg/bg indices (u16 → u8) and atlas coords
-                        *dst.add(4) = cell.fg_index as u8;
-                        *dst.add(5) = cell.bg_index as u8;
-                        *dst.add(6) = pos.x;
-                        *dst.add(7) = pos.y;
-                    }
+                let src = grid.row_slice(row as u16);
+                // SAFETY: dst_base points to a Metal shared buffer sized for
+                // self.cols * self.rows * CELL_SIZE bytes. row < self.rows and
+                // cols <= self.cols, so the offset is in bounds.
+                // src points to a contiguous slice of cols Cell values.
+                unsafe {
+                    let dst = dst_base.add(row * dst_stride);
+                    std::ptr::copy_nonoverlapping(
+                        src.as_ptr() as *const u8,
+                        dst,
+                        row_bytes,
+                    );
                 }
             }
         }
@@ -396,7 +367,7 @@ impl MetalRenderer {
         }
 
         // Reallocate both cell buffers
-        let buffer_size = (self.cols as usize * self.rows as usize * CELL_DATA_SIZE) as u64;
+        let buffer_size = (self.cols as usize * self.rows as usize * CELL_SIZE) as u64;
         self.cell_buffers = [
             self.device
                 .new_buffer(buffer_size, MTLResourceOptions::StorageModeShared),

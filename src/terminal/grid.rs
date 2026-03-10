@@ -29,8 +29,8 @@ bitflags::bitflags! {
 pub struct SavedCursor {
     pub row: u16,
     pub col: u16,
-    pub fg_index: u16,
-    pub bg_index: u16,
+    pub fg_index: u8,
+    pub bg_index: u8,
     pub flags: CellFlags,
     pub charset_g0: u8,
     pub charset_g1: u8,
@@ -74,10 +74,16 @@ pub struct Grid {
 
     // Last printed character (for REP / CSI b)
     pub last_char: char,
+    pub last_atlas: [u8; 2],
 
     // Synchronized output (mode 2026): when the current sync block began.
     // Set by the parser when 2026 is enabled, cleared when disabled.
     pub sync_start: Option<Instant>,
+
+    // Atlas lookup table for ASCII (set once after atlas preload, never changes)
+    ascii_atlas: [[u8; 2]; 128],
+    // Atlas position for space character (used by blank cells)
+    pub space_atlas: [u8; 2],
 
     // Alternate screen buffer
     alt_cells: Vec<Cell>,
@@ -120,12 +126,21 @@ impl Grid {
             active_charset: 0,
             tab_stops,
             last_char: ' ',
+            last_atlas: [0, 0],
             sync_start: None,
             saved_cursor: SavedCursor::default(),
+            ascii_atlas: [[0; 2]; 128],
+            space_atlas: [0, 0],
             alt_cells: Vec::new(),
             alt_ring_offset: 0,
             main_cursor: SavedCursor::default(),
         }
+    }
+
+    /// Set the ASCII atlas lookup table (called once after atlas preload).
+    pub fn set_ascii_atlas(&mut self, table: &[[u8; 2]; 128]) {
+        self.ascii_atlas = *table;
+        self.space_atlas = table[b' ' as usize];
     }
 
     /// Map a logical row to the start index in the cells vec.
@@ -167,9 +182,14 @@ impl Grid {
         self.dirty.fill(false);
     }
 
+    #[inline]
+    fn blank(&self) -> Cell {
+        Cell::blank(&self.attr, self.space_atlas)
+    }
+
     /// Clear row range [from..to) using current SGR background color.
     pub fn clear_rows(&mut self, from: u16, to: u16) {
-        let blank = Cell::blank(&self.attr);
+        let blank = self.blank();
         let cols = self.cols as usize;
         for row in from..to.min(self.rows) {
             let start = self.row_start(row);
@@ -180,7 +200,7 @@ impl Grid {
 
     /// Clear columns [from_col..to_col) using current SGR background color.
     pub fn clear_cols(&mut self, row: u16, from_col: u16, to_col: u16) {
-        let blank = Cell::blank(&self.attr);
+        let blank = self.blank();
         let start = self.row_start(row) + from_col as usize;
         let end = self.row_start(row) + to_col.min(self.cols) as usize;
         self.cells[start..end].fill(blank);
@@ -209,7 +229,7 @@ impl Grid {
             self.ring_offset = (self.ring_offset + n as usize) % self.rows as usize;
 
             // Clear the new bottom rows (old top rows, now at logical bottom)
-            let blank = Cell::blank(&self.attr);
+            let blank = self.blank();
             for i in 0..n {
                 let row = self.rows - n + i;
                 let start = self.row_start(row);
@@ -217,7 +237,7 @@ impl Grid {
             }
         } else if n > self.scroll_bottom - self.scroll_top {
             // Scroll entire region: just clear it
-            let blank = Cell::blank(&self.attr);
+            let blank = self.blank();
             for i in self.scroll_top..=self.scroll_bottom {
                 let start = self.row_start(i);
                 self.cells[start..start + cols].fill(blank);
@@ -231,7 +251,7 @@ impl Grid {
             }
 
             // Clear new rows at bottom of scroll region
-            let blank = Cell::blank(&self.attr);
+            let blank = self.blank();
             for i in (self.scroll_bottom + 1 - n)..=self.scroll_bottom {
                 let start = self.row_start(i);
                 self.cells[start..start + cols].fill(blank);
@@ -261,7 +281,7 @@ impl Grid {
                 (self.ring_offset + self.rows as usize - n as usize) % self.rows as usize;
 
             // Clear the new top rows
-            let blank = Cell::blank(&self.attr);
+            let blank = self.blank();
             for i in 0..n {
                 let start = self.row_start(i);
                 self.cells[start..start + cols].fill(blank);
@@ -275,7 +295,7 @@ impl Grid {
             }
 
             // Clear new rows at top of scroll region
-            let blank = Cell::blank(&self.attr);
+            let blank = self.blank();
             for i in self.scroll_top..self.scroll_top + n {
                 let start = self.row_start(i);
                 self.cells[start..start + cols].fill(blank);
@@ -399,10 +419,7 @@ impl Grid {
     }
 
     /// Bulk-write a run of printable ASCII bytes at the current cursor position.
-    ///
-    /// Semantically equivalent to calling `write_char` for each byte, but
-    /// amortises per-character overhead: `mark_dirty` is called once per row
-    /// touched, and the cell index is incremented rather than recomputed.
+    /// Atlas coords are resolved from the internal ascii_atlas table.
     pub fn write_ascii_run(&mut self, bytes: &[u8]) {
         let cols = self.cols as usize;
         let attr = self.attr;
@@ -432,11 +449,15 @@ impl Grid {
             // Write cells in a tight loop — one index increment per char
             let base = self.row_start(row) + col;
             for j in 0..n {
+                let b = bytes[i + j];
+                let ap = self.ascii_atlas[b as usize];
                 let cell = &mut self.cells[base + j];
-                cell.codepoint = bytes[i + j] as u16;
+                cell.codepoint = b as u16;
                 cell.flags = attr.flags;
                 cell.fg_index = attr.fg_index;
                 cell.bg_index = attr.bg_index;
+                cell.atlas_x = ap[0];
+                cell.atlas_y = ap[1];
             }
             self.mark_dirty(row);
 
@@ -454,7 +475,8 @@ impl Grid {
     }
 
     /// Write a character at the current cursor position with current attributes.
-    pub fn write_char(&mut self, c: char) {
+    /// Atlas coords are provided by the caller (resolved from atlas at parse time).
+    pub fn write_char(&mut self, c: char, atlas_x: u8, atlas_y: u8) {
         if self.cursor_pending_wrap {
             if self.mode.contains(TermMode::AUTO_WRAP) {
                 self.cursor_col = 0;
@@ -477,6 +499,8 @@ impl Grid {
         cell.flags = attr.flags;
         cell.fg_index = attr.fg_index;
         cell.bg_index = attr.bg_index;
+        cell.atlas_x = atlas_x;
+        cell.atlas_y = atlas_y;
         self.mark_dirty(row);
 
         // Advance cursor
@@ -488,7 +512,7 @@ impl Grid {
     }
 
     /// Write a wide character (2 cells). Sets WIDE flag on first cell, WIDE_CONT on second.
-    pub fn write_wide_char(&mut self, c: char) {
+    pub fn write_wide_char(&mut self, c: char, atlas_x: u8, atlas_y: u8) {
         if self.cursor_pending_wrap {
             if self.mode.contains(TermMode::AUTO_WRAP) {
                 self.cursor_col = 0;
@@ -529,6 +553,8 @@ impl Grid {
         cell.flags = attr.flags | CellFlags::WIDE;
         cell.fg_index = attr.fg_index;
         cell.bg_index = attr.bg_index;
+        cell.atlas_x = atlas_x;
+        cell.atlas_y = atlas_y;
 
         // Continuation cell
         let cell2 = &mut self.cells[idx + 1];
@@ -536,6 +562,8 @@ impl Grid {
         cell2.flags = CellFlags::WIDE_CONT;
         cell2.fg_index = attr.fg_index;
         cell2.bg_index = attr.bg_index;
+        cell2.atlas_x = atlas_x;
+        cell2.atlas_y = atlas_y;
 
         self.mark_dirty(row);
 

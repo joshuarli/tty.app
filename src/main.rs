@@ -55,14 +55,18 @@ impl<'a> Perform for TermPerformer<'a> {
                 } else {
                     b as char
                 };
-                self.grid.write_char(ch);
+                let pos = self.atlas.get_or_insert(ch as u16, false, self.rasterizer);
+                self.grid.write_char(ch, pos.x, pos.y);
                 self.grid.last_char = ch;
+                self.grid.last_atlas = [pos.x, pos.y];
             }
         } else {
-            // Fast path: bulk write without per-char overhead
+            // Fast path: bulk write — atlas coords resolved inside Grid from ascii_atlas
             self.grid.write_ascii_run(bytes);
             if let Some(&last) = bytes.last() {
                 self.grid.last_char = last as char;
+                let ap = self.atlas.get_ascii(last);
+                self.grid.last_atlas = [ap.x, ap.y];
             }
         }
     }
@@ -70,26 +74,27 @@ impl<'a> Perform for TermPerformer<'a> {
     fn print(&mut self, c: char) {
         let cp = c as u32;
         if cp > 0xFFFF {
-            // Ensure replacement glyph is rasterized for render-time lookup
-            let _ = self.atlas.get_or_insert(0xFFFD, false, self.rasterizer);
-            self.grid.write_char('\u{FFFD}');
+            let pos = self.atlas.get_or_insert(0xFFFD, false, self.rasterizer);
+            self.grid.write_char('\u{FFFD}', pos.x, pos.y);
             self.grid.last_char = '\u{FFFD}';
+            self.grid.last_atlas = [pos.x, pos.y];
             return;
         }
 
         let wide = is_wide(cp);
 
         if wide {
-            let _ = self.atlas.get_or_insert(cp as u16, true, self.rasterizer);
-            self.grid.write_wide_char(c);
+            let pos = self.atlas.get_or_insert(cp as u16, true, self.rasterizer);
+            self.grid.write_wide_char(c, pos.x, pos.y);
             self.grid.last_char = c;
+            self.grid.last_atlas = [pos.x, pos.y];
         } else if is_zero_width(cp) {
             // Zero-width combining marks — ignore for v1
         } else {
-            // Ensure glyph is rasterized; coords resolved at render time
-            let _ = self.atlas.get_or_insert(cp as u16, false, self.rasterizer);
-            self.grid.write_char(c);
+            let pos = self.atlas.get_or_insert(cp as u16, false, self.rasterizer);
+            self.grid.write_char(c, pos.x, pos.y);
             self.grid.last_char = c;
+            self.grid.last_atlas = [pos.x, pos.y];
         }
     }
 
@@ -281,7 +286,7 @@ impl<'a> Perform for TermPerformer<'a> {
         let dst = row_start + (col + n) as usize;
         let count = (cols - col - n) as usize;
         self.grid.cells.copy_within(src..src + count, dst);
-        let blank = Cell::blank(&self.grid.attr);
+        let blank = Cell::blank(&self.grid.attr, self.grid.space_atlas);
         self.grid.cells[src..src + n as usize].fill(blank);
         self.grid.mark_dirty(row);
     }
@@ -297,7 +302,7 @@ impl<'a> Perform for TermPerformer<'a> {
         let src = row_start + (col + n) as usize;
         let count = (cols - col - n) as usize;
         self.grid.cells.copy_within(src..src + count, dst);
-        let blank = Cell::blank(&self.grid.attr);
+        let blank = Cell::blank(&self.grid.attr, self.grid.space_atlas);
         let fill_start = row_start + (cols - n) as usize;
         self.grid.cells[fill_start..fill_start + n as usize].fill(blank);
         self.grid.mark_dirty(row);
@@ -335,7 +340,7 @@ impl<'a> Perform for TermPerformer<'a> {
                 27 => self.grid.attr.flags.remove(CellFlags::INVERSE),
                 28 => self.grid.attr.flags.remove(CellFlags::HIDDEN),
                 29 => self.grid.attr.flags.remove(CellFlags::STRIKE),
-                30..=37 => self.grid.attr.fg_index = params[i] - 30,
+                30..=37 => self.grid.attr.fg_index = (params[i] - 30) as u8,
                 38 => {
                     i += 1;
                     if i < params.len() {
@@ -343,17 +348,16 @@ impl<'a> Perform for TermPerformer<'a> {
                             5 => {
                                 i += 1;
                                 if i < params.len() {
-                                    self.grid.attr.fg_index = params[i];
+                                    self.grid.attr.fg_index = params[i] as u8;
                                 }
                             }
                             2 => {
                                 if i + 3 < params.len() {
-                                    self.grid.attr.fg_index =
-                                        config::rgb_to_palette(
-                                            params[i + 1] as u8,
-                                            params[i + 2] as u8,
-                                            params[i + 3] as u8,
-                                        ) as u16;
+                                    self.grid.attr.fg_index = config::rgb_to_palette(
+                                        params[i + 1] as u8,
+                                        params[i + 2] as u8,
+                                        params[i + 3] as u8,
+                                    );
                                     i += 3;
                                 }
                             }
@@ -362,7 +366,7 @@ impl<'a> Perform for TermPerformer<'a> {
                     }
                 }
                 39 => self.grid.attr.fg_index = 7,
-                40..=47 => self.grid.attr.bg_index = params[i] - 40,
+                40..=47 => self.grid.attr.bg_index = (params[i] - 40) as u8,
                 48 => {
                     i += 1;
                     if i < params.len() {
@@ -370,17 +374,16 @@ impl<'a> Perform for TermPerformer<'a> {
                             5 => {
                                 i += 1;
                                 if i < params.len() {
-                                    self.grid.attr.bg_index = params[i];
+                                    self.grid.attr.bg_index = params[i] as u8;
                                 }
                             }
                             2 => {
                                 if i + 3 < params.len() {
-                                    self.grid.attr.bg_index =
-                                        config::rgb_to_palette(
-                                            params[i + 1] as u8,
-                                            params[i + 2] as u8,
-                                            params[i + 3] as u8,
-                                        ) as u16;
+                                    self.grid.attr.bg_index = config::rgb_to_palette(
+                                        params[i + 1] as u8,
+                                        params[i + 2] as u8,
+                                        params[i + 3] as u8,
+                                    );
                                     i += 3;
                                 }
                             }
@@ -389,8 +392,8 @@ impl<'a> Perform for TermPerformer<'a> {
                     }
                 }
                 49 => self.grid.attr.bg_index = 0,
-                90..=97 => self.grid.attr.fg_index = params[i] - 90 + 8,
-                100..=107 => self.grid.attr.bg_index = params[i] - 100 + 8,
+                90..=97 => self.grid.attr.fg_index = (params[i] - 90 + 8) as u8,
+                100..=107 => self.grid.attr.bg_index = (params[i] - 100 + 8) as u8,
                 _ => {}
             }
             i += 1;
@@ -424,12 +427,12 @@ impl<'a> Perform for TermPerformer<'a> {
             27 => self.grid.attr.flags.remove(CellFlags::INVERSE),
             28 => self.grid.attr.flags.remove(CellFlags::HIDDEN),
             29 => self.grid.attr.flags.remove(CellFlags::STRIKE),
-            30..=37 => self.grid.attr.fg_index = code - 30,
+            30..=37 => self.grid.attr.fg_index = (code - 30) as u8,
             39 => self.grid.attr.fg_index = 7,
-            40..=47 => self.grid.attr.bg_index = code - 40,
+            40..=47 => self.grid.attr.bg_index = (code - 40) as u8,
             49 => self.grid.attr.bg_index = 0,
-            90..=97 => self.grid.attr.fg_index = code - 90 + 8,
-            100..=107 => self.grid.attr.bg_index = code - 100 + 8,
+            90..=97 => self.grid.attr.fg_index = (code - 90 + 8) as u8,
+            100..=107 => self.grid.attr.bg_index = (code - 100 + 8) as u8,
             _ => {}
         }
     }
@@ -437,15 +440,15 @@ impl<'a> Perform for TermPerformer<'a> {
     #[inline]
     fn color_256(&mut self, fg: bool, index: u16) {
         if fg {
-            self.grid.attr.fg_index = index;
+            self.grid.attr.fg_index = index as u8;
         } else {
-            self.grid.attr.bg_index = index;
+            self.grid.attr.bg_index = index as u8;
         }
     }
 
     #[inline]
     fn color_rgb(&mut self, fg: bool, r: u16, g: u16, b: u16) {
-        let index = config::rgb_to_palette(r as u8, g as u8, b as u8) as u16;
+        let index = config::rgb_to_palette(r as u8, g as u8, b as u8);
         if fg {
             self.grid.attr.fg_index = index;
         } else {
@@ -490,27 +493,27 @@ impl<'a> Perform for TermPerformer<'a> {
                 38 => {
                     // Foreground color: 38:5:N or 38:2:[CS]:R:G:B
                     if subs.len() >= 3 && subs[1] == 5 {
-                        self.grid.attr.fg_index = subs[2];
+                        self.grid.attr.fg_index = subs[2] as u8;
                     } else if subs.len() >= 5 && subs[1] == 2 {
                         let (r, g, b) = if subs.len() >= 6 {
                             (subs[3] as u8, subs[4] as u8, subs[5] as u8)
                         } else {
                             (subs[2] as u8, subs[3] as u8, subs[4] as u8)
                         };
-                        self.grid.attr.fg_index = config::rgb_to_palette(r, g, b) as u16;
+                        self.grid.attr.fg_index = config::rgb_to_palette(r, g, b);
                     }
                 }
                 48 => {
                     // Background color: 48:5:N or 48:2:[CS]:R:G:B
                     if subs.len() >= 3 && subs[1] == 5 {
-                        self.grid.attr.bg_index = subs[2];
+                        self.grid.attr.bg_index = subs[2] as u8;
                     } else if subs.len() >= 5 && subs[1] == 2 {
                         let (r, g, b) = if subs.len() >= 6 {
                             (subs[3] as u8, subs[4] as u8, subs[5] as u8)
                         } else {
                             (subs[2] as u8, subs[3] as u8, subs[4] as u8)
                         };
-                        self.grid.attr.bg_index = config::rgb_to_palette(r, g, b) as u16;
+                        self.grid.attr.bg_index = config::rgb_to_palette(r, g, b);
                     }
                 }
                 58 => {
@@ -959,7 +962,8 @@ impl App {
         atlas.preload_ascii(&rasterizer);
         renderer.atlas_texture = atlas.texture.clone();
 
-        let grid = Grid::new(cols as u16, rows as u16);
+        let mut grid = Grid::new(cols as u16, rows as u16);
+        grid.set_ascii_atlas(&atlas.ascii_table_raw());
         let scrollback = Scrollback::new(config::SCROLLBACK_LINES);
 
         let pty = Pty::spawn(
@@ -1141,7 +1145,7 @@ impl App {
         // A deferred render (GPU buffer busy) is not idle — we want to retry promptly.
         let dispatched =
             self.renderer
-                .render_frame(&mut self.shared.grid, &self.atlas, self.cursor_visible);
+                .render_frame(&mut self.shared.grid, self.cursor_visible);
         !dispatched && !self.renderer.needs_render
     }
 

@@ -27,7 +27,7 @@ impl<'a> Perform for TestPerformer<'a> {
     }
 
     fn print(&mut self, c: char) {
-        self.grid.write_char(c);
+        self.grid.write_char(c, 0, 0);
         self.grid.last_char = c;
     }
 
@@ -262,7 +262,7 @@ impl<'a> Perform for TestPerformer<'a> {
     fn repeat_char(&mut self, n: u16) {
         let c = self.grid.last_char;
         for _ in 0..n {
-            self.grid.write_char(c);
+            self.grid.write_char(c, 0, 0);
         }
     }
     fn sgr_colon(&mut self, _raw: &[u8]) {}

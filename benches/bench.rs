@@ -145,7 +145,7 @@ impl<'a> Perform for BenchPerformer<'a> {
     }
 
     fn print(&mut self, c: char) {
-        self.grid.write_char(c);
+        self.grid.write_char(c, 0, 0);
         self.grid.last_char = c;
     }
 
@@ -346,7 +346,7 @@ impl<'a> Perform for BenchPerformer<'a> {
                 27 => self.grid.attr.flags.remove(CellFlags::INVERSE),
                 28 => self.grid.attr.flags.remove(CellFlags::HIDDEN),
                 29 => self.grid.attr.flags.remove(CellFlags::STRIKE),
-                30..=37 => self.grid.attr.fg_index = params[i] - 30,
+                30..=37 => self.grid.attr.fg_index = (params[i] - 30) as u8,
                 38 => {
                     i += 1;
                     if i < params.len() {
@@ -354,7 +354,7 @@ impl<'a> Perform for BenchPerformer<'a> {
                             5 => {
                                 i += 1;
                                 if i < params.len() {
-                                    self.grid.attr.fg_index = params[i];
+                                    self.grid.attr.fg_index = params[i] as u8;
                                 }
                             }
                             2 => {
@@ -363,8 +363,7 @@ impl<'a> Perform for BenchPerformer<'a> {
                                         params[i + 1] as u8,
                                         params[i + 2] as u8,
                                         params[i + 3] as u8,
-                                    )
-                                        as u16;
+                                    );
                                     i += 3;
                                 }
                             }
@@ -373,7 +372,7 @@ impl<'a> Perform for BenchPerformer<'a> {
                     }
                 }
                 39 => self.grid.attr.fg_index = 7,
-                40..=47 => self.grid.attr.bg_index = params[i] - 40,
+                40..=47 => self.grid.attr.bg_index = (params[i] - 40) as u8,
                 48 => {
                     i += 1;
                     if i < params.len() {
@@ -381,7 +380,7 @@ impl<'a> Perform for BenchPerformer<'a> {
                             5 => {
                                 i += 1;
                                 if i < params.len() {
-                                    self.grid.attr.bg_index = params[i];
+                                    self.grid.attr.bg_index = params[i] as u8;
                                 }
                             }
                             2 => {
@@ -390,8 +389,7 @@ impl<'a> Perform for BenchPerformer<'a> {
                                         params[i + 1] as u8,
                                         params[i + 2] as u8,
                                         params[i + 3] as u8,
-                                    )
-                                        as u16;
+                                    );
                                     i += 3;
                                 }
                             }
@@ -400,8 +398,8 @@ impl<'a> Perform for BenchPerformer<'a> {
                     }
                 }
                 49 => self.grid.attr.bg_index = 0,
-                90..=97 => self.grid.attr.fg_index = params[i] - 90 + 8,
-                100..=107 => self.grid.attr.bg_index = params[i] - 100 + 8,
+                90..=97 => self.grid.attr.fg_index = (params[i] - 90 + 8) as u8,
+                100..=107 => self.grid.attr.bg_index = (params[i] - 100 + 8) as u8,
                 _ => {}
             }
             i += 1;
@@ -435,12 +433,12 @@ impl<'a> Perform for BenchPerformer<'a> {
             27 => self.grid.attr.flags.remove(CellFlags::INVERSE),
             28 => self.grid.attr.flags.remove(CellFlags::HIDDEN),
             29 => self.grid.attr.flags.remove(CellFlags::STRIKE),
-            30..=37 => self.grid.attr.fg_index = code - 30,
+            30..=37 => self.grid.attr.fg_index = (code - 30) as u8,
             39 => self.grid.attr.fg_index = 7,
-            40..=47 => self.grid.attr.bg_index = code - 40,
+            40..=47 => self.grid.attr.bg_index = (code - 40) as u8,
             49 => self.grid.attr.bg_index = 0,
-            90..=97 => self.grid.attr.fg_index = code - 90 + 8,
-            100..=107 => self.grid.attr.bg_index = code - 100 + 8,
+            90..=97 => self.grid.attr.fg_index = (code - 90 + 8) as u8,
+            100..=107 => self.grid.attr.bg_index = (code - 100 + 8) as u8,
             _ => {}
         }
     }
@@ -448,15 +446,15 @@ impl<'a> Perform for BenchPerformer<'a> {
     #[inline]
     fn color_256(&mut self, fg: bool, index: u16) {
         if fg {
-            self.grid.attr.fg_index = index;
+            self.grid.attr.fg_index = index as u8;
         } else {
-            self.grid.attr.bg_index = index;
+            self.grid.attr.bg_index = index as u8;
         }
     }
 
     #[inline]
     fn color_rgb(&mut self, fg: bool, r: u16, g: u16, b: u16) {
-        let index = tty::config::rgb_to_palette(r as u8, g as u8, b as u8) as u16;
+        let index = tty::config::rgb_to_palette(r as u8, g as u8, b as u8);
         if fg {
             self.grid.attr.fg_index = index;
         } else {
@@ -513,7 +511,7 @@ impl<'a> Perform for BenchPerformer<'a> {
     fn repeat_char(&mut self, n: u16) {
         let c = self.grid.last_char;
         for _ in 0..n {
-            self.grid.write_char(c);
+            self.grid.write_char(c, 0, 0);
         }
     }
     fn sgr_colon(&mut self, _raw: &[u8]) {}
@@ -1281,7 +1279,7 @@ fn bench_grid(c: &mut Criterion) {
             b.iter(|| {
                 let mut grid = Grid::new(cols, rows);
                 for _ in 0..total {
-                    grid.write_char('A');
+                    grid.write_char('A', 0, 0);
                 }
                 black_box(&grid);
             });
@@ -1426,7 +1424,7 @@ fn bench_pipeline(c: &mut Criterion) {
                 let chunk: Vec<u8> = (0..10).map(|i| b'A' + i).collect();
                 for row in 0..rows {
                     for seg in 0..12 {
-                        grid.attr.fg_index = ((row * 12 + seg as u16) % 8) + 30;
+                        grid.attr.fg_index = (((row * 12 + seg as u16) % 8) + 30) as u8;
                         grid.write_ascii_run(&chunk);
                     }
                     grid.cursor_col = 0;
@@ -1615,18 +1613,14 @@ fn bench_pipeline(c: &mut Criterion) {
                         continue;
                     }
                     let src_row = grid.row_slice(row);
-                    for (col, cell) in src_row.iter().enumerate() {
-                        let offset = (row as usize * cols as usize + col) * 8;
-                        // SAFETY: gpu_buf is sized for total * 8 bytes
-                        // Pack Cell (8 bytes) → CellData (8 bytes) with u16→u8 index narrowing
-                        unsafe {
-                            let p = dst.add(offset);
-                            *(p as *mut u32) = *(cell as *const Cell as *const u32);
-                            *p.add(4) = cell.fg_index as u8;
-                            *p.add(5) = cell.bg_index as u8;
-                            *p.add(6) = 0; // atlas_x placeholder
-                            *p.add(7) = 0; // atlas_y placeholder
-                        }
+                    let offset = row as usize * cols as usize * 8;
+                    // Cell IS the GPU format — straight memcpy per row
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            src_row.as_ptr() as *const u8,
+                            dst.add(offset),
+                            src_row.len() * 8,
+                        );
                     }
                 }
                 black_box(&gpu_buf);
@@ -1656,16 +1650,14 @@ fn bench_pipeline(c: &mut Criterion) {
                         continue;
                     }
                     let src_row = grid.row_slice(row);
-                    for (col, cell) in src_row.iter().enumerate() {
-                        let offset = (row as usize * cols as usize + col) * 8;
-                        unsafe {
-                            let p = dst.add(offset);
-                            *(p as *mut u32) = *(cell as *const Cell as *const u32);
-                            *p.add(4) = cell.fg_index as u8;
-                            *p.add(5) = cell.bg_index as u8;
-                            *p.add(6) = 0;
-                            *p.add(7) = 0;
-                        }
+                    let offset = row as usize * cols as usize * 8;
+                    // Cell IS the GPU format — straight memcpy per row
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            src_row.as_ptr() as *const u8,
+                            dst.add(offset),
+                            src_row.len() * 8,
+                        );
                     }
                 }
                 black_box(&gpu_buf);
@@ -1863,7 +1855,7 @@ fn bench_alloc_audit(c: &mut Criterion) {
         let mut grid = Grid::new(80, 24);
         let stats = measure_allocs(|| {
             for _ in 0..80 * 24 {
-                grid.write_char('X');
+                grid.write_char('X', 0, 0);
             }
         });
         eprintln!("  [alloc] write_char_fill_80x24:     {stats}");
@@ -1933,14 +1925,19 @@ fn bench_alloc_audit(c: &mut Criterion) {
 
 // ---------------------------------------------------------------------------
 
-criterion_group!(
-    benches,
-    bench_parser,
-    bench_simd,
-    bench_grid,
-    bench_pipeline,
-    bench_scrollback,
-    bench_end_to_end,
-    bench_alloc_audit,
-);
+criterion_group! {
+    name = benches;
+    config = Criterion::default()
+        .sample_size(30)
+        .warm_up_time(std::time::Duration::from_secs(1))
+        .measurement_time(std::time::Duration::from_secs(2));
+    targets =
+        bench_parser,
+        bench_simd,
+        bench_grid,
+        bench_pipeline,
+        bench_scrollback,
+        bench_end_to_end,
+        bench_alloc_audit,
+}
 criterion_main!(benches);

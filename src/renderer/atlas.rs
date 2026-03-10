@@ -93,12 +93,13 @@ impl Atlas {
         self.ascii_table[cp as usize]
     }
 
-    /// Look up a previously-rasterized glyph without triggering rasterization.
-    /// Returns default (0,0) if the glyph is not in the atlas.
-    #[inline]
-    pub fn get_cached(&self, codepoint: u16, wide: bool) -> AtlasPos {
-        let key = GlyphKey { codepoint, wide };
-        self.map.get(&key).copied().unwrap_or_default()
+    /// Get the ASCII atlas table as [x, y] pairs for Grid initialization.
+    pub fn ascii_table_raw(&self) -> [[u8; 2]; 128] {
+        let mut out = [[0u8; 2]; 128];
+        for (i, pos) in self.ascii_table.iter().enumerate() {
+            out[i] = [pos.x, pos.y];
+        }
+        out
     }
 
     /// Look up or rasterize a glyph, returning its atlas position.

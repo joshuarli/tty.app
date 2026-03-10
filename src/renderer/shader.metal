@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// Must match Rust CellData layout exactly (8 bytes)
+// Must match Rust Cell layout exactly (8 bytes)
 struct CellData {
     ushort codepoint;
     ushort flags;
