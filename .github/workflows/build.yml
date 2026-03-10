@@ -33,4 +33,4 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           V="${VERSION#release/}"
-          gh release create "$VERSION" "target/aarch64-apple-darwin/release/denv#denv-${V}-aarch64-apple-darwin" --title "$V"
+          gh release create "$VERSION" "tty.app.zip#tty-${V}-aarch64-apple-darwin.zip" --title "$V"

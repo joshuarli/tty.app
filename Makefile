@@ -40,10 +40,10 @@ release: release-bin icon
 	cp Info.plist $(APP)/Contents/
 	cp icon.icns $(APP)/Contents/Resources/
 	cp target/$(TARGET)/release/$(NAME) $(APP)/Contents/MacOS/
-	zip -r $(NAME)-$(TARGET).zip $(APP)
+	zip -r $(APP).zip $(APP)
 
 install: release
-	unzip -o $(NAME)-$(TARGET).zip -d /Applications
+	unzip -o $(APP).zip -d /Applications
 	codesign --force --sign - /Applications/$(APP)
 	@echo "Installed to /Applications/$(APP)"
 
