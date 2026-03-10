@@ -23,14 +23,14 @@ src/
 ├── pty/
 │   └── mod.rs              # forkpty, non-blocking read/write, TIOCSWINSZ resize
 ├── renderer/
-│   ├── metal.rs            # Metal device, double-buffered cell upload, compute dispatch
+│   ├── metal.rs            # Metal device, double-buffered per-dirty-row upload, compute dispatch
 │   ├── shader.metal        # Per-pixel compute kernel: bg → glyph → decoration → cursor
 │   ├── atlas.rs            # 2048×2048 R8Unorm glyph atlas with LRU eviction
 │   ├── font.rs             # CoreText rasterization → 8-bit alpha bitmaps
 │   └── mod.rs
 └── terminal/
-    ├── cell.rs             # Cell struct (repr(C), 16 bytes), CellFlags bitfield
-    ├── grid.rs             # Grid (flat Vec<Cell>), dirty BitVec, scroll, alt-screen
+    ├── cell.rs             # Cell struct (repr(C), 8 bytes) — IS the GPU format directly
+    ├── grid.rs             # Ring buffer grid (flat Vec<Cell>), dirty BitVec, scroll, alt-screen
     ├── scrollback.rs       # Ring buffer of evicted rows
     └── mod.rs
 ```
@@ -52,47 +52,69 @@ Parser.parse()
   ▼
 TermPerformer (implements Perform trait)
   Bridges parser actions → Grid mutations
-  Also handles: atlas glyph insertion, scrollback pushes, response buffer
+  Resolves atlas coords at write time (not render time):
+    - ASCII runs: Grid's internal ascii_atlas[128] table → O(1) per byte
+    - Non-ASCII: atlas.get_or_insert() → rasterize if needed, return (x, y)
+  Also handles: scrollback pushes, response buffer
   │
   ▼
-Grid.cells: Vec<Cell>  (row-major, flat)
+Grid (ring buffer)
+  cells: Vec<Cell> — ring_offset maps logical → physical rows via modular arithmetic
   dirty: BitVec — one bit per row, set on any mutation
+  Full-screen scroll: bumps ring_offset, O(cols) to clear one row
+  Partial scroll (within region): copy_within for affected rows
   │
   ▼
 MetalRenderer.render_frame()
-  1. Check dirty.any() — skip frame if nothing changed
-  2. Spin-wait for GPU to release current buffer (AtomicBool)
-  3. ptr::copy_nonoverlapping(grid.cells → cell_buffer)  ← bulk memcpy, ~5μs
-  4. Acquire next drawable (retry next frame if None — needs_render flag set)
-  5. Dispatch compute shader (one thread per output pixel, 16×16 threadgroups)
-  6. add_completed_handler → set buffer_ready = true
-  7. commit() — returns immediately, GPU works async
-  8. Swap to other cell buffer for next frame
+  1. Merge grid dirty bits → per-buffer pending bitsets (both buffers)
+  2. Skip frame if no dirty rows and no deferred render
+  3. If GPU still reading current buffer → defer to next frame (non-blocking)
+  4. Per dirty row: ptr::copy_nonoverlapping(grid.row_slice() → cell_buffer)
+     Cell IS the GPU format — no conversion, no packing loop
+  5. Acquire next drawable (retry next frame if None)
+  6. Dispatch compute shader (one thread per output pixel, 16×16 threadgroups)
+  7. add_completed_handler → set buffer_ready = true
+  8. commit() — returns immediately, GPU works async
+  9. Swap to other cell buffer for next frame
 ```
 
 ## Key Design Decisions
 
-### Cell ≡ CellData (zero-copy GPU upload)
+### Cell = GPU format (8 bytes, zero-copy upload)
 
-`Cell` (CPU) and `CellData` (GPU) are both `#[repr(C)]`, 16 bytes, identical layout:
+`Cell` is `#[repr(C)]`, 8 bytes, and IS the Metal shader's `CellData` format directly:
 
 ```
 offset  type   field
 0       u16    codepoint
-2       u16    flags (bitflags)
-4       u8     fg_index    (0xFF = use fg_rgb)
-5       u8     bg_index    (0xFF = use bg_rgb)
-6       u8     atlas_x     (glyph position in atlas grid)
+2       u16    flags (CellFlags bitfield)
+4       u8     fg_index   (palette index 0-255)
+5       u8     bg_index   (palette index 0-255)
+6       u8     atlas_x    (glyph position in atlas grid)
 7       u8     atlas_y
-8       u32    fg_rgb      (0x00RRGGBB)
-12      u32    bg_rgb
 ```
 
-This allows the entire grid to be uploaded with a single memcpy. Bold brightness remapping (`palette 0-7 → 8-15`) and hidden attribute (`fg = bg`) are handled in the shader, not CPU-side, to preserve layout identity.
+Atlas coordinates are resolved once at write time — when a character is printed, the atlas position is looked up (or the glyph is rasterized) and stored directly in the Cell. This means the render path is pure memcpy with no per-cell work. Bold brightness remapping (`palette 0-7 → 8-15`) and hidden attribute (`fg = bg`) are handled in the shader, not CPU-side.
+
+No truecolor (24-bit RGB) storage in Cell — truecolor SGR values are mapped to the nearest 256-color palette index via `rgb_to_palette()` at parse time.
+
+### Ring buffer grid
+
+The grid's `ring_offset` maps logical row 0 to a physical row in the flat `Vec<Cell>`. Full-screen scroll (the most common case — every newline at the bottom) just increments `ring_offset` and clears one row, avoiding an O(rows×cols) memmove. `row_start()` and `row_slice()` handle the modular arithmetic transparently.
+
+Partial scrolls within a scroll region still use `copy_within` since only a subset of rows move.
+
+### Per-dirty-row GPU upload
+
+Each frame, only rows marked dirty are copied to the GPU buffer. The renderer maintains per-buffer pending bitsets (one per double-buffer slot) so that a row dirtied while the GPU reads buffer A is also queued for buffer B. Upload is `copy_nonoverlapping` per row — no per-cell packing loop, no format conversion.
+
+### ASCII atlas table
+
+Grid stores `ascii_atlas: [[u8; 2]; 128]` — atlas (x, y) for every ASCII codepoint. Set once after atlas preload. `write_ascii_run()` indexes this table per byte to fill atlas_x/atlas_y, avoiding HashMap lookups for the common case (printable ASCII is ~95% of terminal traffic).
 
 ### Double-buffered async GPU
 
-Two cell buffers alternate. CPU writes to buffer A while GPU reads buffer B. An `AtomicBool` per buffer is set by a Metal completed handler when the GPU finishes. The render path spin-waits if the target buffer is still in flight (rare in practice — GPU is at most one frame behind).
+Two cell buffers alternate. CPU writes to buffer A while GPU reads buffer B. An `AtomicBool` per buffer is set by a Metal completed handler when the GPU finishes. The render path skips the frame (non-blocking) if the target buffer is still in flight, setting `needs_render` to retry next iteration.
 
 ### Synchronized output (Mode 2026)
 
@@ -117,7 +139,7 @@ loop {
     1. app.process_pty_output()   — drain PTY, feed parser
     2. win.poll_events()          — drain AppKit events (keys, mouse, resize, focus)
     3. app.handle_event()         — translate events → PTY writes / state changes
-    4. app.render()               — drains PTY again, then uploads grid, dispatches GPU
+    4. app.render()               — drains PTY again, then uploads dirty rows, dispatches GPU
     5. if idle → kqueue wait      — block on PTY fd with 8ms timeout
 }
 ```
@@ -134,15 +156,15 @@ Native macOS windowing via `objc2` / `objc2-app-kit` (no winit). `NativeWindow` 
 
 ### main.rs
 
-`App` struct owns all state. `SharedState` groups the grid, scrollback, response buffer, and alive flag. `TermPerformer` is a short-lived borrow of these components, created per PTY read chunk.
+`App` struct owns all state. `SharedState` groups the grid, scrollback, response buffer, and alive flag. `TermPerformer` is a short-lived borrow of these components plus the atlas, created per PTY read chunk.
 
 The `Perform` trait implementation in `TermPerformer` covers:
-- Character printing (ASCII runs + single Unicode chars with charset translation)
+- Character printing (ASCII runs via Grid's ascii_atlas + single Unicode chars with atlas lookup at write time)
 - All cursor movement (relative, absolute, save/restore)
 - Erase operations (display, line, characters)
 - Scrolling (up/down within scroll region)
 - Line/character insert/delete
-- SGR parsing (8-color, 256-color, 24-bit RGB; bold/dim/italic/underline/inverse/hidden/strike)
+- SGR parsing (8-color, 256-color, 24-bit RGB degraded to 256-color; bold/dim/italic/underline/inverse/hidden/strike)
 - SGR colon sub-parameters (underline styles `4:N`, `38:2::R:G:B`, `48:2::R:G:B`)
 - Mode set/reset (DECSET/DECRST: cursor keys, origin mode, autowrap, cursor visible, alt-screen, mouse, focus events, bracketed paste, sync output)
 - OSC dispatch (window title, clipboard via OSC 52)
@@ -161,13 +183,13 @@ Parses CSI parameters inline (up to 16 semicolon-separated u16 values). Colon su
 
 ### terminal/grid.rs
 
-The grid is a flat `Vec<Cell>` indexed as `row * cols + col`. Scroll operations use `copy_within` (memmove). Alt-screen swap is a `std::mem::swap` of the cell vectors. Resize preserves content where possible and rebuilds tab stops.
+The grid is a flat `Vec<Cell>` with ring buffer addressing: `row_start(logical_row)` computes `((logical_row + ring_offset) % rows) * cols`. Full-screen scroll increments `ring_offset` and clears the new bottom row. Partial scrolls within a scroll region use `copy_within` (memmove). Alt-screen swap is a `std::mem::swap` of the cell vectors and ring offsets. Resize flattens the ring buffer (copies to a new vec), preserves content where possible, and rebuilds tab stops.
 
 `TermMode` bitflags track all DECSET modes. `SavedCursor` captures cursor position + SGR attributes + charset state for DECSC/DECRC and alt-screen transitions.
 
 ### renderer/atlas.rs
 
-Grid-based packing in a 2048×2048 texture. Each slot is one cell wide (`cell_width` pixels); wide CJK glyphs overflow into the adjacent slot's pixel space. ASCII glyphs (0x20-0x7E) are pre-loaded and pinned (never evicted). Non-ASCII glyphs use LRU eviction (the `frame` counter tracks last-access; `evict_lru()` finds the minimum). Font fallback uses `CTFontCreateForString` to find system fonts for missing glyphs.
+Grid-based packing in a 2048×2048 texture. Each slot is one cell wide (`cell_width` pixels); wide CJK glyphs overflow into the adjacent slot's pixel space. ASCII glyphs (0x20-0x7E) are pre-loaded and pinned (never evicted). Non-ASCII glyphs use LRU eviction (the `frame` counter tracks last-access; `evict_lru()` finds the minimum). Font fallback uses `CTFontCreateForString` to find system fonts for missing glyphs. `ascii_table_raw()` exports the preloaded ASCII positions for Grid's `ascii_atlas` table.
 
 ### renderer/shader.metal
 
@@ -176,7 +198,7 @@ The compute kernel processes every pixel in the framebuffer:
 2. Padding region → default background
 3. Wide continuation cells → sample right half of owner's glyph
 4. Bold → remap palette index 0-7 to 8-15
-5. Resolve fg/bg colors (palette lookup or RGB unpack)
+5. Resolve fg/bg colors from 256-entry palette
 6. Hidden → fg = bg; Inverse → swap fg/bg; Selected → swap fg/bg
 7. Box drawing (U+2500..U+257F) → procedural from lookup table, not atlas
 8. Normal glyphs → alpha blend from atlas texture
