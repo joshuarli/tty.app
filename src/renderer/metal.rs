@@ -245,12 +245,12 @@ impl MetalRenderer {
             self.prev_cursor_visible = cursor_visible;
         }
 
-        // Only render when there are NEW dirty rows, cursor changed, or a deferred render to retry.
-        if !had_new_dirty && !cursor_changed && !self.needs_render {
-            return false;
-        }
-
-        if !self.pending[cur].any() && !self.needs_render {
+        // Render when: new dirty rows, cursor changed, deferred render, or pending
+        // rows in the current buffer (from a previous frame's dirty merge that was
+        // uploaded to the other buffer but not this one — both buffers must stay in sync).
+        let need_frame =
+            had_new_dirty || cursor_changed || self.needs_render || self.pending[cur].any();
+        if !need_frame {
             return false;
         }
 
