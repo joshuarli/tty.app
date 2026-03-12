@@ -70,6 +70,11 @@ pub struct MetalRenderer {
 
     // Track whether we need to render (deferred frame or previous drawable miss)
     pub(crate) needs_render: bool,
+
+    // Previous cursor state — re-render when cursor moves without dirtying cells
+    prev_cursor_row: u32,
+    prev_cursor_col: u32,
+    prev_cursor_visible: bool,
 }
 
 impl MetalRenderer {
@@ -177,6 +182,9 @@ impl MetalRenderer {
             scale_factor,
             notch_px,
             needs_render: true,
+            prev_cursor_row: 0,
+            prev_cursor_col: 0,
+            prev_cursor_visible: true,
         }
     }
 
@@ -225,8 +233,20 @@ impl MetalRenderer {
         }
         grid.clear_dirty();
 
-        // Only render when there are NEW dirty rows or a deferred render to retry.
-        if !had_new_dirty && !self.needs_render {
+        // Cursor is a uniform overlay — detect position/visibility changes
+        let cursor_row = grid.cursor_row as u32;
+        let cursor_col = grid.cursor_col as u32;
+        let cursor_changed = cursor_row != self.prev_cursor_row
+            || cursor_col != self.prev_cursor_col
+            || cursor_visible != self.prev_cursor_visible;
+        if cursor_changed {
+            self.prev_cursor_row = cursor_row;
+            self.prev_cursor_col = cursor_col;
+            self.prev_cursor_visible = cursor_visible;
+        }
+
+        // Only render when there are NEW dirty rows, cursor changed, or a deferred render to retry.
+        if !had_new_dirty && !cursor_changed && !self.needs_render {
             return false;
         }
 

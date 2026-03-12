@@ -6,7 +6,6 @@ bitflags::bitflags! {
         const UNDERLINE  = 0x0004;
         const STRIKE     = 0x0008;
         const INVERSE    = 0x0010;
-        const CURSOR     = 0x0020;
         const SELECTED   = 0x0040;
         const BOLD       = 0x0080;  // triggers bright color mapping
         const ITALIC     = 0x0100;

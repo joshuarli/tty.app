@@ -921,10 +921,6 @@ struct App {
     mouse_pressed: bool,
     cursor_pos: (f64, f64), // Physical pixel position of mouse cursor
 
-    // Previous cursor position for clearing stale cursor flags
-    prev_cursor_row: u16,
-    prev_cursor_col: u16,
-
     // Accumulated scroll delta (in logical points) for fractional accumulation
     scroll_accumulator: f64,
 
@@ -995,8 +991,6 @@ impl App {
             prev_sel_rows: None,
             mouse_pressed: false,
             cursor_pos: (0.0, 0.0),
-            prev_cursor_row: 0,
-            prev_cursor_col: 0,
             scroll_accumulator: 0.0,
             pty_buf: vec![0u8; 65536],
         }
@@ -1105,41 +1099,7 @@ impl App {
         }
 
         // Cursor visible when DECTCEM (CURSOR_VISIBLE mode) is set
-        let prev_visible = self.cursor_visible;
         self.cursor_visible = self.shared.grid.mode.contains(TermMode::CURSOR_VISIBLE);
-
-        // Update cursor cell flag — only if position or visibility changed
-        let cursor_row = self.shared.grid.cursor_row;
-        let cursor_col = self.shared.grid.cursor_col;
-        let prev_row = self.prev_cursor_row;
-        let prev_col = self.prev_cursor_col;
-        let cursor_moved = cursor_row != prev_row || cursor_col != prev_col;
-        let blink_changed = self.cursor_visible != prev_visible;
-
-        if cursor_moved || blink_changed {
-            // Clear CURSOR flag from previous position
-            if prev_row < self.shared.grid.rows && prev_col < self.shared.grid.cols {
-                self.shared
-                    .grid
-                    .cell_mut(prev_row, prev_col)
-                    .flags
-                    .remove(CellFlags::CURSOR);
-                self.shared.grid.mark_dirty(prev_row);
-            }
-
-            // Set CURSOR flag at new position (only if visible)
-            if self.cursor_visible {
-                self.shared
-                    .grid
-                    .cell_mut(cursor_row, cursor_col)
-                    .flags
-                    .insert(CellFlags::CURSOR);
-            }
-            self.shared.grid.mark_dirty(cursor_row);
-
-            self.prev_cursor_row = cursor_row;
-            self.prev_cursor_col = cursor_col;
-        }
 
         // render_frame returns true when GPU work was dispatched, false when idle.
         // A deferred render (GPU buffer busy) is not idle — we want to retry promptly.

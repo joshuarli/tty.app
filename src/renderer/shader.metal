@@ -32,7 +32,6 @@ constant ushort FLAG_WIDE_CONT  = 0x0002;
 constant ushort FLAG_UNDERLINE  = 0x0004;
 constant ushort FLAG_STRIKE     = 0x0008;
 constant ushort FLAG_INVERSE    = 0x0010;
-constant ushort FLAG_CURSOR     = 0x0020;
 constant ushort FLAG_SELECTED   = 0x0040;
 constant ushort FLAG_BOLD       = 0x0080;
 constant ushort FLAG_HIDDEN     = 0x0400;
@@ -269,9 +268,8 @@ kernel void render(
         }
     }
 
-    // Cursor (block = invert entire cell)
-    if ((cell.flags & FLAG_CURSOR) && uni.cursor_visible != 0) {
-        // Invert what we have
+    // Cursor (block = invert entire cell) — position from uniforms, not cell flags
+    if (row == uni.cursor_row && col == uni.cursor_col && uni.cursor_visible != 0) {
         color = half4(1.0h - color.r, 1.0h - color.g, 1.0h - color.b, 1.0h);
     }
 
