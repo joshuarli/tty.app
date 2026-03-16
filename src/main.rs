@@ -55,7 +55,7 @@ impl<'a> Perform for TermPerformer<'a> {
                 } else {
                     b as char
                 };
-                let pos = self.atlas.get_or_insert(ch as u16, false, self.rasterizer);
+                let pos = self.atlas.get_or_insert(ch as u32, false, self.rasterizer);
                 self.grid.write_char(ch, pos.x, pos.y);
                 self.grid.last_char = ch;
                 self.grid.last_atlas = [pos.x, pos.y];
@@ -73,25 +73,17 @@ impl<'a> Perform for TermPerformer<'a> {
 
     fn print(&mut self, c: char) {
         let cp = c as u32;
-        if cp > 0xFFFF {
-            let pos = self.atlas.get_or_insert(0xFFFD, false, self.rasterizer);
-            self.grid.write_char('\u{FFFD}', pos.x, pos.y);
-            self.grid.last_char = '\u{FFFD}';
-            self.grid.last_atlas = [pos.x, pos.y];
-            return;
-        }
-
         let wide = is_wide(cp);
 
         if wide {
-            let pos = self.atlas.get_or_insert(cp as u16, true, self.rasterizer);
+            let pos = self.atlas.get_or_insert(cp, true, self.rasterizer);
             self.grid.write_wide_char(c, pos.x, pos.y);
             self.grid.last_char = c;
             self.grid.last_atlas = [pos.x, pos.y];
         } else if is_zero_width(cp) {
             // Zero-width combining marks — ignore for v1
         } else {
-            let pos = self.atlas.get_or_insert(cp as u16, false, self.rasterizer);
+            let pos = self.atlas.get_or_insert(cp, false, self.rasterizer);
             self.grid.write_char(c, pos.x, pos.y);
             self.grid.last_char = c;
             self.grid.last_atlas = [pos.x, pos.y];
@@ -276,36 +268,11 @@ impl<'a> Perform for TermPerformer<'a> {
     }
 
     fn insert_chars(&mut self, n: u16) {
-        let row = self.grid.cursor_row;
-        let col = self.grid.cursor_col;
-        let cols = self.grid.cols;
-        let n = n.min(cols - col);
-
-        let row_start = self.grid.row_start(row);
-        let src = row_start + col as usize;
-        let dst = row_start + (col + n) as usize;
-        let count = (cols - col - n) as usize;
-        self.grid.cells.copy_within(src..src + count, dst);
-        let blank = Cell::blank(&self.grid.attr, self.grid.space_atlas);
-        self.grid.cells[src..src + n as usize].fill(blank);
-        self.grid.mark_dirty(row);
+        self.grid.insert_chars(n);
     }
 
     fn delete_chars(&mut self, n: u16) {
-        let row = self.grid.cursor_row;
-        let col = self.grid.cursor_col;
-        let cols = self.grid.cols;
-        let n = n.min(cols - col);
-
-        let row_start = self.grid.row_start(row);
-        let dst = row_start + col as usize;
-        let src = row_start + (col + n) as usize;
-        let count = (cols - col - n) as usize;
-        self.grid.cells.copy_within(src..src + count, dst);
-        let blank = Cell::blank(&self.grid.attr, self.grid.space_atlas);
-        let fill_start = row_start + (cols - n) as usize;
-        self.grid.cells[fill_start..fill_start + n as usize].fill(blank);
-        self.grid.mark_dirty(row);
+        self.grid.delete_chars(n);
     }
 
     fn erase_chars(&mut self, n: u16) {
@@ -884,10 +851,16 @@ impl<'a> Perform for TermPerformer<'a> {
 
 fn is_wide(cp: u32) -> bool {
     matches!(cp,
+        // East Asian Wide
         0x1100..=0x115F | 0x2E80..=0x303E | 0x3041..=0x33BF |
         0x3400..=0x4DBF | 0x4E00..=0xA4CF | 0xA960..=0xA97C |
         0xAC00..=0xD7A3 | 0xF900..=0xFAFF | 0xFE10..=0xFE6F |
-        0xFF01..=0xFF60 | 0xFFE0..=0xFFE6
+        0xFF01..=0xFF60 | 0xFFE0..=0xFFE6 |
+        // Supplementary CJK
+        0x20000..=0x2FA1F |
+        // Emoji (wide per UAX #11)
+        0x1F000..=0x1F02F | 0x1F0A0..=0x1F0FF |
+        0x1F300..=0x1F9FF | 0x1FA00..=0x1FA6F | 0x1FA70..=0x1FAFF
     )
 }
 
@@ -1139,9 +1112,8 @@ impl App {
                     if cell.flags.contains(CellFlags::WIDE_CONT) {
                         continue;
                     }
-                    if cell.codepoint >= 0x20
-                        && let Some(ch) = char::from_u32(cell.codepoint as u32)
-                    {
+                    let ch = self.shared.grid.char_at(row, col);
+                    if ch >= ' ' {
                         text.push(ch);
                     }
                 }

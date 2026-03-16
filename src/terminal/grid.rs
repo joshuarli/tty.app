@@ -38,6 +38,14 @@ pub struct SavedCursor {
 
 pub struct Grid {
     pub cells: Vec<Cell>,
+    /// Parallel char store for non-BMP codepoints. Only consulted when
+    /// cell.codepoint == 0 (the non-BMP sentinel). BMP and ASCII chars are
+    /// read directly from Cell.codepoint, so this vec is NOT maintained on
+    /// ASCII/BMP write paths — only written for non-BMP codepoints.
+    chars: Vec<char>,
+    /// True if any non-BMP codepoint has been written since last full clear.
+    /// Gates chars maintenance in scroll/insert/delete (skip when false).
+    has_non_bmp: bool,
     pub cols: u16,
     pub rows: u16,
     pub dirty: BitVec,
@@ -87,6 +95,7 @@ pub struct Grid {
 
     // Alternate screen buffer
     alt_cells: Vec<Cell>,
+    alt_chars: Vec<char>,
     alt_ring_offset: usize,
     main_cursor: SavedCursor,
 }
@@ -109,6 +118,8 @@ impl Grid {
         };
 
         Grid {
+            chars: vec![' '; total],
+            has_non_bmp: false,
             cells,
             cols,
             rows,
@@ -132,6 +143,7 @@ impl Grid {
             ascii_atlas: [[0; 2]; 128],
             space_atlas: [0, 0],
             alt_cells: Vec::new(),
+            alt_chars: Vec::new(),
             alt_ring_offset: 0,
             main_cursor: SavedCursor::default(),
         }
@@ -167,6 +179,20 @@ impl Grid {
         &mut self.cells[idx]
     }
 
+    /// Real codepoint for a cell (supports non-BMP unlike Cell.codepoint).
+    /// BMP chars are read from Cell.codepoint; non-BMP (sentinel 0) from chars vec.
+    #[inline]
+    pub fn char_at(&self, row: u16, col: u16) -> char {
+        let idx = self.row_start(row) + col as usize;
+        let cp = self.cells[idx].codepoint;
+        if cp != 0 {
+            // SAFETY: BMP codepoints stored in Cell are always valid Unicode.
+            unsafe { char::from_u32_unchecked(cp as u32) }
+        } else {
+            self.chars[idx]
+        }
+    }
+
     #[inline]
     pub fn mark_dirty(&mut self, row: u16) {
         if (row as usize) < self.dirty.len() {
@@ -194,6 +220,7 @@ impl Grid {
         for row in from..to.min(self.rows) {
             let start = self.row_start(row);
             self.cells[start..start + cols].fill(blank);
+            // blank.codepoint = 0x20 (non-zero) → char_at reads from cell, chars is stale-safe
             self.mark_dirty(row);
         }
     }
@@ -244,10 +271,14 @@ impl Grid {
             }
         } else {
             // Partial scroll region: copy row by row
+            let sync_chars = self.has_non_bmp;
             for i in self.scroll_top..=self.scroll_bottom - n {
                 let src = self.row_start(i + n);
                 let dst = self.row_start(i);
                 self.cells.copy_within(src..src + cols, dst);
+                if sync_chars {
+                    self.chars.copy_within(src..src + cols, dst);
+                }
             }
 
             // Clear new rows at bottom of scroll region
@@ -288,10 +319,14 @@ impl Grid {
             }
         } else {
             // Partial: copy row by row (from bottom to top to avoid clobbering)
+            let sync_chars = self.has_non_bmp;
             for i in (self.scroll_top + n..=self.scroll_bottom).rev() {
                 let src = self.row_start(i - n);
                 let dst = self.row_start(i);
                 self.cells.copy_within(src..src + cols, dst);
+                if sync_chars {
+                    self.chars.copy_within(src..src + cols, dst);
+                }
             }
 
             // Clear new rows at top of scroll region
@@ -320,6 +355,9 @@ impl Grid {
         self.alt_cells.clear();
         self.alt_cells.resize(total, Cell::default());
         std::mem::swap(&mut self.cells, &mut self.alt_cells);
+        self.alt_chars.clear();
+        self.alt_chars.resize(total, ' ');
+        std::mem::swap(&mut self.chars, &mut self.alt_chars);
 
         // Save main ring offset, reset for alt screen
         self.alt_ring_offset = self.ring_offset;
@@ -338,6 +376,8 @@ impl Grid {
         self.mode.remove(TermMode::ALT_SCREEN);
         std::mem::swap(&mut self.cells, &mut self.alt_cells);
         self.alt_cells.clear();
+        std::mem::swap(&mut self.chars, &mut self.alt_chars);
+        self.alt_chars.clear();
 
         // Restore main ring offset
         self.ring_offset = self.alt_ring_offset;
@@ -381,7 +421,9 @@ impl Grid {
 
     /// Resize the grid. Existing content is preserved where possible.
     pub fn resize(&mut self, new_cols: u16, new_rows: u16) {
-        let mut new_cells = vec![Cell::default(); new_cols as usize * new_rows as usize];
+        let new_total = new_cols as usize * new_rows as usize;
+        let mut new_cells = vec![Cell::default(); new_total];
+        let mut new_chars = vec![' '; new_total];
         let copy_rows = self.rows.min(new_rows) as usize;
         let copy_cols = self.cols.min(new_cols) as usize;
 
@@ -391,9 +433,12 @@ impl Grid {
             let dst_start = row * new_cols as usize;
             new_cells[dst_start..dst_start + copy_cols]
                 .copy_from_slice(&self.cells[src_start..src_start + copy_cols]);
+            new_chars[dst_start..dst_start + copy_cols]
+                .copy_from_slice(&self.chars[src_start..src_start + copy_cols]);
         }
 
         self.cells = new_cells;
+        self.chars = new_chars;
         self.cols = new_cols;
         self.rows = new_rows;
         self.ring_offset = 0; // Flatten ring on resize
@@ -443,6 +488,8 @@ impl Grid {
             let n = space.min(bytes.len() - i);
 
             // Write cells in a tight loop — one index increment per char
+            // No chars[] update needed: cell.codepoint is set to the ASCII value
+            // (non-zero), so char_at() reads directly from the cell.
             let base = self.row_start(row) + col;
             for j in 0..n {
                 let b = bytes[i + j];
@@ -490,8 +537,17 @@ impl Grid {
 
         let idx = self.row_start(row) + col as usize;
         let attr = self.attr;
+        let cp = c as u32;
         let cell = &mut self.cells[idx];
-        cell.codepoint = c as u16;
+        // BMP: store codepoint directly (char_at reads from cell).
+        // Non-BMP: store 0 sentinel, write real char to chars vec.
+        if cp <= 0xFFFF {
+            cell.codepoint = cp as u16;
+        } else {
+            cell.codepoint = 0;
+            self.chars[idx] = c;
+            self.has_non_bmp = true;
+        }
         cell.flags = attr.flags;
         cell.fg_index = attr.fg_index;
         cell.bg_index = attr.bg_index;
@@ -505,6 +561,47 @@ impl Grid {
         } else {
             self.cursor_col += 1;
         }
+    }
+
+    /// Insert n blank characters at the cursor, shifting existing content right.
+    pub fn insert_chars(&mut self, n: u16) {
+        let row = self.cursor_row;
+        let col = self.cursor_col;
+        let cols = self.cols;
+        let n = n.min(cols - col);
+
+        let row_start = self.row_start(row);
+        let src = row_start + col as usize;
+        let dst = row_start + (col + n) as usize;
+        let count = (cols - col - n) as usize;
+        self.cells.copy_within(src..src + count, dst);
+        if self.has_non_bmp {
+            self.chars.copy_within(src..src + count, dst);
+        }
+        let blank = Cell::blank(&self.attr, self.space_atlas);
+        self.cells[src..src + n as usize].fill(blank);
+        self.mark_dirty(row);
+    }
+
+    /// Delete n characters at the cursor, shifting content left and filling right with blanks.
+    pub fn delete_chars(&mut self, n: u16) {
+        let row = self.cursor_row;
+        let col = self.cursor_col;
+        let cols = self.cols;
+        let n = n.min(cols - col);
+
+        let row_start = self.row_start(row);
+        let dst = row_start + col as usize;
+        let src = row_start + (col + n) as usize;
+        let count = (cols - col - n) as usize;
+        self.cells.copy_within(src..src + count, dst);
+        if self.has_non_bmp {
+            self.chars.copy_within(src..src + count, dst);
+        }
+        let blank = Cell::blank(&self.attr, self.space_atlas);
+        let fill_start = row_start + (cols - n) as usize;
+        self.cells[fill_start..fill_start + n as usize].fill(blank);
+        self.mark_dirty(row);
     }
 
     /// Write a wide character (2 cells). Sets WIDE flag on first cell, WIDE_CONT on second.
@@ -542,10 +639,18 @@ impl Grid {
 
         let attr = self.attr;
         let idx = self.row_start(row) + col as usize;
+        let cp = c as u32;
+
+        let cp16 = if cp <= 0xFFFF { cp as u16 } else { 0 };
+        if cp > 0xFFFF {
+            self.chars[idx] = c;
+            self.chars[idx + 1] = c;
+            self.has_non_bmp = true;
+        }
 
         // First cell
         let cell = &mut self.cells[idx];
-        cell.codepoint = c as u16;
+        cell.codepoint = cp16;
         cell.flags = attr.flags | CellFlags::WIDE;
         cell.fg_index = attr.fg_index;
         cell.bg_index = attr.bg_index;
@@ -554,7 +659,7 @@ impl Grid {
 
         // Continuation cell
         let cell2 = &mut self.cells[idx + 1];
-        cell2.codepoint = c as u16;
+        cell2.codepoint = cp16;
         cell2.flags = CellFlags::WIDE_CONT;
         cell2.fg_index = attr.fg_index;
         cell2.bg_index = attr.bg_index;

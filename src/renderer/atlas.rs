@@ -10,7 +10,7 @@ const ATLAS_SIZE: u32 = 2048;
 /// Key for atlas glyph lookup.
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
 pub struct GlyphKey {
-    pub codepoint: u16,
+    pub codepoint: u32,
     pub wide: bool,
 }
 
@@ -74,7 +74,7 @@ impl Atlas {
 
     /// Pre-rasterize ASCII range and pin those slots.
     pub fn preload_ascii(&mut self, rasterizer: &FontRasterizer) {
-        for cp in 0x20u16..=0x7E {
+        for cp in 0x20u32..=0x7E {
             let key = GlyphKey {
                 codepoint: cp,
                 wide: false,
@@ -105,7 +105,7 @@ impl Atlas {
     /// Look up or rasterize a glyph, returning its atlas position.
     pub fn get_or_insert(
         &mut self,
-        codepoint: u16,
+        codepoint: u32,
         wide: bool,
         rasterizer: &FontRasterizer,
     ) -> AtlasPos {

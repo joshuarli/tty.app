@@ -103,10 +103,7 @@ impl FontRasterizer {
     /// CoreText's cascade fires at the API level and returns the .notdef glyph
     /// (rendered as "_" in Hack) rather than returning false.
     /// System fonts loaded explicitly by name don't exhibit this behaviour.
-    fn font_for_codepoint(&self, codepoint: u16) -> Option<&CTFont> {
-        let characters = [codepoint];
-        let mut glyphs: [CGGlyph; 1] = [0];
-
+    fn font_for_codepoint(&self, codepoint: u32) -> Option<&CTFont> {
         // ASCII fast path: primary font always has these.
         if codepoint < 0x80 {
             return None; // use self.ct_font
@@ -114,12 +111,7 @@ impl FontRasterizer {
 
         // Non-ASCII: query the explicit fallback list only.
         for font in &self.fallback_fonts {
-            // SAFETY: characters and glyphs are stack arrays with exactly 1 element.
-            // The count argument (1) matches both array lengths.
-            let found = unsafe {
-                font.get_glyphs_for_characters(characters.as_ptr(), glyphs.as_mut_ptr(), 1)
-            };
-            if found && glyphs[0] != 0 {
+            if Self::font_has_glyph(font, codepoint) {
                 return Some(font);
             }
         }
@@ -128,37 +120,76 @@ impl FontRasterizer {
         None
     }
 
+    /// Check if a font has a glyph for a codepoint, handling surrogate pairs for non-BMP.
+    fn font_has_glyph(font: &CTFont, codepoint: u32) -> bool {
+        if codepoint <= 0xFFFF {
+            let characters = [codepoint as u16];
+            let mut glyphs: [CGGlyph; 1] = [0];
+            let found = unsafe {
+                font.get_glyphs_for_characters(characters.as_ptr(), glyphs.as_mut_ptr(), 1)
+            };
+            found && glyphs[0] != 0
+        } else {
+            let hi = ((codepoint - 0x10000) >> 10) as u16 + 0xD800;
+            let lo = ((codepoint - 0x10000) & 0x3FF) as u16 + 0xDC00;
+            let characters = [hi, lo];
+            let mut glyphs: [CGGlyph; 2] = [0, 0];
+            let found = unsafe {
+                font.get_glyphs_for_characters(characters.as_ptr(), glyphs.as_mut_ptr(), 2)
+            };
+            found && glyphs[0] != 0
+        }
+    }
+
     /// Rasterize a single codepoint into an R8 alpha bitmap.
     /// Returns None if the glyph is missing from all fonts.
-    pub fn rasterize(&self, codepoint: u16) -> Option<RasterizedGlyph> {
+    pub fn rasterize(&self, codepoint: u32) -> Option<RasterizedGlyph> {
         let font = self.font_for_codepoint(codepoint).unwrap_or(&self.ct_font);
-        self.rasterize_with_font(font, codepoint, self.metrics.cell_width, false)
+        self.rasterize_with_font(font, codepoint, self.metrics.cell_width)
     }
 
     /// Rasterize a wide (double-width) codepoint.
-    pub fn rasterize_wide(&self, codepoint: u16) -> Option<RasterizedGlyph> {
+    pub fn rasterize_wide(&self, codepoint: u32) -> Option<RasterizedGlyph> {
         let font = self.font_for_codepoint(codepoint).unwrap_or(&self.ct_font);
-        self.rasterize_with_font(font, codepoint, self.metrics.cell_width * 2, true)
+        self.rasterize_with_font(font, codepoint, self.metrics.cell_width * 2)
+    }
+
+    /// Resolve a codepoint to a glyph ID, handling UTF-16 surrogate pairs for non-BMP.
+    fn glyph_for_codepoint(font: &CTFont, codepoint: u32) -> Option<CGGlyph> {
+        if codepoint <= 0xFFFF {
+            let characters = [codepoint as u16];
+            let mut glyphs: [CGGlyph; 1] = [0];
+            let result = unsafe {
+                font.get_glyphs_for_characters(characters.as_ptr(), glyphs.as_mut_ptr(), 1)
+            };
+            if result && glyphs[0] != 0 {
+                Some(glyphs[0])
+            } else {
+                None
+            }
+        } else {
+            let hi = ((codepoint - 0x10000) >> 10) as u16 + 0xD800;
+            let lo = ((codepoint - 0x10000) & 0x3FF) as u16 + 0xDC00;
+            let characters = [hi, lo];
+            let mut glyphs: [CGGlyph; 2] = [0, 0];
+            let result = unsafe {
+                font.get_glyphs_for_characters(characters.as_ptr(), glyphs.as_mut_ptr(), 2)
+            };
+            if result && glyphs[0] != 0 {
+                Some(glyphs[0])
+            } else {
+                None
+            }
+        }
     }
 
     fn rasterize_with_font(
         &self,
         font: &CTFont,
-        codepoint: u16,
+        codepoint: u32,
         render_width: u32,
-        _wide: bool,
     ) -> Option<RasterizedGlyph> {
-        let characters = [codepoint];
-        let mut glyphs: [CGGlyph; 1] = [0];
-        // SAFETY: characters and glyphs are stack arrays with exactly 1 element.
-        // The count argument (1) matches both array lengths.
-        let result =
-            unsafe { font.get_glyphs_for_characters(characters.as_ptr(), glyphs.as_mut_ptr(), 1) };
-        if !result || glyphs[0] == 0 {
-            return None;
-        }
-
-        let glyph = glyphs[0];
+        let glyph = Self::glyph_for_codepoint(font, codepoint)?;
         let m = &self.metrics;
 
         let w = render_width as usize;
