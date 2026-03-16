@@ -374,12 +374,13 @@ impl MetalRenderer {
             command_buffer.wait_until_scheduled();
             drawable.present();
 
-            // Swap to the other buffer for next frame
+            // Swap to the other buffer for next frame.
+            // No proactive sync render needed — the other buffer's pending rows
+            // accumulate and get uploaded the next time it's used for a real render
+            // (new dirty rows or cursor change). This lazy convergence avoids
+            // back-to-back renders that exhaust Metal's 3-drawable pool.
             self.current_buffer = (self.current_buffer + 1) % NUM_BUFFERS;
-            // If the next buffer has pending rows, schedule a follow-up render
-            // to keep both buffers in sync — but don't force it immediately,
-            // which would exhaust the drawable pool.
-            self.needs_render = self.pending[self.current_buffer].any();
+            self.needs_render = false;
 
             true
         })

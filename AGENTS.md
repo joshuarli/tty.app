@@ -39,6 +39,7 @@ src/
 
 ```
 PTY fd (non-blocking read, 64KB buffer)
+  │  drain until WouldBlock, then 500µs kqueue coalesce loop
   │
   ▼
 Parser.parse()
@@ -136,17 +137,28 @@ Single-threaded. A manual `loop` in `main()` drives everything (no winit — raw
 
 ```
 loop {
-    1. app.process_pty_output()   — drain PTY, feed parser
-    2. win.poll_events()          — drain AppKit events (keys, mouse, resize, focus)
-    3. app.handle_event()         — translate events → PTY writes / state changes
-    4. app.render()               — drains PTY again, then uploads dirty rows, dispatches GPU
-    5. if idle → kqueue wait      — block on PTY fd with 8ms timeout
+    1. app.process_pty_output()   — drain PTY until WouldBlock
+    2. PTY read coalescing        — 500µs kqueue poll loop for more data
+    3. win.poll_events()          — drain AppKit events (keys, mouse, resize, focus)
+    4. app.handle_event()         — translate events → PTY writes / state changes
+    5. app.render()               — upload dirty rows, dispatch GPU
+    6. if idle → kqueue wait      — block on PTY fd with 8ms timeout
 }
 ```
 
-The PTY fd is set to `O_NONBLOCK`. Reads happen synchronously in the event loop, returning `WouldBlock` when empty. PTY data is drained both in step 1 and at the top of `render()` (step 4) — the second drain catches data that arrived between the two calls, which is critical for apps that don't use synchronized updates (mode 2026) like htop and tmux. GPU work is the only thing that runs asynchronously (via Metal command buffer).
+The PTY fd is set to `O_NONBLOCK`. Reads happen synchronously in the event loop, returning `WouldBlock` when empty. GPU work is the only thing that runs asynchronously (via Metal command buffer).
 
 When idle (no PTY data, no AppKit events, no GPU dispatch), the loop blocks on a kqueue watching the PTY fd with an 8ms timeout. This gives near-zero latency for shell output while still polling AppKit events at ~120Hz.
+
+### PTY read coalescing (draw timeout)
+
+After draining PTY data, the loop does a brief kqueue poll (500µs) before rendering. If more data arrives within that window, it's drained too, and the poll repeats. This coalesces rapid split writes from programs like tmux that hide the cursor, draw pane content, then show the cursor in separate `write()` calls. Without coalescing, the event loop (especially in release builds) is fast enough to render intermediate states — e.g., a frame with cursor hidden before the cursor-show arrives — causing visible flicker.
+
+This is the same principle as alacritty's "draw timeout" but implemented differently:
+- **Alacritty**: separate I/O thread for PTY reads, main thread renders on a scheduler timer. More complex (threads, channels, scheduler) but decouples I/O from rendering.
+- **tty.app**: single-threaded with inline kqueue poll. Simpler, but the 500µs coalesce blocks the entire loop (no AppKit events processed during that window). Acceptable because 500µs is well under one frame at 120Hz (~8ms).
+
+Mode 2026 (synchronized output) provides an additional layer: when BSU/ESU pairs wrap the output, rendering is deferred regardless of coalescing. The two mechanisms are complementary — mode 2026 handles apps that opt in, coalescing handles everything else.
 
 ## Module Details
 

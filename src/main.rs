@@ -1567,6 +1567,39 @@ fn main() {
         let idle = objc2::rc::autoreleasepool(|_| {
             let got_pty_data = app.process_pty_output(&win);
 
+            // Coalesce rapid PTY writes: after receiving data, briefly poll for
+            // more before rendering. This prevents rendering intermediate states
+            // from split writes (e.g., tmux hiding cursor, drawing a pane, then
+            // showing cursor in separate write() calls). Adds at most 500µs of
+            // latency per render — imperceptible to users.
+            if got_pty_data {
+                let coalesce = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 500_000, // 500µs
+                };
+                let mut ev = std::mem::MaybeUninit::<libc::kevent>::uninit();
+                loop {
+                    let n = unsafe {
+                        libc::kevent(
+                            kq,
+                            std::ptr::null(),
+                            0,
+                            ev.as_mut_ptr(),
+                            1,
+                            &coalesce,
+                        )
+                    };
+                    if n > 0 {
+                        if !app.process_pty_output(&win) {
+                            break; // kqueue fired but read returned WouldBlock
+                        }
+                        // More data arrived — loop to check for even more
+                    } else {
+                        break; // No data within 500µs — safe to render
+                    }
+                }
+            }
+
             let events = win.poll_events();
             let got_events = !events.is_empty();
             for event in &events {
