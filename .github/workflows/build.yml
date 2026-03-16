@@ -25,7 +25,7 @@ jobs:
       - name: test and release
         run: |
           make test-ci
-          make release
+          make release-pgo
 
       - name: Create GitHub release
         env:

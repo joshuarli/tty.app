@@ -1,9 +1,10 @@
-NAME   := tty
-APP    := tty.app
-ARCH   := $(shell uname -m | sed 's/arm64/aarch64/')
-TARGET := $(ARCH)-apple-darwin
+NAME       := tty
+APP        := tty.app
+ARCH       := $(shell uname -m | sed 's/arm64/aarch64/')
+TARGET     := $(ARCH)-apple-darwin
+LLVM_BIN   := $(shell rustc --print sysroot)/lib/rustlib/$(TARGET)/bin
 
-.PHONY: setup build release-bin release-pgo release icon install run run-release stats test test-ci pc bump-version
+.PHONY: setup build release-bin pgo-profile release-pgo release icon install run run-release stats test test-ci pc bump-version
 
 setup:
 	rustup show active-toolchain
@@ -15,29 +16,32 @@ build:
 release-bin:
 	cargo clean -p $(NAME) --release --target $(TARGET)
 	RUSTFLAGS="-Zlocation-detail=none -Zunstable-options -Cpanic=immediate-abort" \
-	cargo build --release \
+	cargo build --release --bin $(NAME) \
 	  -Z build-std=std \
 	  -Z build-std-features= \
 	  --target $(TARGET)
 
-PGO_DIR := $(CURDIR)/target/pgo-profiles
+PGO_DIR    := $(CURDIR)/target/pgo-profiles
+PGO_MERGED := $(PGO_DIR)/merged.profdata
 
-release-pgo:
-	@echo "==> Step 1: Gathering profiles from benchmarks..."
+pgo-profile:
 	rm -rf $(PGO_DIR)
 	mkdir -p $(PGO_DIR)
 	RUSTFLAGS="-Cprofile-generate=$(PGO_DIR)" \
-	cargo bench --bench bench -- --profile-time 5
-	@echo "==> Step 2: Merging profiles..."
-	llvm-profdata merge -o $(PGO_DIR)/merged.profdata $(PGO_DIR)
-	@echo "==> Step 3: Building optimized binary with PGO..."
+	cargo bench --bench bench -- --profile-time 1 "parser|pipeline|end_to_end"
+	$(LLVM_BIN)/llvm-profdata merge -o $(PGO_MERGED) $(PGO_DIR)
+
+release-pgo: $(PGO_MERGED)
 	cargo clean -p $(NAME) --release --target $(TARGET)
-	RUSTFLAGS="-Zlocation-detail=none -Zunstable-options -Cpanic=immediate-abort -Cprofile-use=$(PGO_DIR)/merged.profdata" \
-	cargo build --release \
+	RUSTFLAGS="-Zlocation-detail=none -Zunstable-options -Cpanic=immediate-abort -Cprofile-use=$(PGO_MERGED)" \
+	cargo build --release --bin $(NAME) \
 	  -Z build-std=std \
 	  -Z build-std-features= \
 	  --target $(TARGET)
 	@echo "==> PGO release binary: target/$(TARGET)/release/$(NAME)"
+
+$(PGO_MERGED):
+	$(MAKE) pgo-profile
 
 icon:
 	mkdir -p icon.iconset
@@ -76,14 +80,14 @@ stats:
 	cargo run -- --stats
 
 test:
-	cargo test -- --test-threads=4
+	@OUT=$$(cargo nextest run 2>&1) || { echo "$$OUT"; exit 1; }
 
 # So we don't do duplicate work (building both debug and release) in CI.
 test-ci:
-	cargo test --release -- --test-threads=4
+	@OUT=$$(cargo nextest run --release 2>&1) || { echo "$$OUT"; exit 1; }
 
 pc:
-	prek run --all-files
+	prek run --quiet --all-files
 
 # Usage: make bump-version [V=x.y.z]
 # Without V, increments the patch version.
