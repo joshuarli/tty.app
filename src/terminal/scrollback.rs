@@ -19,14 +19,8 @@ impl Scrollback {
     }
 
     /// Number of rows currently stored.
-    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.len
-    }
-
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
     }
 
     /// Clear all scrollback content.
@@ -34,6 +28,15 @@ impl Scrollback {
         self.buf.clear();
         self.head = 0;
         self.len = 0;
+    }
+
+    /// Read row N from the tail (0 = most recent evicted row).
+    pub fn row(&self, n: usize) -> Option<&[Cell]> {
+        if n >= self.len {
+            return None;
+        }
+        let idx = (self.head + self.len - 1 - n) % self.len;
+        Some(&self.buf[idx])
     }
 
     /// Push a row from a slice into the scrollback. Reuses existing allocations

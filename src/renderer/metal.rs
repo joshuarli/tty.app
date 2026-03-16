@@ -13,6 +13,7 @@ use objc2_app_kit::NSView;
 use crate::config;
 use crate::terminal::cell::Cell;
 use crate::terminal::grid::Grid;
+use crate::terminal::scrollback::Scrollback;
 
 /// Uniforms passed to the compute shader. Must match Metal Uniforms struct.
 #[repr(C)]
@@ -220,7 +221,13 @@ impl MetalRenderer {
     /// Render a frame. Only dispatches GPU work if content changed.
     /// Returns true if GPU work was dispatched, false if the frame was idle.
     /// Cell data is memcpy'd directly — Cell IS the GPU format.
-    pub fn render_frame(&mut self, grid: &mut Grid, cursor_visible: bool) -> bool {
+    pub fn render_frame(
+        &mut self,
+        grid: &mut Grid,
+        scrollback: &Scrollback,
+        viewport_offset: usize,
+        cursor_visible: bool,
+    ) -> bool {
         // Merge grid dirty rows into both per-buffer pending bitsets
         let cur = self.current_buffer;
         let mut had_new_dirty = false;
@@ -269,18 +276,33 @@ impl MetalRenderer {
         let dst_base = self.cell_buffers[cur].contents() as *mut u8;
         for (row, pending) in self.pending[cur].iter().enumerate() {
             if *pending {
-                let src = grid.row_slice(row as u16);
+                // Source row from scrollback or grid based on viewport offset
+                let src: &[Cell] = if viewport_offset > 0 && row < viewport_offset {
+                    // This visible row comes from scrollback history
+                    let sb_idx = viewport_offset - 1 - row;
+                    match scrollback.row(sb_idx) {
+                        Some(r) => r,
+                        None => continue,
+                    }
+                } else {
+                    grid.row_slice((row - viewport_offset) as u16)
+                };
+                let copy_bytes = (src.len().min(cols)) * CELL_SIZE;
                 // SAFETY: dst_base points to a Metal shared buffer sized for
                 // self.cols * self.rows * CELL_SIZE bytes. row < self.rows and
                 // cols <= self.cols, so the offset is in bounds.
-                // src points to a contiguous slice of cols Cell values.
+                // src points to a contiguous slice of Cell values.
                 unsafe {
                     let dst = dst_base.add(row * dst_stride);
                     std::ptr::copy_nonoverlapping(
                         src.as_ptr() as *const u8,
                         dst,
-                        row_bytes,
+                        copy_bytes,
                     );
+                    // Clear remainder if scrollback row is shorter than current cols
+                    if copy_bytes < row_bytes {
+                        std::ptr::write_bytes(dst.add(copy_bytes), 0, row_bytes - copy_bytes);
+                    }
                 }
             }
         }

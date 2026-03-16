@@ -921,6 +921,9 @@ struct App {
     mouse_pressed: bool,
     cursor_pos: (f64, f64), // Physical pixel position of mouse cursor
 
+    // Scrollback viewport: 0 = live, >0 = N rows into history
+    viewport_offset: usize,
+
     // Accumulated scroll delta (in logical points) for fractional accumulation
     scroll_accumulator: f64,
 
@@ -991,6 +994,7 @@ impl App {
             prev_sel_rows: None,
             mouse_pressed: false,
             cursor_pos: (0.0, 0.0),
+            viewport_offset: 0,
             scroll_accumulator: 0.0,
             pty_buf: vec![0u8; 65536],
         }
@@ -1098,14 +1102,18 @@ impl App {
             self.shared.grid.sync_start = None;
         }
 
-        // Cursor visible when DECTCEM (CURSOR_VISIBLE mode) is set
-        self.cursor_visible = self.shared.grid.mode.contains(TermMode::CURSOR_VISIBLE);
+        // Cursor visible when DECTCEM is set and viewing live (not scrollback)
+        self.cursor_visible = self.shared.grid.mode.contains(TermMode::CURSOR_VISIBLE)
+            && self.viewport_offset == 0;
 
         // render_frame returns true when GPU work was dispatched, false when idle.
         // A deferred render (GPU buffer busy) is not idle — we want to retry promptly.
-        let dispatched =
-            self.renderer
-                .render_frame(&mut self.shared.grid, self.cursor_visible);
+        let dispatched = self.renderer.render_frame(
+            &mut self.shared.grid,
+            &self.shared.scrollback,
+            self.viewport_offset,
+            self.cursor_visible,
+        );
         !dispatched && !self.renderer.needs_render
     }
 
@@ -1307,6 +1315,12 @@ impl App {
                     }
                 }
 
+                // Snap back to live view on any keyboard input
+                if self.viewport_offset > 0 {
+                    self.viewport_offset = 0;
+                    self.shared.grid.mark_all_dirty();
+                }
+
                 let term_mode = self.shared.grid.mode;
 
                 if let Some(bytes) = input::key_to_bytes(key, modifiers, term_mode) {
@@ -1449,6 +1463,8 @@ impl App {
             .mode
             .intersects(TermMode::MOUSE_BUTTON | TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL);
 
+        let alt_screen = self.shared.grid.mode.contains(TermMode::ALT_SCREEN);
+
         if mouse_mode {
             let cell = self.pixel_to_cell(self.cursor_pos.0, self.cursor_pos.1);
             let sgr = self.shared.grid.mode.contains(TermMode::MOUSE_SGR);
@@ -1459,7 +1475,8 @@ impl App {
                 batch.extend_from_slice(&single);
             }
             let _ = self.pty.write(&batch);
-        } else {
+        } else if alt_screen {
+            // Alt screen (vim, etc.): send arrow keys, no scrollback
             let app_cursor = self.shared.grid.mode.contains(TermMode::CURSOR_KEYS);
             let seq: &[u8] = if lines > 0 {
                 if app_cursor { b"\x1BOA" } else { b"\x1B[A" }
@@ -1473,6 +1490,20 @@ impl App {
                 batch.extend_from_slice(seq);
             }
             let _ = self.pty.write(&batch);
+        } else {
+            // Normal mode: navigate scrollback viewport
+            let old = self.viewport_offset;
+            if lines > 0 {
+                // Scroll up into history
+                let max = self.shared.scrollback.len();
+                self.viewport_offset = (self.viewport_offset + count as usize).min(max);
+            } else {
+                // Scroll down toward live
+                self.viewport_offset = self.viewport_offset.saturating_sub(count as usize);
+            }
+            if self.viewport_offset != old {
+                self.shared.grid.mark_all_dirty();
+            }
         }
     }
 }
