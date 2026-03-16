@@ -58,7 +58,7 @@ icon:
 	iconutil -c icns icon.iconset -o icon.icns
 	rm -rf icon.iconset
 
-release: release-bin icon
+release: release-pgo icon
 	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	cp Info.plist $(APP)/Contents/
 	cp icon.icns $(APP)/Contents/Resources/

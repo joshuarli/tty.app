@@ -71,6 +71,10 @@ impl Pty {
         let env_term = CString::new("TERM=xterm-256color").unwrap();
         let env_colorterm = CString::new("COLORTERM=truecolor").unwrap();
         let env_term_program = CString::new("TERM_PROGRAM=tty").unwrap();
+        // When launched as an app bundle, macOS doesn't source shell profiles,
+        // so LANG is often unset. Without a UTF-8 locale, programs like Claude
+        // Code fall back to ASCII and Unicode glyphs render as underscores.
+        let env_lang = CString::new("LANG=en_US.UTF-8").unwrap();
         // SAFETY: The CString values are kept alive on the stack until execvp replaces
         // the process image. putenv stores the pointer directly (no copy), so the
         // CStrings must not be dropped before exec — which they aren't.
@@ -78,6 +82,7 @@ impl Pty {
             libc::putenv(env_term.as_ptr() as *mut _);
             libc::putenv(env_colorterm.as_ptr() as *mut _);
             libc::putenv(env_term_program.as_ptr() as *mut _);
+            libc::putenv(env_lang.as_ptr() as *mut _);
         }
 
         // Get user's shell
