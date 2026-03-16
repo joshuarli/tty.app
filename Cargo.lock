@@ -958,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "tty"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "bitflags",
  "bitvec",
