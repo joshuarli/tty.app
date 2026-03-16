@@ -204,7 +204,7 @@ impl NativeWindow {
             let _: () = objc2::msg_send![&window, setTitleVisibility: 1isize];
             // Black background to avoid bright flash during fullscreen transition
             let black: *const objc2::runtime::AnyObject = objc2::msg_send![
-                objc2::runtime::AnyClass::get(c"NSColor").unwrap(),
+                objc2::runtime::AnyClass::get(c"NSColor").expect("NSColor class"),
                 blackColor
             ];
             let _: () = objc2::msg_send![&window, setBackgroundColor: black];
@@ -226,7 +226,7 @@ impl NativeWindow {
         // bracket a zero-duration animation context so toggleFullScreen executes without
         // visible transition. The window is valid and on the main thread.
         unsafe {
-            let ctx_cls = objc2::runtime::AnyClass::get(c"NSAnimationContext").unwrap();
+            let ctx_cls = objc2::runtime::AnyClass::get(c"NSAnimationContext").expect("NSAnimationContext class");
             let _: () = objc2::msg_send![ctx_cls, beginGrouping];
             let ctx: *const objc2::runtime::AnyObject = objc2::msg_send![ctx_cls, currentContext];
             let _: () = objc2::msg_send![ctx, setDuration: 0.0f64];

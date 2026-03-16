@@ -25,7 +25,7 @@ bitflags::bitflags! {
 }
 
 /// Saved cursor state for DECSC/DECRC
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct SavedCursor {
     pub row: u16,
     pub col: u16,
@@ -313,7 +313,6 @@ impl Grid {
             return;
         }
         self.mode.insert(TermMode::ALT_SCREEN);
-        self.save_cursor_to(&mut self.main_cursor.clone());
         self.main_cursor = self.current_saved_cursor();
 
         // Swap buffers (reuse existing allocation when possible)
@@ -344,7 +343,8 @@ impl Grid {
         self.ring_offset = self.alt_ring_offset;
         self.alt_ring_offset = 0;
 
-        self.restore_cursor_from(&self.main_cursor.clone());
+        let saved = self.main_cursor;
+        self.restore_cursor_from(&saved);
         self.mark_all_dirty();
     }
 
@@ -364,12 +364,8 @@ impl Grid {
         self.saved_cursor = self.current_saved_cursor();
     }
 
-    fn save_cursor_to(&self, target: &mut SavedCursor) {
-        *target = self.current_saved_cursor();
-    }
-
     pub fn restore_cursor(&mut self) {
-        let saved = self.saved_cursor.clone();
+        let saved = self.saved_cursor;
         self.restore_cursor_from(&saved);
     }
 
