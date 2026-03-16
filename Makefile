@@ -23,21 +23,14 @@ release-bin:
 PGO_DIR := $(CURDIR)/target/pgo-profiles
 
 release-pgo:
-	@echo "==> Step 1: Building instrumented binary..."
+	@echo "==> Step 1: Gathering profiles from benchmarks..."
 	rm -rf $(PGO_DIR)
 	mkdir -p $(PGO_DIR)
-	cargo clean -p $(NAME) --release --target $(TARGET)
-	RUSTFLAGS="-Zlocation-detail=none -Zunstable-options -Cpanic=immediate-abort -Cprofile-generate=$(PGO_DIR)" \
-	cargo build --release \
-	  -Z build-std=std \
-	  -Z build-std-features= \
-	  --target $(TARGET)
-	@echo "==> Step 2: Gathering profiles from benchmarks..."
 	RUSTFLAGS="-Cprofile-generate=$(PGO_DIR)" \
 	cargo bench --bench bench -- --profile-time 5
-	@echo "==> Step 3: Merging profiles..."
+	@echo "==> Step 2: Merging profiles..."
 	llvm-profdata merge -o $(PGO_DIR)/merged.profdata $(PGO_DIR)
-	@echo "==> Step 4: Building optimized binary with PGO..."
+	@echo "==> Step 3: Building optimized binary with PGO..."
 	cargo clean -p $(NAME) --release --target $(TARGET)
 	RUSTFLAGS="-Zlocation-detail=none -Zunstable-options -Cpanic=immediate-abort -Cprofile-use=$(PGO_DIR)/merged.profdata" \
 	cargo build --release \
