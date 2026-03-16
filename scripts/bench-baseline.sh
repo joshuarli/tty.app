@@ -20,6 +20,9 @@ ALLOC_STDERR=$(mktemp)
 UPDATE=false
 COMPARE_ONLY=false
 
+# PGO profile path — benchmarks use the same profiles as the release build.
+PGO_MERGED="$(cd "$(dirname "$0")/.." && pwd)/target/pgo-profiles/merged.profdata"
+
 for arg in "$@"; do
   case "$arg" in
     --update)  UPDATE=true ;;
@@ -28,14 +31,25 @@ for arg in "$@"; do
   esac
 done
 
+# Build PGO profiles if they don't exist yet.
+if [ ! -f "$PGO_MERGED" ]; then
+  echo "No PGO profiles found, collecting..."
+  make -C "$(dirname "$0")/.." pgo-profile
+fi
+
+BENCH_CMD="cargo bench --bench bench"
+if [ -f "$PGO_MERGED" ]; then
+  export RUSTFLAGS="-Cprofile-use=$PGO_MERGED"
+fi
+
 if [ "$COMPARE_ONLY" = false ]; then
-  echo "Running cargo bench..."
+  echo "Running cargo bench (PGO)..."
   if [ "$UPDATE" = true ]; then
     # Save as the baseline
-    cargo bench --bench bench -- --save-baseline "$BASELINE_NAME" 2>"$ALLOC_STDERR"
+    $BENCH_CMD -- --save-baseline "$BASELINE_NAME" 2>"$ALLOC_STDERR"
   else
     # Compare against baseline without overwriting
-    cargo bench --bench bench -- --baseline "$BASELINE_NAME" 2>"$ALLOC_STDERR"
+    $BENCH_CMD -- --baseline "$BASELINE_NAME" 2>"$ALLOC_STDERR"
   fi
   echo ""
 

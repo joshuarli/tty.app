@@ -4,7 +4,7 @@ ARCH       := $(shell uname -m | sed 's/arm64/aarch64/')
 TARGET     := $(ARCH)-apple-darwin
 LLVM_BIN   := $(shell rustc --print sysroot)/lib/rustlib/$(TARGET)/bin
 
-.PHONY: setup build release-bin pgo-profile release-pgo release icon install run run-release stats test test-ci pc bump-version
+.PHONY: setup build release-bin pgo-profile release-pgo bench-pgo release icon install run run-release stats test test-ci pc bump-version
 
 setup:
 	rustup show active-toolchain
@@ -39,6 +39,13 @@ release-pgo: $(PGO_MERGED)
 	  -Z build-std-features= \
 	  --target $(TARGET)
 	@echo "==> PGO release binary: target/$(TARGET)/release/$(NAME)"
+
+# Benchmark regular release vs PGO. Requires: critcmp (cargo install critcmp)
+bench-pgo: $(PGO_MERGED)
+	cargo bench --bench bench -- --save-baseline regular 2>/dev/null
+	RUSTFLAGS="-Cprofile-use=$(PGO_MERGED)" \
+	cargo bench --bench bench -- --save-baseline pgo 2>/dev/null
+	critcmp regular pgo
 
 $(PGO_MERGED):
 	$(MAKE) pgo-profile
