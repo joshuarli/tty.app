@@ -87,11 +87,11 @@ stats:
 	cargo run -- --stats
 
 test:
-	@OUT=$$(cargo nextest run 2>&1) || { echo "$$OUT"; exit 1; }
+	@OUT=$$(cargo test --quiet -- --test-threads=32 2>&1) || { echo "$$OUT"; exit 1; }
 
 # So we don't do duplicate work (building both debug and release) in CI.
 test-ci:
-	@OUT=$$(cargo nextest run --release 2>&1) || { echo "$$OUT"; exit 1; }
+	@OUT=$$(cargo test --quiet --release -- --test-threads=32 2>&1) || { echo "$$OUT"; exit 1; }
 
 pc:
 	prek run --quiet --all-files
