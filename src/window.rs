@@ -1,11 +1,13 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly, define_class};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent,
     NSEventModifierFlags, NSEventType, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior,
     NSWindowStyleMask,
 };
-use objc2_foundation::{NSDefaultRunLoopMode, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
 // ── Event types ──
 
@@ -43,7 +45,6 @@ pub enum Event {
     },
     FocusIn,
     FocusOut,
-    #[allow(dead_code)]
     Closed,
 }
 
@@ -153,28 +154,101 @@ impl TtyView {
     }
 }
 
+// ── App delegate (dock menu) ──
+
+static NEW_WINDOW_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Check and reset the "new window requested" flag (set by dock menu).
+pub fn new_window_requested() -> bool {
+    NEW_WINDOW_REQUESTED.swap(false, Ordering::Relaxed)
+}
+
+/// Register the app delegate class and set it on the application.
+/// Provides a dock menu with "New Window".
+///
+/// SAFETY: Must be called once, on the main thread, after NSApplication init.
+unsafe fn setup_app_delegate(app: &NSApplication) {
+    unsafe extern "C-unwind" fn dock_menu(
+        this: &objc2::runtime::AnyObject,
+        _cmd: objc2::runtime::Sel,
+        _app: &objc2::runtime::AnyObject,
+    ) -> *mut objc2::runtime::AnyObject {
+        unsafe {
+            let menu_cls = objc2::runtime::AnyClass::get(c"NSMenu").unwrap();
+            let menu: *mut objc2::runtime::AnyObject = objc2::msg_send![menu_cls, new];
+
+            let item_cls = objc2::runtime::AnyClass::get(c"NSMenuItem").unwrap();
+            let item: *mut objc2::runtime::AnyObject = objc2::msg_send![item_cls, new];
+            let title = NSString::from_str("New Window");
+            let key = NSString::from_str("n");
+            let _: () = objc2::msg_send![item, setTitle: &*title];
+            let _: () = objc2::msg_send![item, setAction: objc2::sel!(newWindow:)];
+            let _: () = objc2::msg_send![item, setKeyEquivalent: &*key];
+            let _: () = objc2::msg_send![item, setTarget: this];
+            let _: () = objc2::msg_send![menu, addItem: item];
+            let _: () = objc2::msg_send![item, release];
+
+            let menu: *mut objc2::runtime::AnyObject = objc2::msg_send![menu, autorelease];
+            menu
+        }
+    }
+
+    unsafe extern "C-unwind" fn new_window(
+        _this: &objc2::runtime::AnyObject,
+        _cmd: objc2::runtime::Sel,
+        _sender: &objc2::runtime::AnyObject,
+    ) {
+        NEW_WINDOW_REQUESTED.store(true, Ordering::Relaxed);
+    }
+
+    let superclass = objc2::runtime::AnyClass::get(c"NSObject").unwrap();
+    let mut builder = objc2::runtime::ClassBuilder::new(c"TtyAppDelegate", superclass)
+        .expect("TtyAppDelegate class");
+    unsafe {
+        builder.add_method(
+            objc2::sel!(applicationDockMenu:),
+            dock_menu as unsafe extern "C-unwind" fn(_, _, _) -> _,
+        );
+        builder.add_method(
+            objc2::sel!(newWindow:),
+            new_window as unsafe extern "C-unwind" fn(_, _, _),
+        );
+    }
+    let cls = builder.register();
+
+    let delegate: *mut objc2::runtime::AnyObject = unsafe { objc2::msg_send![cls, new] };
+    let _: () = unsafe { objc2::msg_send![app, setDelegate: delegate] };
+    // Intentionally leak — delegate lives for the app's lifetime
+}
+
 // ── NativeWindow ──
 
+/// Initialize the NSApplication singleton. Call once at startup.
+pub fn init_app(mtm: MainThreadMarker) -> Retained<NSApplication> {
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    app.finishLaunching();
+    #[allow(deprecated)]
+    app.activateIgnoringOtherApps(true);
+
+    // SAFETY: Called once, on the main thread, app is initialized above.
+    unsafe { setup_app_delegate(&app) };
+
+    app
+}
+
 pub struct NativeWindow {
-    app: Retained<NSApplication>,
     window: Retained<NSWindow>,
     view: Retained<TtyView>,
-    events: Vec<Event>,
     last_frame: NSRect,
     last_scale: f64,
     last_focused: bool,
     safe_area_top: u32,
-    _mtm: MainThreadMarker,
+    closed: bool,
 }
 
 impl NativeWindow {
-    pub fn new() -> Self {
-        let mtm = MainThreadMarker::new().expect("must be called from the main thread");
-
-        let app = NSApplication::sharedApplication(mtm);
-        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-        app.finishLaunching();
-
+    pub fn new(mtm: MainThreadMarker) -> Self {
         let screen = NSScreen::mainScreen(mtm).expect("no main screen");
         let frame = screen.frame();
         let scale = screen.backingScaleFactor();
@@ -186,6 +260,7 @@ impl NativeWindow {
                 NSWindow::alloc(mtm),
                 frame,
                 NSWindowStyleMask::Titled
+                    | NSWindowStyleMask::Closable
                     | NSWindowStyleMask::Resizable
                     | NSWindowStyleMask::FullSizeContentView,
                 NSBackingStoreType::Buffered,
@@ -218,9 +293,6 @@ impl NativeWindow {
         window.setCollectionBehavior(NSWindowCollectionBehavior::FullScreenPrimary);
         window.makeKeyAndOrderFront(None);
 
-        #[allow(deprecated)]
-        app.activateIgnoringOtherApps(true);
-
         // Enter native fullscreen with suppressed animation
         // SAFETY: NSAnimationContext is a built-in AppKit class. beginGrouping/endGrouping
         // bracket a zero-duration animation context so toggleFullScreen executes without
@@ -250,85 +322,60 @@ impl NativeWindow {
         );
 
         NativeWindow {
-            app,
             window,
             view,
-            events: Vec::with_capacity(32),
             last_frame,
             last_scale: scale,
             last_focused: true,
             safe_area_top,
-            _mtm: mtm,
+            closed: false,
         }
     }
 
-    pub fn poll_events(&mut self) -> Vec<Event> {
-        self.events.clear();
+    /// Translate a single NSEvent into our Event enum.
+    pub fn translate_ns_event(&self, event: &NSEvent) -> Option<Event> {
+        let event_type = event.r#type();
 
-        loop {
-            let event = self.app.nextEventMatchingMask_untilDate_inMode_dequeue(
-                NSEventMask::Any,
-                None,
-                // SAFETY: NSDefaultRunLoopMode is a global NSString constant,
-                // always valid in a running application.
-                unsafe { NSDefaultRunLoopMode },
-                true,
-            );
-
-            let event = match event {
-                Some(e) => e,
-                None => break,
-            };
-
-            let event_type = event.r#type();
-
-            if event_type == NSEventType::KeyDown {
-                if let Some(ev) = self.translate_key_event(&event) {
-                    let is_escape = matches!(
-                        ev,
-                        Event::KeyDown {
-                            key: Key::Named(NamedKey::Escape),
-                            ..
-                        }
-                    );
-                    self.events.push(ev);
-                    if is_escape {
-                        // Don't sendEvent — AppKit's fullscreen machinery intercepts Escape
-                        // via the responder chain and would exit fullscreen instead.
-                        continue;
-                    }
-                }
-            } else if event_type == NSEventType::FlagsChanged {
-                let mods = Modifiers::from_ns_flags(event.modifierFlags());
-                self.events
-                    .push(Event::ModifiersChanged { modifiers: mods });
-            } else if event_type == NSEventType::LeftMouseDown {
-                let (x, y) = self.mouse_position(&event);
-                self.events.push(Event::MouseDown { x, y });
-            } else if event_type == NSEventType::LeftMouseUp {
-                let (x, y) = self.mouse_position(&event);
-                self.events.push(Event::MouseUp { x, y });
-            } else if event_type == NSEventType::LeftMouseDragged {
-                let (x, y) = self.mouse_position(&event);
-                self.events.push(Event::MouseDragged { x, y });
-            } else if event_type == NSEventType::ScrollWheel {
-                let (x, y) = self.mouse_position(&event);
-                let delta_y = event.scrollingDeltaY();
-                let precise = event.hasPreciseScrollingDeltas();
-                if delta_y != 0.0 {
-                    self.events.push(Event::ScrollWheel {
-                        x,
-                        y,
-                        delta_y,
-                        precise,
-                    });
-                }
+        if event_type == NSEventType::KeyDown {
+            return self.translate_key_event(event);
+        } else if event_type == NSEventType::FlagsChanged {
+            let mods = Modifiers::from_ns_flags(event.modifierFlags());
+            return Some(Event::ModifiersChanged { modifiers: mods });
+        } else if event_type == NSEventType::LeftMouseDown {
+            let (x, y) = self.mouse_position(event);
+            return Some(Event::MouseDown { x, y });
+        } else if event_type == NSEventType::LeftMouseUp {
+            let (x, y) = self.mouse_position(event);
+            return Some(Event::MouseUp { x, y });
+        } else if event_type == NSEventType::LeftMouseDragged {
+            let (x, y) = self.mouse_position(event);
+            return Some(Event::MouseDragged { x, y });
+        } else if event_type == NSEventType::ScrollWheel {
+            let (x, y) = self.mouse_position(event);
+            let delta_y = event.scrollingDeltaY();
+            let precise = event.hasPreciseScrollingDeltas();
+            if delta_y != 0.0 {
+                return Some(Event::ScrollWheel {
+                    x,
+                    y,
+                    delta_y,
+                    precise,
+                });
             }
-
-            self.app.sendEvent(&event);
         }
 
-        // Check for resize / scale change
+        None
+    }
+
+    /// Check for close/resize/focus changes and push events.
+    pub fn check_state_changes(&mut self, events: &mut Vec<Event>) {
+        // Detect window closed by user (red X button)
+        if !self.closed && !self.window.isVisible() {
+            self.closed = true;
+            events.push(Event::Closed);
+            return;
+        }
+
         let scale = self.window.backingScaleFactor();
         let frame = self.window.frame();
         let phys_w = (frame.size.width * scale) as u32;
@@ -343,25 +390,36 @@ impl NativeWindow {
         {
             self.last_frame = cur;
             self.last_scale = scale;
-            self.events.push(Event::Resized {
+            events.push(Event::Resized {
                 w: phys_w,
                 h: phys_h,
                 scale,
             });
         }
 
-        // Check for focus change
         let focused = self.window.isKeyWindow();
         if focused != self.last_focused {
             self.last_focused = focused;
-            self.events.push(if focused {
+            events.push(if focused {
                 Event::FocusIn
             } else {
                 Event::FocusOut
             });
         }
+    }
 
-        std::mem::take(&mut self.events)
+    pub fn close(&self) {
+        self.window.close();
+    }
+
+    /// Returns true if the given NSEvent belongs to this window.
+    pub fn owns_ns_event(&self, event: &NSEvent, mtm: MainThreadMarker) -> bool {
+        event
+            .window(mtm)
+            .as_ref()
+            .is_some_and(|w| {
+                Retained::as_ptr(w) == Retained::as_ptr(&self.window)
+            })
     }
 
     pub fn view(&self) -> &NSView {

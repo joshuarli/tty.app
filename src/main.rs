@@ -10,6 +10,10 @@ mod window;
 use std::sync::Arc;
 use std::time::Instant;
 
+use objc2::MainThreadMarker;
+use objc2_app_kit::{NSEventMask, NSEventModifierFlags, NSEventType};
+use objc2_foundation::NSDefaultRunLoopMode;
+
 use crate::clipboard::{clipboard_has_image, get_clipboard, set_clipboard};
 
 use crate::parser::Parser;
@@ -22,7 +26,7 @@ use crate::renderer::metal::MetalRenderer;
 use crate::terminal::cell::{Cell, CellFlags};
 use crate::terminal::grid::{Grid, TermMode};
 use crate::terminal::scrollback::Scrollback;
-use crate::window::{Event, Key, Modifiers, NativeWindow};
+use crate::window::{init_app, new_window_requested, Event, Key, Modifiers, NativeWindow};
 
 /// Shared state between I/O thread and main thread.
 struct SharedState {
@@ -973,9 +977,21 @@ impl App {
         }
     }
 
+    fn pty_fd(&self) -> std::os::fd::RawFd {
+        self.pty.fd()
+    }
+
+    fn is_alive(&self) -> bool {
+        self.alive && self.shared.alive
+    }
+
     /// Returns true if any PTY data was read.
-    fn process_pty_output(&mut self, win: &NativeWindow) -> bool {
+    ///
+    /// Reads at most `budget` bytes per call to prevent infinite-output
+    /// commands (like `yes`) from starving the render/event loop.
+    fn process_pty_output(&mut self, win: &NativeWindow, budget: usize) -> bool {
         let mut got_data = false;
+        let mut total = 0;
 
         loop {
             match self.pty.read(&mut self.pty_buf) {
@@ -986,6 +1002,7 @@ impl App {
                 }
                 Ok(n) => {
                     got_data = true;
+                    total += n;
                     let mut response_buf = std::mem::take(&mut self.shared.response_buf);
                     {
                         let mut performer = TermPerformer {
@@ -998,6 +1015,9 @@ impl App {
                         self.parser.parse(&self.pty_buf[..n], &mut performer);
                     }
                     self.shared.response_buf = response_buf;
+                    if total >= budget {
+                        break;
+                    }
                 }
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::WouldBlock {
@@ -1266,15 +1286,11 @@ impl App {
             }
 
             Event::KeyDown { key, modifiers } => {
-                // Cmd+Q/C/V shortcuts
+                // Cmd+C/V shortcuts (Cmd+Q/N handled globally in main loop)
                 if modifiers.super_key()
                     && let Key::Character(s) = key
                 {
                     match s.as_str() {
-                        "q" => {
-                            self.alive = false;
-                            return;
-                        }
                         "c" => {
                             self.copy_selection();
                             return;
@@ -1505,6 +1521,30 @@ fn base64_decode(input: &[u8]) -> Result<Vec<u8>, ()> {
     Ok(out)
 }
 
+struct Terminal {
+    win: NativeWindow,
+    app: App,
+}
+
+fn register_pty_fd(kq: i32, fd: std::os::fd::RawFd) {
+    let ev = libc::kevent {
+        ident: fd as libc::uintptr_t,
+        filter: libc::EVFILT_READ,
+        flags: libc::EV_ADD | libc::EV_ENABLE,
+        fflags: 0,
+        data: 0,
+        udata: std::ptr::null_mut(),
+    };
+    let ret = unsafe { libc::kevent(kq, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
+    assert!(ret >= 0, "kevent register failed");
+}
+
+fn spawn_terminal(mtm: MainThreadMarker) -> Terminal {
+    let win = NativeWindow::new(mtm);
+    let app = App::new(&win);
+    Terminal { win, app }
+}
+
 fn main() {
     if std::env::args().any(|a| a == "-v" || a == "--version") {
         let commit = &env!("TTY_RUSTC_COMMIT")[..7];
@@ -1516,38 +1556,38 @@ fn main() {
         unsafe { std::env::set_var("MTL_HUD_ENABLED", "1") };
     }
 
-    let mut win = NativeWindow::new();
-    let mut app = App::new(&win);
+    let mtm = MainThreadMarker::new().expect("must be called from the main thread");
+    let nsapp = init_app(mtm);
 
-    // Create a kqueue and register the PTY fd for read-readiness.
-    // This replaces the fixed sleep(8ms) with an immediate wake when shell
-    // output arrives, while keeping an 8ms fallback for AppKit event polling.
+    let mut terminals: Vec<Terminal> = Vec::new();
+    terminals.push(spawn_terminal(mtm));
+
     let kq = unsafe { libc::kqueue() };
     assert!(kq >= 0, "kqueue() failed");
-    let ev_reg = libc::kevent {
-        ident: app.pty.fd() as libc::uintptr_t,
-        filter: libc::EVFILT_READ,
-        flags: libc::EV_ADD | libc::EV_ENABLE,
-        fflags: 0,
-        data: 0,
-        udata: std::ptr::null_mut(),
-    };
-    let ret = unsafe { libc::kevent(kq, &ev_reg, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
-    assert!(ret >= 0, "kevent register failed");
+    register_pty_fd(kq, terminals[0].app.pty_fd());
+
+    let mut state_events = Vec::new();
 
     loop {
-        let idle = objc2::rc::autoreleasepool(|_| {
-            let got_pty_data = app.process_pty_output(&win);
+        let (idle, quit) = objc2::rc::autoreleasepool(|_| {
+            // Process PTY output for all terminals.
+            // Budget caps bytes read per frame so infinite-output commands
+            // (like `yes`) can't starve the render/event loop.
+            const PTY_BUDGET: usize = 256 * 1024;
+            let mut got_any_pty_data = false;
+            for t in terminals.iter_mut() {
+                got_any_pty_data |= t.app.process_pty_output(&t.win, PTY_BUDGET);
+            }
 
-            // Coalesce rapid PTY writes: after receiving data, briefly poll for
-            // more before rendering. This prevents rendering intermediate states
-            // from split writes (e.g., tmux hiding cursor, drawing a pane, then
-            // showing cursor in separate write() calls). Adds at most 500µs of
-            // latency per render — imperceptible to users.
-            if got_pty_data {
+            // Coalesce rapid PTY writes: after receiving data, briefly poll
+            // for more before rendering. This prevents rendering intermediate
+            // states from split writes (e.g., tmux hiding cursor, drawing a
+            // pane, then showing cursor in separate write() calls).
+            // Skip coalescing when budget-limited — we already have plenty.
+            if got_any_pty_data {
                 let coalesce = libc::timespec {
                     tv_sec: 0,
-                    tv_nsec: 500_000, // 500µs
+                    tv_nsec: 500_000,
                 };
                 let mut ev = std::mem::MaybeUninit::<libc::kevent>::uninit();
                 loop {
@@ -1562,38 +1602,129 @@ fn main() {
                         )
                     };
                     if n > 0 {
-                        if !app.process_pty_output(&win) {
-                            break; // kqueue fired but read returned WouldBlock
+                        let mut more = false;
+                        for t in terminals.iter_mut() {
+                            more |= t.app.process_pty_output(&t.win, PTY_BUDGET);
                         }
-                        // More data arrived — loop to check for even more
+                        if !more {
+                            break;
+                        }
                     } else {
-                        break; // No data within 500µs — safe to render
+                        break;
                     }
                 }
             }
 
-            let events = win.poll_events();
-            let got_events = !events.is_empty();
-            for event in &events {
-                app.handle_event(event, &win);
-            }
-            app.flush_scroll();
+            // Drain NSEvents globally
+            let mut spawn_pending = false;
+            let mut quit = false;
+            let mut got_events = false;
 
-            let frame_idle = app.render();
-            !got_pty_data && !got_events && frame_idle
+            loop {
+                let ns_event = nsapp.nextEventMatchingMask_untilDate_inMode_dequeue(
+                    NSEventMask::Any,
+                    None,
+                    // SAFETY: NSDefaultRunLoopMode is a global NSString constant,
+                    // always valid in a running application.
+                    unsafe { NSDefaultRunLoopMode },
+                    true,
+                );
+                let ns_event = match ns_event {
+                    Some(e) => e,
+                    None => break,
+                };
+
+                let event_type = ns_event.r#type();
+                let is_escape =
+                    event_type == NSEventType::KeyDown && ns_event.keyCode() == 0x35;
+
+                // Global shortcuts: Cmd+Q quits, Cmd+N spawns a new window
+                if event_type == NSEventType::KeyDown
+                    && ns_event.modifierFlags().contains(NSEventModifierFlags::Command)
+                    && let Some(chars) = ns_event.charactersIgnoringModifiers()
+                {
+                    match chars.to_string().as_str() {
+                        "q" => {
+                            quit = true;
+                            nsapp.sendEvent(&ns_event);
+                            continue;
+                        }
+                        "n" => {
+                            spawn_pending = true;
+                            nsapp.sendEvent(&ns_event);
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Route to matching terminal by window pointer
+                if let Some(t) =
+                    terminals.iter_mut().find(|t| t.win.owns_ns_event(&ns_event, mtm))
+                    && let Some(translated) = t.win.translate_ns_event(&ns_event)
+                {
+                    t.app.handle_event(&translated, &t.win);
+                    got_events = true;
+                }
+
+                // Don't sendEvent for Escape — AppKit's fullscreen machinery
+                // intercepts it via the responder chain and exits fullscreen.
+                if !is_escape {
+                    nsapp.sendEvent(&ns_event);
+                }
+            }
+
+            // Check state changes (resize/focus) for all terminals
+            for t in terminals.iter_mut() {
+                state_events.clear();
+                t.win.check_state_changes(&mut state_events);
+                for event in &state_events {
+                    t.app.handle_event(event, &t.win);
+                    got_events = true;
+                }
+            }
+
+            // Flush accumulated scroll for all terminals
+            for t in terminals.iter_mut() {
+                t.app.flush_scroll();
+            }
+
+            // Spawn new terminal if Cmd+N was pressed or dock menu clicked
+            if spawn_pending || new_window_requested() {
+                let t = spawn_terminal(mtm);
+                register_pty_fd(kq, t.app.pty_fd());
+                terminals.push(t);
+            }
+
+            // Remove dead terminals (shell exited)
+            terminals.retain_mut(|t| {
+                if t.app.is_alive() {
+                    true
+                } else {
+                    t.win.close();
+                    false
+                }
+            });
+
+            // Render all terminals
+            let mut all_idle = true;
+            for t in terminals.iter_mut() {
+                all_idle &= t.app.render();
+            }
+
+            let idle = !got_any_pty_data && !got_events && all_idle;
+            (idle, quit)
         });
 
-        if !app.alive || !app.shared.alive {
+        if quit || terminals.is_empty() {
             break;
         }
 
-        // When idle, block until the PTY has data or 8ms elapses.
-        // This gives near-zero latency for shell output while still polling
-        // AppKit events at the same 8ms cadence as before.
+        // When idle, block until any PTY has data or 8ms elapses
         if idle {
             let timeout = libc::timespec {
                 tv_sec: 0,
-                tv_nsec: 8_000_000, // 8ms
+                tv_nsec: 8_000_000,
             };
             let mut ev_out = std::mem::MaybeUninit::<libc::kevent>::uninit();
             unsafe {
