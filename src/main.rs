@@ -1579,38 +1579,29 @@ fn main() {
                 got_any_pty_data |= t.app.process_pty_output(&t.win, PTY_BUDGET);
             }
 
-            // Coalesce rapid PTY writes: after receiving data, briefly poll
-            // for more before rendering. This prevents rendering intermediate
-            // states from split writes (e.g., tmux hiding cursor, drawing a
-            // pane, then showing cursor in separate write() calls).
-            // Skip coalescing when budget-limited — we already have plenty.
+            // Coalesce: after receiving data, wait up to 500µs for one more
+            // batch. This prevents rendering intermediate states from split
+            // writes (e.g., tmux hiding cursor, drawing, then showing cursor).
+            // Single pass only — looping would hang on continuous output (yes).
             if got_any_pty_data {
                 let coalesce = libc::timespec {
                     tv_sec: 0,
                     tv_nsec: 500_000,
                 };
                 let mut ev = std::mem::MaybeUninit::<libc::kevent>::uninit();
-                loop {
-                    let n = unsafe {
-                        libc::kevent(
-                            kq,
-                            std::ptr::null(),
-                            0,
-                            ev.as_mut_ptr(),
-                            1,
-                            &coalesce,
-                        )
-                    };
-                    if n > 0 {
-                        let mut more = false;
-                        for t in terminals.iter_mut() {
-                            more |= t.app.process_pty_output(&t.win, PTY_BUDGET);
-                        }
-                        if !more {
-                            break;
-                        }
-                    } else {
-                        break;
+                let n = unsafe {
+                    libc::kevent(
+                        kq,
+                        std::ptr::null(),
+                        0,
+                        ev.as_mut_ptr(),
+                        1,
+                        &coalesce,
+                    )
+                };
+                if n > 0 {
+                    for t in terminals.iter_mut() {
+                        t.app.process_pty_output(&t.win, PTY_BUDGET);
                     }
                 }
             }
