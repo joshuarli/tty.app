@@ -4,7 +4,7 @@ ARCH       := $(shell uname -m | sed 's/arm64/aarch64/')
 TARGET     := $(ARCH)-apple-darwin
 LLVM_BIN   := $(shell rustc --print sysroot)/lib/rustlib/$(TARGET)/bin
 
-.PHONY: setup build release-bin pgo-profile release-pgo bench-pgo release icon install run run-release stats test test-ci pc bump-version
+.PHONY: setup build release-bin pgo-profile release-pgo bench-pgo release install run run-release stats test test-ci pc bump-version
 
 setup:
 	rustup show active-toolchain
@@ -50,7 +50,7 @@ bench-pgo: $(PGO_MERGED)
 $(PGO_MERGED):
 	$(MAKE) pgo-profile
 
-icon:
+icon.icns: icon.png
 	mkdir -p icon.iconset
 	sips -z 16 16     icon.png --out icon.iconset/icon_16x16.png
 	sips -z 32 32     icon.png --out icon.iconset/icon_16x16@2x.png
@@ -65,7 +65,7 @@ icon:
 	iconutil -c icns icon.iconset -o icon.icns
 	rm -rf icon.iconset
 
-release: release-pgo icon
+release: release-pgo icon.icns
 	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	cp Info.plist $(APP)/Contents/
 	cp icon.icns $(APP)/Contents/Resources/
