@@ -315,6 +315,13 @@ impl NativeWindow {
             )
         };
 
+        // Prevent double-free: releasedWhenClosed (default YES) causes an extra
+        // release on close(), but our Retained<NSWindow> already owns the reference.
+        // Without this, closing a window deallocates it before Retained::drop runs.
+        unsafe {
+            let _: () = objc2::msg_send![&window, setReleasedWhenClosed: false];
+        }
+
         // Hide titlebar chrome — content fills the entire window
         // SAFETY: These are standard NSWindow/NSColor messages. The window is valid
         // (just initialized above). NSColor.blackColor is a class method that always
@@ -476,8 +483,11 @@ impl NativeWindow {
         }
     }
 
-    pub fn close(&self) {
-        self.window.close();
+    pub fn close(&mut self) {
+        if !self.closed {
+            self.closed = true;
+            self.window.close();
+        }
     }
 
     /// Returns true if the given NSEvent belongs to this window.
