@@ -1,4 +1,5 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly, define_class};
@@ -221,6 +222,52 @@ unsafe fn setup_app_delegate(app: &NSApplication) {
     // Intentionally leak — delegate lives for the app's lifetime
 }
 
+// ── Window delegate (close detection) ──
+
+// Window pointers whose windowWillClose: fired this frame.
+thread_local! {
+    static CLOSED_WINDOWS: RefCell<Vec<*const objc2::runtime::AnyObject>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Singleton window delegate shared by all windows.
+static WINDOW_DELEGATE: AtomicPtr<objc2::runtime::AnyObject> =
+    AtomicPtr::new(std::ptr::null_mut());
+
+/// Get or create the shared window delegate instance.
+fn window_delegate() -> *mut objc2::runtime::AnyObject {
+    let ptr = WINDOW_DELEGATE.load(Ordering::Relaxed);
+    if !ptr.is_null() {
+        return ptr;
+    }
+
+    unsafe extern "C-unwind" fn window_will_close(
+        _this: &objc2::runtime::AnyObject,
+        _cmd: objc2::runtime::Sel,
+        notification: &objc2::runtime::AnyObject,
+    ) {
+        let window: *const objc2::runtime::AnyObject =
+            unsafe { objc2::msg_send![notification, object] };
+        CLOSED_WINDOWS.with(|set| set.borrow_mut().push(window));
+    }
+
+    let superclass = objc2::runtime::AnyClass::get(c"NSObject").unwrap();
+    let mut builder = objc2::runtime::ClassBuilder::new(c"TtyWindowDelegate", superclass)
+        .expect("TtyWindowDelegate class");
+    unsafe {
+        builder.add_method(
+            objc2::sel!(windowWillClose:),
+            window_will_close as unsafe extern "C-unwind" fn(_, _, _),
+        );
+    }
+    let cls = builder.register();
+
+    let delegate: *mut objc2::runtime::AnyObject = unsafe { objc2::msg_send![cls, new] };
+    WINDOW_DELEGATE.store(delegate, Ordering::Relaxed);
+    // Intentionally leak — shared delegate lives for the app's lifetime
+    delegate
+}
+
 // ── NativeWindow ──
 
 /// Initialize the NSApplication singleton. Call once at startup.
@@ -288,6 +335,11 @@ impl NativeWindow {
         let view = TtyView::new(frame, mtm);
         window.setContentView(Some(&view));
         window.setOpaque(true);
+
+        // Set window delegate for close detection (windowWillClose:)
+        unsafe {
+            let _: () = objc2::msg_send![&window, setDelegate: window_delegate()];
+        }
 
         // Enable native fullscreen
         window.setCollectionBehavior(NSWindowCollectionBehavior::FullScreenPrimary);
@@ -369,8 +421,24 @@ impl NativeWindow {
 
     /// Check for close/resize/focus changes and push events.
     pub fn check_state_changes(&mut self, events: &mut Vec<Event>) {
-        // Detect window closed by user (red X button)
-        if !self.closed && !self.window.isVisible() {
+        if self.closed {
+            return;
+        }
+
+        // Detect window closed by user (red X button).
+        // Uses windowWillClose: delegate callback rather than polling isVisible(),
+        // which is unreliable during macOS Space transitions.
+        let win_ptr = Retained::as_ptr(&self.window) as *const objc2::runtime::AnyObject;
+        let was_closed = CLOSED_WINDOWS.with(|set| {
+            let mut set = set.borrow_mut();
+            if let Some(pos) = set.iter().position(|p| *p == win_ptr) {
+                set.swap_remove(pos);
+                true
+            } else {
+                false
+            }
+        });
+        if was_closed {
             self.closed = true;
             events.push(Event::Closed);
             return;
