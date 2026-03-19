@@ -317,9 +317,18 @@ impl<'a> Perform for BenchPerformer<'a> {
         self.grid.cursor_col = 0;
     }
 
-    fn insert_chars(&mut self, _n: u16) {}
-    fn delete_chars(&mut self, _n: u16) {}
-    fn erase_chars(&mut self, _n: u16) {}
+    fn insert_chars(&mut self, n: u16) {
+        self.grid.insert_chars(n);
+    }
+    fn delete_chars(&mut self, n: u16) {
+        self.grid.delete_chars(n);
+    }
+    fn erase_chars(&mut self, n: u16) {
+        let row = self.grid.cursor_row;
+        let col = self.grid.cursor_col;
+        self.grid
+            .clear_cols(row, col, (col + n).min(self.grid.cols));
+    }
 
     fn sgr(&mut self, params: &[u16]) {
         let mut i = 0;
@@ -978,7 +987,7 @@ fn make_ls_output(n: usize) -> Vec<u8> {
 fn bench_parser(c: &mut Criterion) {
     let mut group = c.benchmark_group("parser");
 
-    for &size in &[1_000, 10_000] {
+    for &size in &[10_000] {
         // Pure ASCII throughput
         let ascii = make_ascii(size);
         group.throughput(Throughput::Bytes(ascii.len() as u64));
@@ -1101,7 +1110,7 @@ fn bench_parser(c: &mut Criterion) {
     }
 
     // Full-screen redraw (outside the size loop — measured in frames, not lines)
-    for &frames in &[10, 100] {
+    for &frames in &[100] {
         let redraw = make_fullscreen_redraw(frames, 120, 40);
         group.throughput(Throughput::Bytes(redraw.len() as u64));
         group.bench_with_input(
@@ -1119,7 +1128,7 @@ fn bench_parser(c: &mut Criterion) {
     }
 
     // tmux 2-pane redraw (outside size loop — measured in frames)
-    for &frames in &[10, 100] {
+    for &frames in &[100] {
         let tmux = make_tmux_pane_redraw(frames, 160, 40);
         group.throughput(Throughput::Bytes(tmux.len() as u64));
         group.bench_with_input(
@@ -1137,7 +1146,7 @@ fn bench_parser(c: &mut Criterion) {
     }
 
     // 256-color heavy (bat/delta style syntax highlighting)
-    for &size in &[1_000, 10_000] {
+    for &size in &[10_000] {
         let c256 = make_256color_heavy(size);
         group.throughput(Throughput::Bytes(c256.len() as u64));
         group.bench_with_input(
@@ -1155,7 +1164,7 @@ fn bench_parser(c: &mut Criterion) {
     }
 
     // Truecolor heavy (modern syntax highlighters)
-    for &size in &[1_000, 10_000] {
+    for &size in &[10_000] {
         let tc = make_truecolor_heavy(size);
         group.throughput(Throughput::Bytes(tc.len() as u64));
         group.bench_with_input(BenchmarkId::new("truecolor_heavy", size), &tc, |b, data| {
@@ -1263,7 +1272,7 @@ fn bench_grid(c: &mut Criterion) {
     let mut group = c.benchmark_group("grid");
 
     // Grid construction
-    for &(cols, rows) in &[(80, 24), (120, 40), (200, 50)] {
+    for &(cols, rows) in &[(80, 24), (200, 50)] {
         group.bench_function(format!("new_{cols}x{rows}"), |b| {
             b.iter(|| {
                 black_box(Grid::new(cols, rows));
@@ -1272,7 +1281,7 @@ fn bench_grid(c: &mut Criterion) {
     }
 
     // write_char throughput — fill entire grid
-    for &(cols, rows) in &[(80, 24), (200, 50)] {
+    for &(cols, rows) in &[(80, 24)] {
         let total = cols as u64 * rows as u64;
         group.throughput(Throughput::Elements(total));
         group.bench_function(format!("write_char_{cols}x{rows}"), |b| {
@@ -1287,7 +1296,7 @@ fn bench_grid(c: &mut Criterion) {
     }
 
     // write_ascii_run throughput — bulk write path (the hot path for ASCII content)
-    for &(cols, rows) in &[(80, 24), (200, 50)] {
+    for &(cols, rows) in &[(80, 24)] {
         let line: Vec<u8> = (0..cols).map(|i| b' ' + (i % 95) as u8).collect();
         let total = cols as u64 * rows as u64;
         group.throughput(Throughput::Elements(total));
@@ -1439,28 +1448,6 @@ fn bench_pipeline(c: &mut Criterion) {
     }
 
     // --- Stage 2: SGR dispatch cost ---
-
-    // Measure raw sgr_reset throughput (no parsing, no grid write).
-    // This isolates the attribute-set cost.
-    {
-        let n = 100_000u64;
-        group.throughput(Throughput::Elements(n));
-        group.bench_function("sgr_reset_100k", |b| {
-            let mut grid = Grid::new(80, 24);
-            let mut sb = Scrollback::new(0);
-            b.iter(|| {
-                let mut perf = BenchPerformer {
-                    grid: &mut grid,
-                    scrollback: &mut sb,
-                };
-                for _ in 0..n {
-                    perf.sgr_single(1); // set bold (to give reset work to do)
-                    perf.sgr_reset();
-                }
-                black_box(perf.grid.attr);
-            });
-        });
-    }
 
     // Measure sgr_single throughput for basic fg colors (30-37).
     {
@@ -1668,17 +1655,6 @@ fn bench_pipeline(c: &mut Criterion) {
     // --- Stage 5: mark_dirty overhead ---
     {
         let rows: u16 = 40;
-        group.bench_function("mark_dirty_all_rows_40", |b| {
-            let mut grid = Grid::new(120, rows);
-            b.iter(|| {
-                for row in 0..rows {
-                    grid.mark_dirty(row);
-                }
-                black_box(&grid.dirty);
-                grid.clear_dirty();
-            });
-        });
-
         group.bench_function("mark_dirty_scattered_10_of_40", |b| {
             let mut grid = Grid::new(120, rows);
             b.iter(|| {
@@ -1924,13 +1900,361 @@ fn bench_alloc_audit(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// TUI redraw benchmarks — measures cost of re-rendering over existing content.
+// This is the dominant pattern for apps like htop/top/vim where most of the
+// screen is static between frames.
+// ---------------------------------------------------------------------------
+
+/// Generate a single full-screen frame of htop-like content.
+/// Deterministic given a frame index, so frame 0 == frame 0.
+fn make_htop_frame(frame: usize, cols: u16, rows: u16) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(rows as usize * (cols as usize + 30));
+    buf.extend_from_slice(b"\x1b[?25l"); // hide cursor
+
+    for row in 1..=rows {
+        buf.extend_from_slice(format!("\x1b[{row};1H").as_bytes());
+        if row == 1 {
+            // CPU bar — changes every frame
+            buf.extend_from_slice(b"\x1b[7m"); // inverse
+            let pct = (frame * 7 + 13) % 100;
+            let filled = (pct as usize * cols as usize) / 100;
+            buf.extend_from_slice(format!(" CPU [{:>3}%] ", pct).as_bytes());
+            for j in 12..cols as usize {
+                if j < filled {
+                    buf.push(b'|');
+                } else {
+                    buf.push(b' ');
+                }
+            }
+            buf.extend_from_slice(b"\x1b[0m");
+        } else if row == 2 {
+            // Memory bar — changes every frame
+            buf.extend_from_slice(b"\x1b[7m");
+            let pct = (frame * 3 + 42) % 100;
+            buf.extend_from_slice(format!(" Mem [{:>3}%] ", pct).as_bytes());
+            for j in 12..cols as usize {
+                if j < (pct as usize * cols as usize) / 100 {
+                    buf.push(b'#');
+                } else {
+                    buf.push(b' ');
+                }
+            }
+            buf.extend_from_slice(b"\x1b[0m");
+        } else if row == rows {
+            // Status bar — static
+            buf.extend_from_slice(b"\x1b[7m");
+            buf.extend_from_slice(b" F1Help F2Setup F3Search F9Kill F10Quit");
+            for _ in 38..cols {
+                buf.push(b' ');
+            }
+            buf.extend_from_slice(b"\x1b[0m");
+        } else if row == 3 {
+            // Column headers — static
+            buf.extend_from_slice(b"\x1b[1;32m");
+            buf.extend_from_slice(
+                format!(
+                    "  PID {:>7} {:>4} {:>4} {:>9} {:>9}  {:<20}",
+                    "USER", "PR", "NI", "VIRT", "RES", "COMMAND"
+                )
+                .as_bytes(),
+            );
+            buf.extend_from_slice(b"\x1b[0m");
+        } else {
+            // Process rows — static (only a few change per frame)
+            let pid = (row as usize - 3) * 100 + 1;
+            buf.extend_from_slice(format!("\x1b[0m{pid:>5} ").as_bytes());
+            buf.extend_from_slice(b"root     20    0 ");
+            buf.extend_from_slice(format!("{:>9} {:>9}  ", pid * 1024, pid * 512).as_bytes());
+            // Process name — static
+            let names = [
+                "systemd", "kthreadd", "rcu_sched", "migration", "watchdog",
+                "netns", "kworker", "kdevtmpfs", "inet_frag", "kauditd",
+            ];
+            let name = names[(row as usize - 4) % names.len()];
+            buf.extend_from_slice(name.as_bytes());
+        }
+        buf.extend_from_slice(b"\x1b[K"); // clear to EOL
+    }
+    buf.extend_from_slice(b"\x1b[?25h"); // show cursor
+    buf
+}
+
+fn bench_tui_redraw(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tui_redraw");
+    let cols: u16 = 120;
+    let rows: u16 = 40;
+
+    // --- 100% static: re-render the exact same frame ---
+    // This is the best case for the skip optimization.
+    {
+        let frame_data = make_htop_frame(0, cols, rows);
+        group.throughput(Throughput::Bytes(frame_data.len() as u64));
+        group.bench_function("htop_100pct_static_120x40", |b| {
+            // Setup: parse the frame once
+            let mut grid = Grid::new(cols, rows);
+            let mut sb = Scrollback::new(0);
+            parse_bytes(&mut grid, &mut sb, &frame_data);
+            grid.clear_dirty();
+
+            b.iter(|| {
+                // Re-render the exact same content
+                parse_bytes(&mut grid, &mut sb, &frame_data);
+                black_box(&grid);
+                grid.clear_dirty();
+            });
+        });
+    }
+
+    // --- ~5% changed: only CPU/mem bars update (rows 1-2 of 40) ---
+    // Typical htop between refreshes: bars animate, process list is static.
+    {
+        let setup_frame = make_htop_frame(0, cols, rows);
+        // Generate multiple "next" frames for the bench loop
+        let frames: Vec<Vec<u8>> = (1..=30).map(|f| make_htop_frame(f, cols, rows)).collect();
+        group.throughput(Throughput::Bytes(setup_frame.len() as u64));
+        group.bench_function("htop_5pct_changed_120x40", |b| {
+            let mut grid = Grid::new(cols, rows);
+            let mut sb = Scrollback::new(0);
+            parse_bytes(&mut grid, &mut sb, &setup_frame);
+            grid.clear_dirty();
+
+            let mut frame_idx = 0;
+            b.iter(|| {
+                parse_bytes(&mut grid, &mut sb, &frames[frame_idx % frames.len()]);
+                black_box(&grid);
+                grid.clear_dirty();
+                frame_idx += 1;
+            });
+        });
+    }
+
+    // --- 100% changed: every cell different (worst case — no skipping) ---
+    // Baseline to show cost when the optimization can't help.
+    {
+        let frame0 = make_fullscreen_redraw(1, cols, rows);
+        let frame1 = make_fullscreen_redraw(2, cols, rows); // different content
+        group.throughput(Throughput::Bytes(frame0.len() as u64));
+        group.bench_function("fullscreen_100pct_changed_120x40", |b| {
+            let mut grid = Grid::new(cols, rows);
+            let mut sb = Scrollback::new(0);
+            parse_bytes(&mut grid, &mut sb, &frame0);
+            grid.clear_dirty();
+
+            b.iter(|| {
+                parse_bytes(&mut grid, &mut sb, &frame1);
+                black_box(&grid);
+                // Reset for next iteration so frame1 is always "different"
+                parse_bytes(&mut grid, &mut sb, &frame0);
+                grid.clear_dirty();
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// Slow-path benchmarks — operations that are infrequent but potentially expensive.
+// insert/delete chars, wide characters, non-BMP scrolling, vim-style editing.
+// ---------------------------------------------------------------------------
+
+/// Vim-like editing: insert mode typing with cursor movements and line insertions.
+/// Exercises insert_chars, delete_chars, and CSI L/M (insert/delete lines).
+fn make_vim_insert_mode(n: usize, cols: u16) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(n * 60);
+    for i in 0..n {
+        match i % 5 {
+            0 => {
+                // Position cursor mid-line, insert characters
+                let col = (i % (cols as usize - 10)) + 5;
+                buf.extend_from_slice(format!("\x1b[1;{col}H").as_bytes());
+                buf.extend_from_slice(b"\x1b[4@"); // ICH: insert 4 blanks
+                buf.extend_from_slice(b"edit"); // type into them
+            }
+            1 => {
+                // Delete characters at cursor
+                let col = (i % (cols as usize - 10)) + 5;
+                buf.extend_from_slice(format!("\x1b[1;{col}H").as_bytes());
+                buf.extend_from_slice(b"\x1b[3P"); // DCH: delete 3 chars
+            }
+            2 => {
+                // Erase characters at cursor
+                buf.extend_from_slice(b"\x1b[10X"); // ECH: erase 10 chars
+            }
+            3 => {
+                // Insert a line (scroll region content down)
+                let row = (i % 20) + 2;
+                buf.extend_from_slice(format!("\x1b[{row};1H").as_bytes());
+                buf.extend_from_slice(b"\x1b[L"); // IL: insert 1 line
+                buf.extend_from_slice(b"new line content here");
+            }
+            _ => {
+                // Delete a line (scroll region content up)
+                let row = (i % 20) + 2;
+                buf.extend_from_slice(format!("\x1b[{row};1H").as_bytes());
+                buf.extend_from_slice(b"\x1b[M"); // DL: delete 1 line
+            }
+        }
+    }
+    buf
+}
+
+/// Heavy wide-character output — CJK/emoji filling the screen.
+/// Exercises write_wide_char, including EOL wrapping (wide char at last col).
+fn make_wide_char_heavy(n: usize) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(n * 120);
+    let cjk = "你好世界テスト한국語中文";
+    let emoji = "🚀🎉🔥💻🌍";
+    for i in 0..n {
+        if i % 3 == 0 {
+            // CJK line
+            buf.extend_from_slice(cjk.as_bytes());
+            buf.extend_from_slice(cjk.as_bytes());
+            buf.extend_from_slice(cjk.as_bytes());
+        } else if i % 3 == 1 {
+            // Emoji line (non-BMP, triggers chars[] path)
+            buf.extend_from_slice(emoji.as_bytes());
+            buf.extend_from_slice(emoji.as_bytes());
+            buf.extend_from_slice(emoji.as_bytes());
+            buf.extend_from_slice(emoji.as_bytes());
+        } else {
+            // Mixed: CJK + ASCII + emoji
+            buf.extend_from_slice("│ ".as_bytes());
+            buf.extend_from_slice(cjk.as_bytes());
+            buf.extend_from_slice(b" status: ");
+            buf.extend_from_slice(emoji.as_bytes());
+        }
+        buf.push(b'\n');
+    }
+    buf
+}
+
+fn bench_slow_paths(c: &mut Criterion) {
+    let mut group = c.benchmark_group("slow_path");
+
+    // --- Insert/delete chars (ICH/DCH — vim insert mode, text editors) ---
+    {
+        let data = make_vim_insert_mode(1_000, 80);
+        group.throughput(Throughput::Bytes(data.len() as u64));
+        group.bench_function("vim_insert_mode_1k_ops", |b| {
+            b.iter(|| {
+                let mut grid = Grid::new(80, 24);
+                let mut sb = Scrollback::new(0);
+                // Pre-fill grid so insert/delete have content to shift
+                let fill = make_ascii(50);
+                parse_bytes(&mut grid, &mut sb, &fill);
+                grid.cursor_row = 0;
+                grid.cursor_col = 0;
+                parse_bytes(&mut grid, &mut sb, &data);
+                black_box(&grid);
+            });
+        });
+    }
+
+    // --- Isolated insert_chars throughput ---
+    group.bench_function("insert_chars_mid_row_80", |b| {
+        let mut grid = Grid::new(80, 24);
+        let fill = make_ascii(50);
+        let mut sb = Scrollback::new(0);
+        parse_bytes(&mut grid, &mut sb, &fill);
+        b.iter(|| {
+            grid.cursor_col = 40; // mid-row
+            grid.cursor_row = 0;
+            grid.insert_chars(10);
+            black_box(&grid);
+        });
+    });
+
+    // --- Isolated delete_chars throughput ---
+    group.bench_function("delete_chars_mid_row_80", |b| {
+        let mut grid = Grid::new(80, 24);
+        let fill = make_ascii(50);
+        let mut sb = Scrollback::new(0);
+        parse_bytes(&mut grid, &mut sb, &fill);
+        b.iter(|| {
+            grid.cursor_col = 40;
+            grid.cursor_row = 0;
+            grid.delete_chars(10);
+            black_box(&grid);
+        });
+    });
+
+    // --- Wide character (CJK) throughput ---
+    {
+        let data = make_wide_char_heavy(1_000);
+        group.throughput(Throughput::Bytes(data.len() as u64));
+        group.bench_function("wide_char_cjk_1k_lines", |b| {
+            b.iter(|| {
+                let mut grid = Grid::new(80, 24);
+                let mut sb = Scrollback::new(1000);
+                parse_bytes(&mut grid, &mut sb, &data);
+                black_box(&grid);
+            });
+        });
+    }
+
+    // --- Wide char at large terminal (emoji-heavy Slack/Discord output) ---
+    {
+        let data = make_wide_char_heavy(10_000);
+        group.throughput(Throughput::Bytes(data.len() as u64));
+        group.bench_function("wide_char_emoji_10k_lines", |b| {
+            b.iter(|| {
+                let mut grid = Grid::new(120, 40);
+                let mut sb = Scrollback::new(10_000);
+                parse_bytes(&mut grid, &mut sb, &data);
+                black_box(&grid);
+            });
+        });
+    }
+
+    // --- Scroll with non-BMP content (has_non_bmp=true doubles copy_within) ---
+    group.bench_function("scroll_up_with_emoji_80x24", |b| {
+        let mut grid = Grid::new(80, 24);
+        let mut sb = Scrollback::new(1000);
+        // Fill with emoji to set has_non_bmp=true
+        let emoji_data = make_wide_char_heavy(100);
+        parse_bytes(&mut grid, &mut sb, &emoji_data);
+        b.iter(|| {
+            grid.scroll_up_into(1, Some(&mut sb));
+            black_box(&grid);
+        });
+    });
+
+    // --- Insert/delete lines (IL/DL — vim scrolling, tmux pane resize) ---
+    group.bench_function("insert_delete_lines_80x24", |b| {
+        let mut grid = Grid::new(80, 24);
+        let mut sb = Scrollback::new(0);
+        let fill = make_ascii(50);
+        parse_bytes(&mut grid, &mut sb, &fill);
+        b.iter(|| {
+            // Insert at row 10, delete at row 5 — exercises scroll region ops
+            grid.cursor_row = 10;
+            let old_top = grid.scroll_top;
+            grid.scroll_top = grid.cursor_row;
+            grid.scroll_down(1);
+            grid.scroll_top = old_top;
+
+            grid.cursor_row = 5;
+            let old_top2 = grid.scroll_top;
+            grid.scroll_top = grid.cursor_row;
+            grid.scroll_up(1);
+            grid.scroll_top = old_top2;
+
+            black_box(&grid);
+        });
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 
 criterion_group! {
     name = benches;
     config = Criterion::default()
-        .sample_size(30)
-        .warm_up_time(std::time::Duration::from_secs(1))
-        .measurement_time(std::time::Duration::from_secs(2));
+        .sample_size(15)
+        .warm_up_time(std::time::Duration::from_millis(500))
+        .measurement_time(std::time::Duration::from_secs(1));
     targets =
         bench_parser,
         bench_simd,
@@ -1939,5 +2263,7 @@ criterion_group! {
         bench_scrollback,
         bench_end_to_end,
         bench_alloc_audit,
+        bench_tui_redraw,
+        bench_slow_paths,
 }
 criterion_main!(benches);
