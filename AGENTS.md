@@ -100,7 +100,14 @@ offset  type   field
 
 Atlas coordinates are resolved once at write time — when a character is printed, the atlas position is looked up (or the glyph is rasterized) and stored directly in the Cell. This means the render path is pure memcpy with no per-cell work. Bold brightness remapping (`palette 0-7 → 8-15`) and hidden attribute (`fg = bg`) are handled in the shader, not CPU-side.
 
-No truecolor (24-bit RGB) storage in Cell — truecolor SGR values are mapped to the nearest 256-color palette index via `rgb_to_palette()` at parse time.
+**The 8-byte Cell is a deliberate constraint.** Everything that doesn't fit is intentionally omitted rather than worked around:
+
+- **No truecolor**: RGB values are mapped to nearest 256-color palette index via `rgb_to_palette()` at parse time. Storing 24-bit color would require widening Cell, breaking zero-copy GPU upload.
+- **No combining marks**: Each cell holds one codepoint (u16 for BMP, sentinel + parallel vec for non-BMP). Diacritics and emoji ZWJ sequences are dropped. Variable-length cell storage would break the flat Vec<Cell> layout.
+- **No runtime config**: Font, colors, and padding are compile-time constants. Avoids runtime config parsing and keeps Cell layout fixed.
+- **No scrollback search/selection**: Scrollback stores raw Cell rows for zero-copy rendering, not searchable text.
+
+These are accepted limitations of the fixed-size Cell design, not planned features.
 
 ### Ring buffer grid
 
