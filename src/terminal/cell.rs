@@ -17,7 +17,7 @@ bitflags::bitflags! {
 /// Terminal cell — also the GPU CellData format.
 /// Atlas coords are resolved at write time so GPU upload is a raw memcpy.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub struct Cell {
     pub codepoint: u16,
     pub flags: CellFlags,

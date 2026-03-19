@@ -519,27 +519,18 @@ impl Grid {
             // No chars[] update needed: cell.codepoint is set to the ASCII value
             // (non-zero), so char_at() reads directly from the cell.
             let base = self.row_start(row) + col;
-            let mut changed = false;
             for j in 0..n {
                 let b = bytes[i + j];
                 let ap = self.ascii_atlas[b as usize];
-                let new_cell = Cell {
-                    codepoint: b as u16,
-                    flags: attr.flags,
-                    fg_index: attr.fg_index,
-                    bg_index: attr.bg_index,
-                    atlas_x: ap[0],
-                    atlas_y: ap[1],
-                };
                 let cell = &mut self.cells[base + j];
-                if *cell != new_cell {
-                    *cell = new_cell;
-                    changed = true;
-                }
+                cell.codepoint = b as u16;
+                cell.flags = attr.flags;
+                cell.fg_index = attr.fg_index;
+                cell.bg_index = attr.bg_index;
+                cell.atlas_x = ap[0];
+                cell.atlas_y = ap[1];
             }
-            if changed {
-                self.mark_dirty(row);
-            }
+            self.mark_dirty(row);
 
             i += n;
 
@@ -575,27 +566,22 @@ impl Grid {
         let idx = self.row_start(row) + col as usize;
         let attr = self.attr;
         let cp = c as u32;
-        let cp16 = if cp <= 0xFFFF { cp as u16 } else { 0 };
-        let new_cell = Cell {
-            codepoint: cp16,
-            flags: attr.flags,
-            fg_index: attr.fg_index,
-            bg_index: attr.bg_index,
-            atlas_x,
-            atlas_y,
-        };
-        if self.cells[idx] != new_cell {
-            self.cells[idx] = new_cell;
-            if cp > 0xFFFF {
-                self.chars[idx] = c;
-                self.has_non_bmp = true;
-            }
-            self.mark_dirty(row);
-        } else if cp > 0xFFFF {
-            // Cell unchanged but ensure chars vec is consistent for non-BMP
+        let cell = &mut self.cells[idx];
+        // BMP: store codepoint directly (char_at reads from cell).
+        // Non-BMP: store 0 sentinel, write real char to chars vec.
+        if cp <= 0xFFFF {
+            cell.codepoint = cp as u16;
+        } else {
+            cell.codepoint = 0;
             self.chars[idx] = c;
             self.has_non_bmp = true;
         }
+        cell.flags = attr.flags;
+        cell.fg_index = attr.fg_index;
+        cell.bg_index = attr.bg_index;
+        cell.atlas_x = atlas_x;
+        cell.atlas_y = atlas_y;
+        self.mark_dirty(row);
 
         // Advance cursor
         if self.cursor_col >= self.cols - 1 {
@@ -684,42 +670,31 @@ impl Grid {
         let cp = c as u32;
 
         let cp16 = if cp <= 0xFFFF { cp as u16 } else { 0 };
-
-        // First cell
-        let new_cell1 = Cell {
-            codepoint: cp16,
-            flags: attr.flags | CellFlags::WIDE,
-            fg_index: attr.fg_index,
-            bg_index: attr.bg_index,
-            atlas_x,
-            atlas_y,
-        };
-
-        // Continuation cell
-        let new_cell2 = Cell {
-            codepoint: cp16,
-            flags: CellFlags::WIDE_CONT,
-            fg_index: attr.fg_index,
-            bg_index: attr.bg_index,
-            atlas_x,
-            atlas_y,
-        };
-
-        let changed = self.cells[idx] != new_cell1 || self.cells[idx + 1] != new_cell2;
-        if changed {
-            self.cells[idx] = new_cell1;
-            self.cells[idx + 1] = new_cell2;
-            if cp > 0xFFFF {
-                self.chars[idx] = c;
-                self.chars[idx + 1] = c;
-                self.has_non_bmp = true;
-            }
-            self.mark_dirty(row);
-        } else if cp > 0xFFFF {
+        if cp > 0xFFFF {
             self.chars[idx] = c;
             self.chars[idx + 1] = c;
             self.has_non_bmp = true;
         }
+
+        // First cell
+        let cell = &mut self.cells[idx];
+        cell.codepoint = cp16;
+        cell.flags = attr.flags | CellFlags::WIDE;
+        cell.fg_index = attr.fg_index;
+        cell.bg_index = attr.bg_index;
+        cell.atlas_x = atlas_x;
+        cell.atlas_y = atlas_y;
+
+        // Continuation cell
+        let cell2 = &mut self.cells[idx + 1];
+        cell2.codepoint = cp16;
+        cell2.flags = CellFlags::WIDE_CONT;
+        cell2.fg_index = attr.fg_index;
+        cell2.bg_index = attr.bg_index;
+        cell2.atlas_x = atlas_x;
+        cell2.atlas_y = atlas_y;
+
+        self.mark_dirty(row);
 
         // Advance cursor by 2
         if self.cursor_col + 2 >= self.cols {
