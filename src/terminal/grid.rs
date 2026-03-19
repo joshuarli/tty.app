@@ -459,6 +459,34 @@ impl Grid {
         }
     }
 
+    /// Move cursor back one column and clear pending wrap (BS).
+    #[inline]
+    pub fn backspace(&mut self) {
+        if self.cursor_col > 0 {
+            self.cursor_col -= 1;
+            self.cursor_pending_wrap = false;
+        }
+    }
+
+    /// Execute a linefeed: scroll if at bottom of scroll region,
+    /// otherwise move cursor down. Pushes evicted rows to scrollback.
+    #[inline]
+    pub fn linefeed(&mut self, scrollback: Option<&mut Scrollback>) {
+        if self.cursor_row == self.scroll_bottom {
+            self.scroll_up_into(1, scrollback);
+        } else if self.cursor_row < self.rows - 1 {
+            self.cursor_row += 1;
+        }
+        self.mark_dirty(self.cursor_row);
+    }
+
+    /// Carriage return: move cursor to column 0.
+    #[inline]
+    pub fn carriage_return(&mut self) {
+        self.cursor_col = 0;
+        self.cursor_pending_wrap = false;
+    }
+
     /// Bulk-write a run of printable ASCII bytes at the current cursor position.
     /// Atlas coords are resolved from the internal ascii_atlas table.
     pub fn write_ascii_run(&mut self, bytes: &[u8]) {

@@ -33,6 +33,32 @@ pub fn clipboard_has_image() -> bool {
     pb.dataForType(png_type).is_some()
 }
 
+/// Decode base64-encoded data (used by OSC 52 clipboard sequences).
+pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, ()> {
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf: u32 = 0;
+    let mut bits = 0;
+    for &b in input {
+        let val = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' | b'\n' | b'\r' | b' ' => continue,
+            _ => return Err(()),
+        };
+        buf = (buf << 6) | val as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    Ok(out)
+}
+
 /// Place raw image data on the clipboard with the given UTI type.
 /// Used by tests and by the paste-image path.
 #[allow(dead_code)]

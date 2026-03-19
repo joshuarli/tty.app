@@ -311,7 +311,12 @@ impl CsiFastParser {
         None
     }
 
-    fn dispatch<P: Perform>(final_byte: u8, params: &[u16], private: bool, performer: &mut P) {
+    /// Dispatch a parsed CSI sequence to Perform trait methods.
+    ///
+    /// Handles all standard (no-intermediate) CSI sequences. Also used as the
+    /// shared dispatch table for split sequences that go through the state
+    /// machine → csi_dispatch fallback path.
+    pub fn dispatch<P: Perform>(final_byte: u8, params: &[u16], private: bool, performer: &mut P) {
         let p0 = params.first().copied().unwrap_or(0);
         let p1 = if params.len() > 1 { params[1] } else { 0 };
 
@@ -319,11 +324,7 @@ impl CsiFastParser {
             match final_byte {
                 b'h' => performer.set_mode(params, true),
                 b'l' => performer.reset_mode(params, true),
-                _ => {
-                    // Unknown private CSI — pass '?' as intermediate so csi_dispatch
-                    // can distinguish CSI ? Ps X from CSI Ps X
-                    performer.csi_dispatch(params, b"?", false, final_byte);
-                }
+                _ => {}
             }
             return;
         }
@@ -411,9 +412,7 @@ impl CsiFastParser {
             b's' => performer.save_cursor(),
             b'u' => performer.restore_cursor(),
 
-            _ => {
-                performer.csi_dispatch(params, &[], false, final_byte);
-            }
+            _ => {}
         }
     }
 }

@@ -393,37 +393,41 @@ impl NativeWindow {
 
     /// Translate a single NSEvent into our Event enum.
     pub fn translate_ns_event(&self, event: &NSEvent) -> Option<Event> {
-        let event_type = event.r#type();
-
-        if event_type == NSEventType::KeyDown {
-            return self.translate_key_event(event);
-        } else if event_type == NSEventType::FlagsChanged {
-            let mods = Modifiers::from_ns_flags(event.modifierFlags());
-            return Some(Event::ModifiersChanged { modifiers: mods });
-        } else if event_type == NSEventType::LeftMouseDown {
-            let (x, y) = self.mouse_position(event);
-            return Some(Event::MouseDown { x, y });
-        } else if event_type == NSEventType::LeftMouseUp {
-            let (x, y) = self.mouse_position(event);
-            return Some(Event::MouseUp { x, y });
-        } else if event_type == NSEventType::LeftMouseDragged {
-            let (x, y) = self.mouse_position(event);
-            return Some(Event::MouseDragged { x, y });
-        } else if event_type == NSEventType::ScrollWheel {
-            let (x, y) = self.mouse_position(event);
-            let delta_y = event.scrollingDeltaY();
-            let precise = event.hasPreciseScrollingDeltas();
-            if delta_y != 0.0 {
-                return Some(Event::ScrollWheel {
-                    x,
-                    y,
-                    delta_y,
-                    precise,
-                });
+        match event.r#type() {
+            NSEventType::KeyDown => self.translate_key_event(event),
+            NSEventType::FlagsChanged => {
+                let mods = Modifiers::from_ns_flags(event.modifierFlags());
+                Some(Event::ModifiersChanged { modifiers: mods })
             }
+            NSEventType::LeftMouseDown => {
+                let (x, y) = self.mouse_position(event);
+                Some(Event::MouseDown { x, y })
+            }
+            NSEventType::LeftMouseUp => {
+                let (x, y) = self.mouse_position(event);
+                Some(Event::MouseUp { x, y })
+            }
+            NSEventType::LeftMouseDragged => {
+                let (x, y) = self.mouse_position(event);
+                Some(Event::MouseDragged { x, y })
+            }
+            NSEventType::ScrollWheel => {
+                let (x, y) = self.mouse_position(event);
+                let delta_y = event.scrollingDeltaY();
+                let precise = event.hasPreciseScrollingDeltas();
+                if delta_y != 0.0 {
+                    Some(Event::ScrollWheel {
+                        x,
+                        y,
+                        delta_y,
+                        precise,
+                    })
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
-
-        None
     }
 
     /// Check for close/resize/focus changes and push events.

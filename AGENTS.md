@@ -6,15 +6,18 @@ A GPU-accelerated terminal emulator for macOS. Rust + Metal compute shaders, sin
 
 ```
 src/
-├── main.rs                 # Event loop, App struct, TermPerformer (Perform impl)
+├── main.rs                 # Event loop, App struct, multi-window kqueue orchestration
+├── performer.rs            # TermPerformer — Perform trait impl bridging parser → grid
+├── unicode.rs              # is_wide() / is_zero_width() codepoint classification
 ├── lib.rs                  # Re-exports config, parser, terminal as public modules
 ├── config.rs               # Compile-time constants (font, palette, padding)
+├── clipboard.rs            # macOS pasteboard access + base64 decode (OSC 52)
 ├── input.rs                # Key/mouse events → VT byte sequences
 ├── window.rs               # Native macOS windowing (objc2 AppKit), event polling, fullscreen
 ├── parser/
 │   ├── mod.rs              # Three-layer parser: SIMD → CSI fast → state machine
 │   ├── simd.rs             # NEON vectorized printable ASCII scanner
-│   ├── csi_fast.rs         # Inline parser for common CSI sequences (~25 final bytes)
+│   ├── csi_fast.rs         # Inline parser + shared dispatch table for CSI sequences
 │   ├── state_machine.rs    # Full Paul Williams VT500 state machine
 │   ├── table.rs            # Byte classification + state transition lookup table
 │   ├── perform.rs          # Perform trait — parser-to-grid interface
@@ -30,7 +33,7 @@ src/
 │   └── mod.rs
 └── terminal/
     ├── cell.rs             # Cell struct (repr(C), 8 bytes) — IS the GPU format directly
-    ├── grid.rs             # Ring buffer grid (flat Vec<Cell>), dirty BitVec, scroll, alt-screen
+    ├── grid.rs             # Ring buffer grid, dirty BitVec, scroll, alt-screen, cursor helpers
     ├── scrollback.rs       # Ring buffer of evicted rows
     └── mod.rs
 ```
@@ -48,7 +51,7 @@ Parser.parse()
   ├─ Layer 2: CSI fast path — handles ESC[ sequences inline, no state machine
   │   Returns None on anything unusual → falls through to layer 3
   └─ Layer 3: State machine — full VT500 (table.rs transition table)
-      Handles DCS, OSC, ESC dispatch, CSI fallback (csi_dispatch mirrors fast path)
+      Handles DCS, OSC, ESC dispatch, CSI fallback (csi_dispatch delegates to fast path)
   │
   ▼
 TermPerformer (implements Perform trait)
@@ -125,7 +128,7 @@ When an application sets Mode 2026 (e.g., tmux during pane switch), `render()` r
 
 The three layers are a performance hierarchy. Layer 1 (SIMD) handles bulk text at ~16 GB/s on Apple Silicon. Layer 2 (CSI fast) avoids state machine overhead for the ~25 sequences that account for >95% of CSI traffic. Layer 3 (state machine) handles everything else faithfully.
 
-**Cross-boundary correctness**: The parser maintains state across `parse()` calls. When a CSI sequence spans two PTY reads (e.g., `ESC[` arrives in one read, `5;10H` in the next), the fast path cannot parse it (returns None). The state machine accumulates the bytes and dispatches the complete sequence via `csi_dispatch()`. This means `csi_dispatch()` must handle **every** CSI sequence the fast path handles — a mismatch causes silent drops. The UTF-8 assembler similarly buffers incomplete multi-byte sequences (2-4 bytes) across parse() boundaries and completes them on the next call.
+**Cross-boundary correctness**: The parser maintains state across `parse()` calls. When a CSI sequence spans two PTY reads (e.g., `ESC[` arrives in one read, `5;10H` in the next), the fast path cannot parse it (returns None). The state machine accumulates the bytes and dispatches the complete sequence via `csi_dispatch()`, which delegates to `CsiFastParser::dispatch()` for standard sequences. The UTF-8 assembler similarly buffers incomplete multi-byte sequences (2-4 bytes) across parse() boundaries and completes them on the next call.
 
 ### Pending wrap (DECAWM)
 
@@ -168,20 +171,23 @@ Native macOS windowing via `objc2` / `objc2-app-kit` (no winit). `NativeWindow` 
 
 ### main.rs
 
-`App` struct owns all state. `SharedState` groups the grid, scrollback, response buffer, and alive flag. `TermPerformer` is a short-lived borrow of these components plus the atlas, created per PTY read chunk.
+`App` struct owns all state. `SharedState` groups the grid, scrollback, response buffer, and alive flag. Multi-window support: a `Vec<Terminal>` holds one `App` + `NativeWindow` per window, with a kqueue watching all PTY fds. Event routing matches NSEvents to windows by pointer identity. Cmd+N and dock menu spawn new terminals; dead terminals are reaped each frame.
 
-The `Perform` trait implementation in `TermPerformer` covers:
+### performer.rs
+
+`TermPerformer` is a short-lived borrow of grid + scrollback + atlas + rasterizer + response_buf, created per PTY read chunk. Its `Perform` trait implementation covers:
 - Character printing (ASCII runs via Grid's ascii_atlas + single Unicode chars with atlas lookup at write time)
 - All cursor movement (relative, absolute, save/restore)
 - Erase operations (display, line, characters)
 - Scrolling (up/down within scroll region)
 - Line/character insert/delete
-- SGR parsing (8-color, 256-color, 24-bit RGB degraded to 256-color; bold/dim/italic/underline/inverse/hidden/strike)
+- SGR parsing (8-color, 256-color, 24-bit RGB degraded to 256-color; bold/dim/italic/underline/inverse/hidden/strike). `sgr()` delegates simple codes to `sgr_single()` and only handles multi-param 38/48 extended color sequences itself.
 - SGR colon sub-parameters (underline styles `4:N`, `38:2::R:G:B`, `48:2::R:G:B`)
 - Mode set/reset (DECSET/DECRST: cursor keys, origin mode, autowrap, cursor visible, alt-screen, mouse, focus events, bracketed paste, sync output)
 - OSC dispatch (window title, clipboard via OSC 52)
 - ESC dispatch (charset selection, save/restore cursor, RIS, IND, NEL, RI, tab stop set)
 - Device status report (cursor position response, DA1, DA2, DECRQM)
+- `csi_dispatch()` handles only DA1, DA2, DECRQM, and private mode sequences directly; all other no-intermediate CSI sequences delegate to `CsiFastParser::dispatch()` (the shared dispatch table)
 
 ### parser/table.rs
 
@@ -191,11 +197,11 @@ The `Perform` trait implementation in `TermPerformer` covers:
 
 Parses CSI parameters inline (up to 16 semicolon-separated u16 values). Colon sub-parameters are handled inline for SGR sequences (dispatched to `performer.sgr_colon()` with the raw parameter bytes). Bails to state machine on: intermediate bytes (`0x20..0x2F`), unrecognized final bytes, incomplete sequences (buffer ends mid-sequence). The `?` prefix for private modes is detected and passed through.
 
-**Invariant**: Every sequence handled by `csi_fast.rs` must also be handled in `TermPerformer::csi_dispatch()` (main.rs). The fast path handles complete sequences in a single buffer. When a sequence spans buffers, the state machine dispatches it to `csi_dispatch()` instead. If `csi_dispatch()` doesn't handle a sequence, it is silently dropped.
+**CSI dispatch architecture**: `CsiFastParser::dispatch()` is the single shared dispatch table for standard CSI sequences. It is called directly by the fast path for complete sequences, and also by `TermPerformer::csi_dispatch()` for split sequences that went through the state machine. `csi_dispatch()` handles only sequences that need `response_buf` access (DA1, DA2, DECRQM) or intermediate bytes (`?`, `>`, `$`), then delegates `([], _)` to `CsiFastParser::dispatch()`. This eliminates the previous duplication where the same dispatch table existed in both `csi_fast.rs` and the performer.
 
 ### terminal/grid.rs
 
-The grid is a flat `Vec<Cell>` with ring buffer addressing: `row_start(logical_row)` computes `((logical_row + ring_offset) % rows) * cols`. Full-screen scroll increments `ring_offset` and clears the new bottom row. Partial scrolls within a scroll region use `copy_within` (memmove). Alt-screen swap is a `std::mem::swap` of the cell vectors and ring offsets. Resize flattens the ring buffer (copies to a new vec), preserves content where possible, and rebuilds tab stops.
+The grid is a flat `Vec<Cell>` with ring buffer addressing: `row_start(logical_row)` computes `((logical_row + ring_offset) % rows) * cols`. Full-screen scroll increments `ring_offset` and clears the new bottom row. Partial scrolls within a scroll region use `copy_within` (memmove). Alt-screen swap is a `std::mem::swap` of the cell vectors and ring offsets. Resize flattens the ring buffer (copies to a new vec), preserves content where possible, and rebuilds tab stops. Common cursor operations — `backspace()`, `linefeed()`, `carriage_return()` — are Grid methods to centralize the cursor mutation + pending-wrap-clear pattern.
 
 `TermMode` bitflags track all DECSET modes. `SavedCursor` captures cursor position + SGR attributes + charset state for DECSC/DECRC and alt-screen transitions.
 
