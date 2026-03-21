@@ -2,6 +2,12 @@
 
 standard issue terminal emulator
 
+The terminal emulator should be as simple as possible because
+tmux gives you everything else you need: session management,
+tabs (windows/panes), scrollback buffer, selection, clipboard,
+search. Of course, we still implement basic amenities in case
+tmux is not present.
+
 - Apple Silicon only — Rust + Metal compute shader
 - ~200 KB binary, zero runtime dependencies
 - 8-byte Cell is the GPU format � dirty rows memcpy'd directly to Metal buffer
