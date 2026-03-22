@@ -106,6 +106,63 @@ constant uchar BOX_EDGES[128] = {
     0x13, 0x4C, 0x31, 0xC4,
 };
 
+// ── Arrow drawing ─────────────────────────────────────────────────
+// Procedural arrows for U+2190..U+2195 (← ↑ → ↓ ↔ ↕)
+// Shaft uses identical dimensions to box-drawing light lines so they
+// connect seamlessly with adjacent ─ or │ characters.
+static inline bool draw_arrow(uint cp, uint px, uint py,
+                               uint cw, uint ch) {
+    if (cp < 0x2190 || cp > 0x2195) return false;
+
+    uint cx = cw / 2;
+    uint cy = ch / 2;
+    uint light_w = max(1u, cw / 8);
+
+    bool hit = false;
+
+    // Horizontal arrows: ← (2190), → (2192), ↔ (2194)
+    if (cp == 0x2190 || cp == 0x2192 || cp == 0x2194) {
+        // Shaft — same as box-drawing light horizontal line
+        if (py >= cy - light_w/2 && py < cy + (light_w+1)/2) hit = true;
+
+        uint head_len  = max(3u, cw / 2);
+        uint head_half = max(3u, ch / 4);
+        uint dy = uint(abs(int(py) - int(cy)));
+
+        // Left arrowhead (← or ↔): tip at px=0, base at px=head_len
+        if ((cp == 0x2190 || cp == 0x2194) && px < head_len) {
+            if (dy * head_len <= head_half * px) hit = true;
+        }
+        // Right arrowhead (→ or ↔): tip at px=cw-1, base at px=cw-head_len
+        if ((cp == 0x2192 || cp == 0x2194) && px >= cw - head_len) {
+            uint rdx = cw - 1 - px;
+            if (dy * head_len <= head_half * rdx) hit = true;
+        }
+    }
+
+    // Vertical arrows: ↑ (2191), ↓ (2193), ↕ (2195)
+    if (cp == 0x2191 || cp == 0x2193 || cp == 0x2195) {
+        // Shaft — same as box-drawing light vertical line
+        if (px >= cx - light_w/2 && px < cx + (light_w+1)/2) hit = true;
+
+        uint vhead_len  = max(3u, ch / 3);
+        uint vhead_half = max(2u, cw / 3);
+        uint dx = uint(abs(int(px) - int(cx)));
+
+        // Up arrowhead (↑ or ↕): tip at py=0, base at py=vhead_len
+        if ((cp == 0x2191 || cp == 0x2195) && py < vhead_len) {
+            if (dx * vhead_len <= vhead_half * py) hit = true;
+        }
+        // Down arrowhead (↓ or ↕): tip at py=ch-1, base at py=ch-vhead_len
+        if ((cp == 0x2193 || cp == 0x2195) && py >= ch - vhead_len) {
+            uint rdy = ch - 1 - py;
+            if (dx * vhead_len <= vhead_half * rdy) hit = true;
+        }
+    }
+
+    return hit;
+}
+
 static inline half4 unpack_rgb(uint rgb) {
     return half4(
         half((rgb >> 16) & 0xFF) / 255.0h,
@@ -239,6 +296,10 @@ kernel void render(
     uint cp = uint(cell.codepoint);
     if (cp >= 0x2500 && cp <= 0x257F) {
         if (draw_box_line(cp, px, py, uni.cell_width, uni.cell_height)) {
+            color = fg;
+        }
+    } else if (cp >= 0x2190 && cp <= 0x2195) {
+        if (draw_arrow(cp, px, py, uni.cell_width, uni.cell_height)) {
             color = fg;
         }
     } else if (cell.atlas_x != 0 || cell.atlas_y != 0) {
