@@ -784,17 +784,21 @@ fn main() {
                 }
 
                 // Route to matching terminal by window pointer
+                let mut handled = false;
                 if let Some(t) =
                     terminals.iter_mut().find(|t| t.win.owns_ns_event(&ns_event, mtm))
                     && let Some(translated) = t.win.translate_ns_event(&ns_event)
                 {
                     t.app.handle_event(&translated, &t.win);
                     got_events = true;
+                    handled = true;
                 }
 
-                // Don't sendEvent for Escape — AppKit's fullscreen machinery
-                // intercepts it via the responder chain and exits fullscreen.
-                if !is_escape {
+                // Don't sendEvent for key-downs we already handled — AppKit's
+                // responder chain has no keyDown: override, so unhandled keys
+                // trigger NSBeep().  Also skip Escape to prevent AppKit from
+                // exiting fullscreen via the responder chain.
+                if !is_escape && !(handled && event_type == NSEventType::KeyDown) {
                     nsapp.sendEvent(&ns_event);
                 }
             }
