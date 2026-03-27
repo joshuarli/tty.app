@@ -91,7 +91,13 @@ pub fn key_to_bytes(key: &Key, modifiers: &Modifiers, term_mode: TermMode) -> Op
                         Some(maybe_esc_prefix(alt, &[0x09]))
                     }
                 }
-                NamedKey::Enter => Some(maybe_esc_prefix(alt, &[0x0D])),
+                NamedKey::Enter => {
+                    if ctrl {
+                        Some(maybe_esc_prefix(alt, &[0x0A])) // Ctrl+Enter = LF
+                    } else {
+                        Some(maybe_esc_prefix(alt, &[0x0D]))
+                    }
+                }
                 NamedKey::Escape => Some(vec![0x1B]),
                 NamedKey::Space => {
                     if ctrl {

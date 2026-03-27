@@ -673,6 +673,12 @@ impl<'a> Perform for TermPerformer<'a> {
                 }
             }
 
+            // DECSCUSR — cursor style: CSI Ps SP q
+            ([b' '], b'q') => {
+                let style = params.first().copied().unwrap_or(0);
+                self.set_cursor_style(style);
+            }
+
             // Standard CSI sequences — shared dispatch table
             ([], _) => CsiFastParser::dispatch(byte, params, false, self),
 
