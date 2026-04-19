@@ -124,6 +124,11 @@ impl Modifiers {
         }
         Self(m)
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_bits_for_test(bits: u8) -> Self {
+        Self(bits)
+    }
 }
 
 // ── TtyView: minimal NSView subclass ──
@@ -231,8 +236,7 @@ thread_local! {
 }
 
 /// Singleton window delegate shared by all windows.
-static WINDOW_DELEGATE: AtomicPtr<objc2::runtime::AnyObject> =
-    AtomicPtr::new(std::ptr::null_mut());
+static WINDOW_DELEGATE: AtomicPtr<objc2::runtime::AnyObject> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Get or create the shared window delegate instance.
 fn window_delegate() -> *mut objc2::runtime::AnyObject {
@@ -357,7 +361,8 @@ impl NativeWindow {
         // bracket a zero-duration animation context so toggleFullScreen executes without
         // visible transition. The window is valid and on the main thread.
         unsafe {
-            let ctx_cls = objc2::runtime::AnyClass::get(c"NSAnimationContext").expect("NSAnimationContext class");
+            let ctx_cls = objc2::runtime::AnyClass::get(c"NSAnimationContext")
+                .expect("NSAnimationContext class");
             let _: () = objc2::msg_send![ctx_cls, beginGrouping];
             let ctx: *const objc2::runtime::AnyObject = objc2::msg_send![ctx_cls, currentContext];
             let _: () = objc2::msg_send![ctx, setDuration: 0.0f64];
@@ -499,9 +504,7 @@ impl NativeWindow {
         event
             .window(mtm)
             .as_ref()
-            .is_some_and(|w| {
-                Retained::as_ptr(w) == Retained::as_ptr(&self.window)
-            })
+            .is_some_and(|w| Retained::as_ptr(w) == Retained::as_ptr(&self.window))
     }
 
     pub fn view(&self) -> &NSView {
@@ -574,6 +577,13 @@ impl NativeWindow {
             return None;
         }
 
+        if let Some(named) = special_chars_to_named(&s) {
+            return Some(Event::KeyDown {
+                key: Key::Named(named),
+                modifiers,
+            });
+        }
+
         Some(Event::KeyDown {
             key: Key::Character(s),
             modifiers,
@@ -614,6 +624,13 @@ fn keycode_to_named(code: u16) -> Option<NamedKey> {
         0x6D => Some(NamedKey::F10),
         0x67 => Some(NamedKey::F11),
         0x6F => Some(NamedKey::F12),
+        _ => None,
+    }
+}
+
+fn special_chars_to_named(s: &str) -> Option<NamedKey> {
+    match s.chars().next()? {
+        '\u{f728}' => Some(NamedKey::Delete), // NSDeleteFunctionKey
         _ => None,
     }
 }

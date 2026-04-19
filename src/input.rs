@@ -19,6 +19,10 @@ pub fn key_to_bytes(key: &Key, modifiers: &Modifiers, term_mode: TermMode) -> Op
         Key::Character(s) => {
             let ch = s.chars().next()?;
 
+            if ch == '\u{f728}' {
+                return Some(modified_key(b"3", shift, alt, ctrl));
+            }
+
             if ctrl {
                 // Ctrl+letter → 0x01-0x1A
                 if ch.is_ascii_lowercase() {
@@ -83,7 +87,13 @@ pub fn key_to_bytes(key: &Key, modifiers: &Modifiers, term_mode: TermMode) -> Op
                 NamedKey::F12 => Some(fkey(24, shift, alt, ctrl)),
 
                 // Basic keys
-                NamedKey::Backspace => Some(maybe_esc_prefix(alt, &[0x7F])),
+                NamedKey::Backspace => {
+                    if ctrl {
+                        Some(modified_key(b"3", shift, alt, ctrl))
+                    } else {
+                        Some(maybe_esc_prefix(alt, &[0x7F]))
+                    }
+                }
                 NamedKey::Tab => {
                     if shift {
                         Some(b"\x1B[Z".to_vec()) // Back-tab
@@ -200,5 +210,43 @@ pub fn mouse_to_bytes(button: u8, col: u16, row: u16, pressed: bool, sgr: bool) 
             (row as u8).wrapping_add(32)
         };
         vec![0x1B, b'[', b'M', cb, cx, cy]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ctrl_delete_named_emits_xterm_sequence() {
+        let bytes = key_to_bytes(
+            &Key::Named(NamedKey::Delete),
+            &Modifiers::from_bits_for_test(2),
+            TermMode::empty(),
+        )
+        .expect("ctrl-delete");
+        assert_eq!(bytes, b"\x1b[3;5~");
+    }
+
+    #[test]
+    fn ctrl_backspace_named_emits_xterm_ctrl_delete_sequence() {
+        let bytes = key_to_bytes(
+            &Key::Named(NamedKey::Backspace),
+            &Modifiers::from_bits_for_test(2),
+            TermMode::empty(),
+        )
+        .expect("ctrl-backspace");
+        assert_eq!(bytes, b"\x1b[3;5~");
+    }
+
+    #[test]
+    fn ctrl_delete_function_char_emits_xterm_sequence() {
+        let bytes = key_to_bytes(
+            &Key::Character("\u{f728}".to_string()),
+            &Modifiers::from_bits_for_test(2),
+            TermMode::empty(),
+        )
+        .expect("ctrl-delete");
+        assert_eq!(bytes, b"\x1b[3;5~");
     }
 }
