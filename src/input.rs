@@ -191,14 +191,31 @@ fn modifier_param(shift: bool, alt: bool, ctrl: bool) -> u8 {
 /// `col`, `row`: 1-based cell coordinates.
 /// `pressed`: true for press/motion, false for release.
 /// `sgr`: true to use SGR (mode 1006) encoding, false for X10/normal encoding.
-pub fn mouse_to_bytes(button: u8, col: u16, row: u16, pressed: bool, sgr: bool) -> Vec<u8> {
+pub fn mouse_to_bytes(
+    button: u8,
+    modifiers: &Modifiers,
+    col: u16,
+    row: u16,
+    pressed: bool,
+    sgr: bool,
+) -> Vec<u8> {
+    let mut cb = button;
+    if modifiers.shift() {
+        cb |= 4;
+    }
+    if modifiers.alt() {
+        cb |= 8;
+    }
+    if modifiers.control() {
+        cb |= 16;
+    }
     if sgr {
         // SGR encoding: ESC [ < button ; col ; row M/m
         let suffix = if pressed { 'M' } else { 'm' };
-        format!("\x1B[<{};{};{}{}", button, col, row, suffix).into_bytes()
+        format!("\x1B[<{};{};{}{}", cb, col, row, suffix).into_bytes()
     } else {
         // X10/Normal encoding: ESC [ M cb cx cy (each + 32)
-        let cb = button.wrapping_add(32);
+        let encoded_cb = cb.wrapping_add(32);
         let cx = if col > 223 {
             255
         } else {
@@ -209,7 +226,7 @@ pub fn mouse_to_bytes(button: u8, col: u16, row: u16, pressed: bool, sgr: bool) 
         } else {
             (row as u8).wrapping_add(32)
         };
-        vec![0x1B, b'[', b'M', cb, cx, cy]
+        vec![0x1B, b'[', b'M', encoded_cb, cx, cy]
     }
 }
 
@@ -248,5 +265,17 @@ mod tests {
         )
         .expect("ctrl-delete");
         assert_eq!(bytes, b"\x1b[3;5~");
+    }
+
+    #[test]
+    fn sgr_ctrl_left_click_sets_ctrl_modifier_bit() {
+        let bytes = mouse_to_bytes(0, &Modifiers::from_bits_for_test(2), 10, 20, true, true);
+        assert_eq!(bytes, b"\x1b[<16;10;20M");
+    }
+
+    #[test]
+    fn normal_ctrl_left_click_sets_ctrl_modifier_bit() {
+        let bytes = mouse_to_bytes(0, &Modifiers::from_bits_for_test(2), 10, 20, true, false);
+        assert_eq!(bytes, vec![0x1b, b'[', b'M', 48, 42, 52]);
     }
 }

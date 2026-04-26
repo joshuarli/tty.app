@@ -26,7 +26,9 @@ use crate::renderer::metal::MetalRenderer;
 use crate::terminal::cell::CellFlags;
 use crate::terminal::grid::{Grid, TermMode};
 use crate::terminal::scrollback::Scrollback;
-use crate::window::{init_app, new_window_requested, Event, Key, Modifiers, NativeWindow};
+use crate::window::{
+    Event, Key, Modifiers, MouseButton, NativeWindow, init_app, new_window_requested,
+};
 
 /// Shared state between I/O thread and main thread.
 struct SharedState {
@@ -68,6 +70,14 @@ struct App {
 }
 
 impl App {
+    fn mouse_button_code(button: MouseButton) -> u8 {
+        match button {
+            MouseButton::Left => 0,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+        }
+    }
+
     fn new(win: &NativeWindow) -> Self {
         let scale = win.scale_factor();
         let (phys_w, phys_h) = win.physical_size();
@@ -255,8 +265,8 @@ impl App {
         }
 
         // Cursor visible when DECTCEM is set and viewing live (not scrollback)
-        self.cursor_visible = self.shared.grid.mode.contains(TermMode::CURSOR_VISIBLE)
-            && self.viewport_offset == 0;
+        self.cursor_visible =
+            self.shared.grid.mode.contains(TermMode::CURSOR_VISIBLE) && self.viewport_offset == 0;
 
         // render_frame returns true when GPU work was dispatched, false when idle.
         // A deferred render (GPU buffer busy) is not idle — we want to retry promptly.
@@ -476,7 +486,12 @@ impl App {
                 }
             }
 
-            Event::MouseDown { x, y } => {
+            Event::MouseDown {
+                x,
+                y,
+                button,
+                modifiers,
+            } => {
                 self.cursor_pos = (*x, *y);
                 let cell = self.pixel_to_cell(*x, *y);
                 let mouse_mode = self.shared.grid.mode.intersects(
@@ -484,7 +499,14 @@ impl App {
                 );
                 if mouse_mode {
                     let sgr = self.shared.grid.mode.contains(TermMode::MOUSE_SGR);
-                    let bytes = input::mouse_to_bytes(0, cell.0 + 1, cell.1 + 1, true, sgr);
+                    let bytes = input::mouse_to_bytes(
+                        Self::mouse_button_code(*button),
+                        modifiers,
+                        cell.0 + 1,
+                        cell.1 + 1,
+                        true,
+                        sgr,
+                    );
                     let _ = self.pty.write(&bytes);
                     self.mouse_pressed = true;
                 } else {
@@ -495,7 +517,12 @@ impl App {
                 }
             }
 
-            Event::MouseUp { x, y } => {
+            Event::MouseUp {
+                x,
+                y,
+                button,
+                modifiers,
+            } => {
                 self.cursor_pos = (*x, *y);
                 let cell = self.pixel_to_cell(*x, *y);
                 let mouse_mode = self.shared.grid.mode.intersects(
@@ -516,21 +543,47 @@ impl App {
                     // coordinates first so tmux's cursor lands on the right cell
                     // before the button-up triggers the copy.
                     if motion_mode && self.mouse_pressed {
-                        let bytes = input::mouse_to_bytes(32, cell.0 + 1, cell.1 + 1, true, sgr);
+                        let bytes = input::mouse_to_bytes(
+                            32 | Self::mouse_button_code(*button),
+                            modifiers,
+                            cell.0 + 1,
+                            cell.1 + 1,
+                            true,
+                            sgr,
+                        );
                         let _ = self.pty.write(&bytes);
                     }
                     if sgr {
-                        let bytes = input::mouse_to_bytes(0, cell.0 + 1, cell.1 + 1, false, true);
+                        let bytes = input::mouse_to_bytes(
+                            Self::mouse_button_code(*button),
+                            modifiers,
+                            cell.0 + 1,
+                            cell.1 + 1,
+                            false,
+                            true,
+                        );
                         let _ = self.pty.write(&bytes);
                     } else {
-                        let bytes = input::mouse_to_bytes(3, cell.0 + 1, cell.1 + 1, true, false);
+                        let bytes = input::mouse_to_bytes(
+                            3,
+                            modifiers,
+                            cell.0 + 1,
+                            cell.1 + 1,
+                            true,
+                            false,
+                        );
                         let _ = self.pty.write(&bytes);
                     }
                 }
                 self.mouse_pressed = false;
             }
 
-            Event::MouseDragged { x, y } => {
+            Event::MouseDragged {
+                x,
+                y,
+                button,
+                modifiers,
+            } => {
                 self.cursor_pos = (*x, *y);
                 let motion_mode = self
                     .shared
@@ -541,7 +594,14 @@ impl App {
                     let cell = self.pixel_to_cell(*x, *y);
                     let sgr = self.shared.grid.mode.contains(TermMode::MOUSE_SGR);
                     // button 0 + 32 = motion flag
-                    let bytes = input::mouse_to_bytes(32, cell.0 + 1, cell.1 + 1, true, sgr);
+                    let bytes = input::mouse_to_bytes(
+                        32 | Self::mouse_button_code(*button),
+                        modifiers,
+                        cell.0 + 1,
+                        cell.1 + 1,
+                        true,
+                        sgr,
+                    );
                     let _ = self.pty.write(&bytes);
                 } else if !self.shared.grid.mode.intersects(
                     TermMode::MOUSE_BUTTON | TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL,
@@ -616,7 +676,8 @@ impl App {
             let cell = self.pixel_to_cell(self.cursor_pos.0, self.cursor_pos.1);
             let sgr = self.shared.grid.mode.contains(TermMode::MOUSE_SGR);
             let button = if lines > 0 { 64u8 } else { 65u8 };
-            let single = input::mouse_to_bytes(button, cell.0 + 1, cell.1 + 1, true, sgr);
+            let single =
+                input::mouse_to_bytes(button, &self.modifiers, cell.0 + 1, cell.1 + 1, true, sgr);
             let mut batch = Vec::with_capacity(single.len() * count as usize);
             for _ in 0..count {
                 batch.extend_from_slice(&single);
@@ -723,16 +784,8 @@ fn main() {
                     tv_nsec: 500_000,
                 };
                 let mut ev = std::mem::MaybeUninit::<libc::kevent>::uninit();
-                let n = unsafe {
-                    libc::kevent(
-                        kq,
-                        std::ptr::null(),
-                        0,
-                        ev.as_mut_ptr(),
-                        1,
-                        &coalesce,
-                    )
-                };
+                let n =
+                    unsafe { libc::kevent(kq, std::ptr::null(), 0, ev.as_mut_ptr(), 1, &coalesce) };
                 if n > 0 {
                     for t in terminals.iter_mut() {
                         t.app.process_pty_output(&t.win, PTY_BUDGET);
@@ -760,12 +813,13 @@ fn main() {
                 };
 
                 let event_type = ns_event.r#type();
-                let is_escape =
-                    event_type == NSEventType::KeyDown && ns_event.keyCode() == 0x35;
+                let is_escape = event_type == NSEventType::KeyDown && ns_event.keyCode() == 0x35;
 
                 // Global shortcuts: Cmd+Q quits, Cmd+N spawns a new window
                 if event_type == NSEventType::KeyDown
-                    && ns_event.modifierFlags().contains(NSEventModifierFlags::Command)
+                    && ns_event
+                        .modifierFlags()
+                        .contains(NSEventModifierFlags::Command)
                     && let Some(chars) = ns_event.charactersIgnoringModifiers()
                 {
                     match chars.to_string().as_str() {
@@ -785,8 +839,9 @@ fn main() {
 
                 // Route to matching terminal by window pointer
                 let mut handled = false;
-                if let Some(t) =
-                    terminals.iter_mut().find(|t| t.win.owns_ns_event(&ns_event, mtm))
+                if let Some(t) = terminals
+                    .iter_mut()
+                    .find(|t| t.win.owns_ns_event(&ns_event, mtm))
                     && let Some(translated) = t.win.translate_ns_event(&ns_event)
                 {
                     t.app.handle_event(&translated, &t.win);

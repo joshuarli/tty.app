@@ -1003,10 +1003,7 @@ fn sgr_foreground_colors() {
     assert_eq!(t.cell(0, 1).fg_index, 200);
     // 24-bit RGB (38;2;255;128;0) — degrades to nearest palette index
     t.feed(b"\x1B[38;2;255;128;0mY\x1B[0m");
-    assert_eq!(
-        t.cell(0, 2).fg_index,
-        config::rgb_to_palette(255, 128, 0)
-    );
+    assert_eq!(t.cell(0, 2).fg_index, config::rgb_to_palette(255, 128, 0));
 }
 
 #[test]

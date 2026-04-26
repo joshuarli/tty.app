@@ -24,14 +24,20 @@ pub enum Event {
     MouseDown {
         x: f64,
         y: f64,
+        button: MouseButton,
+        modifiers: Modifiers,
     },
     MouseUp {
         x: f64,
         y: f64,
+        button: MouseButton,
+        modifiers: Modifiers,
     },
     MouseDragged {
         x: f64,
         y: f64,
+        button: MouseButton,
+        modifiers: Modifiers,
     },
     ScrollWheel {
         x: f64,
@@ -84,6 +90,13 @@ pub enum NamedKey {
     Enter,
     Escape,
     Space,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -406,15 +419,84 @@ impl NativeWindow {
             }
             NSEventType::LeftMouseDown => {
                 let (x, y) = self.mouse_position(event);
-                Some(Event::MouseDown { x, y })
+                Some(Event::MouseDown {
+                    x,
+                    y,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::from_ns_flags(event.modifierFlags()),
+                })
             }
             NSEventType::LeftMouseUp => {
                 let (x, y) = self.mouse_position(event);
-                Some(Event::MouseUp { x, y })
+                Some(Event::MouseUp {
+                    x,
+                    y,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::from_ns_flags(event.modifierFlags()),
+                })
             }
             NSEventType::LeftMouseDragged => {
                 let (x, y) = self.mouse_position(event);
-                Some(Event::MouseDragged { x, y })
+                Some(Event::MouseDragged {
+                    x,
+                    y,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::from_ns_flags(event.modifierFlags()),
+                })
+            }
+            NSEventType::RightMouseDown => {
+                let (x, y) = self.mouse_position(event);
+                Some(Event::MouseDown {
+                    x,
+                    y,
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::from_ns_flags(event.modifierFlags()),
+                })
+            }
+            NSEventType::RightMouseUp => {
+                let (x, y) = self.mouse_position(event);
+                Some(Event::MouseUp {
+                    x,
+                    y,
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::from_ns_flags(event.modifierFlags()),
+                })
+            }
+            NSEventType::RightMouseDragged => {
+                let (x, y) = self.mouse_position(event);
+                Some(Event::MouseDragged {
+                    x,
+                    y,
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::from_ns_flags(event.modifierFlags()),
+                })
+            }
+            NSEventType::OtherMouseDown => {
+                let (x, y) = self.mouse_position(event);
+                Some(Event::MouseDown {
+                    x,
+                    y,
+                    button: MouseButton::Middle,
+                    modifiers: Modifiers::from_ns_flags(event.modifierFlags()),
+                })
+            }
+            NSEventType::OtherMouseUp => {
+                let (x, y) = self.mouse_position(event);
+                Some(Event::MouseUp {
+                    x,
+                    y,
+                    button: MouseButton::Middle,
+                    modifiers: Modifiers::from_ns_flags(event.modifierFlags()),
+                })
+            }
+            NSEventType::OtherMouseDragged => {
+                let (x, y) = self.mouse_position(event);
+                Some(Event::MouseDragged {
+                    x,
+                    y,
+                    button: MouseButton::Middle,
+                    modifiers: Modifiers::from_ns_flags(event.modifierFlags()),
+                })
             }
             NSEventType::ScrollWheel => {
                 let (x, y) = self.mouse_position(event);

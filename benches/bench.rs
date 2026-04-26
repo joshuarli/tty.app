@@ -1967,8 +1967,16 @@ fn make_htop_frame(frame: usize, cols: u16, rows: u16) -> Vec<u8> {
             buf.extend_from_slice(format!("{:>9} {:>9}  ", pid * 1024, pid * 512).as_bytes());
             // Process name — static
             let names = [
-                "systemd", "kthreadd", "rcu_sched", "migration", "watchdog",
-                "netns", "kworker", "kdevtmpfs", "inet_frag", "kauditd",
+                "systemd",
+                "kthreadd",
+                "rcu_sched",
+                "migration",
+                "watchdog",
+                "netns",
+                "kworker",
+                "kdevtmpfs",
+                "inet_frag",
+                "kauditd",
             ];
             let name = names[(row as usize - 4) % names.len()];
             buf.extend_from_slice(name.as_bytes());

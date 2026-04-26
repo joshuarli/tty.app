@@ -291,11 +291,7 @@ impl MetalRenderer {
                 // src points to a contiguous slice of Cell values.
                 unsafe {
                     let dst = dst_base.add(row * dst_stride);
-                    std::ptr::copy_nonoverlapping(
-                        src.as_ptr() as *const u8,
-                        dst,
-                        copy_bytes,
-                    );
+                    std::ptr::copy_nonoverlapping(src.as_ptr() as *const u8, dst, copy_bytes);
                     // Clear remainder if scrollback row is shorter than current cols
                     if copy_bytes < row_bytes {
                         std::ptr::write_bytes(dst.add(copy_bytes), 0, row_bytes - copy_bytes);
