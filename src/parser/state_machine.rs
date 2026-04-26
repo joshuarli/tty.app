@@ -111,12 +111,11 @@ impl StateMachine {
                     byte,
                 );
             }
+            ACTION_HOOK if self.param_count < MAX_PARAMS => {
+                self.params[self.param_count] = self.current_param.min(u16::MAX as u32) as u16;
+                self.param_count += 1;
+            }
             ACTION_HOOK => {
-                // DCS hook — finalize params
-                if self.param_count < MAX_PARAMS {
-                    self.params[self.param_count] = self.current_param.min(u16::MAX as u32) as u16;
-                    self.param_count += 1;
-                }
                 // We don't fully support DCS; just enter passthrough
             }
             ACTION_PUT => {

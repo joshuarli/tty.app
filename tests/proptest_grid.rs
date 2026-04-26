@@ -34,12 +34,11 @@ impl<'a> Perform for TestPerformer<'a> {
     fn execute(&mut self, byte: u8) {
         match byte {
             0x07 => {}
-            0x08 => {
-                if self.grid.cursor_col > 0 {
-                    self.grid.cursor_col -= 1;
-                    self.grid.cursor_pending_wrap = false;
-                }
+            0x08 if self.grid.cursor_col > 0 => {
+                self.grid.cursor_col -= 1;
+                self.grid.cursor_pending_wrap = false;
             }
+            0x08 => {}
             0x09 => {
                 let col = self.grid.cursor_col;
                 let cols = self.grid.cols;

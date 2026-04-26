@@ -256,16 +256,15 @@ impl<'a> Perform for TermPerformer<'a> {
                                     self.grid.attr.fg_index = params[i] as u8;
                                 }
                             }
-                            2 => {
-                                if i + 3 < params.len() {
-                                    self.grid.attr.fg_index = config::rgb_to_palette(
-                                        params[i + 1] as u8,
-                                        params[i + 2] as u8,
-                                        params[i + 3] as u8,
-                                    );
-                                    i += 3;
-                                }
+                            2 if i + 3 < params.len() => {
+                                self.grid.attr.fg_index = config::rgb_to_palette(
+                                    params[i + 1] as u8,
+                                    params[i + 2] as u8,
+                                    params[i + 3] as u8,
+                                );
+                                i += 3;
                             }
+                            2 => {}
                             _ => {}
                         }
                     }
@@ -281,16 +280,15 @@ impl<'a> Perform for TermPerformer<'a> {
                                     self.grid.attr.bg_index = params[i] as u8;
                                 }
                             }
-                            2 => {
-                                if i + 3 < params.len() {
-                                    self.grid.attr.bg_index = config::rgb_to_palette(
-                                        params[i + 1] as u8,
-                                        params[i + 2] as u8,
-                                        params[i + 3] as u8,
-                                    );
-                                    i += 3;
-                                }
+                            2 if i + 3 < params.len() => {
+                                self.grid.attr.bg_index = config::rgb_to_palette(
+                                    params[i + 1] as u8,
+                                    params[i + 2] as u8,
+                                    params[i + 3] as u8,
+                                );
+                                i += 3;
                             }
+                            2 => {}
                             _ => {}
                         }
                     }
@@ -456,12 +454,11 @@ impl<'a> Perform for TermPerformer<'a> {
                     1004 => self.grid.mode.insert(TermMode::FOCUS_EVENTS),
                     1006 => self.grid.mode.insert(TermMode::MOUSE_SGR),
                     2004 => self.grid.mode.insert(TermMode::BRACKETED_PASTE),
-                    2026 => {
-                        if !self.grid.mode.contains(TermMode::SYNC_OUTPUT) {
-                            self.grid.mode.insert(TermMode::SYNC_OUTPUT);
-                            self.grid.sync_start = Some(Instant::now());
-                        }
+                    2026 if !self.grid.mode.contains(TermMode::SYNC_OUTPUT) => {
+                        self.grid.mode.insert(TermMode::SYNC_OUTPUT);
+                        self.grid.sync_start = Some(Instant::now());
                     }
+                    2026 => {}
                     _ => {}
                 }
             }
@@ -556,26 +553,24 @@ impl<'a> Perform for TermPerformer<'a> {
             .and_then(|s| s.parse::<u16>().ok());
 
         match num {
-            Some(0) | Some(2) => {
-                if params.len() > 1 {
-                    let title: Vec<u8> = params[1..].join(&b';');
-                    self.response_buf.extend_from_slice(b"\x1B]title:");
-                    self.response_buf.extend_from_slice(&title);
+            Some(0) | Some(2) if params.len() > 1 => {
+                let title: Vec<u8> = params[1..].join(&b';');
+                self.response_buf.extend_from_slice(b"\x1B]title:");
+                self.response_buf.extend_from_slice(&title);
+                self.response_buf.push(0x07);
+            }
+            Some(0) | Some(2) => {}
+            Some(52) if params.len() >= 3 => {
+                let data = params[2];
+                if data.is_empty() {
+                    self.response_buf.extend_from_slice(b"\x1B]52;query\x07");
+                } else {
+                    self.response_buf.extend_from_slice(b"\x1B]52;set:");
+                    self.response_buf.extend_from_slice(data);
                     self.response_buf.push(0x07);
                 }
             }
-            Some(52) => {
-                if params.len() >= 3 {
-                    let data = params[2];
-                    if data.is_empty() {
-                        self.response_buf.extend_from_slice(b"\x1B]52;query\x07");
-                    } else {
-                        self.response_buf.extend_from_slice(b"\x1B]52;set:");
-                        self.response_buf.extend_from_slice(data);
-                        self.response_buf.push(0x07);
-                    }
-                }
-            }
+            Some(52) => {}
             _ => {}
         }
     }

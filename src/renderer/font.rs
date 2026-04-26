@@ -110,11 +110,9 @@ impl FontRasterizer {
         }
 
         // Non-ASCII: query the explicit fallback list only.
-        for font in &self.fallback_fonts {
-            if Self::font_has_glyph(font, codepoint) {
-                return Some(font);
-            }
-        }
+        self.fallback_fonts
+            .iter()
+            .find(|&font| Self::font_has_glyph(font, codepoint));
 
         // No fallback has it — let the primary font render whatever it has.
         None

@@ -152,12 +152,11 @@ impl<'a> Perform for BenchPerformer<'a> {
     fn execute(&mut self, byte: u8) {
         match byte {
             0x07 => {}
-            0x08 => {
-                if self.grid.cursor_col > 0 {
-                    self.grid.cursor_col -= 1;
-                    self.grid.cursor_pending_wrap = false;
-                }
+            0x08 if self.grid.cursor_col > 0 => {
+                self.grid.cursor_col -= 1;
+                self.grid.cursor_pending_wrap = false;
             }
+            0x08 => {}
             0x09 => {
                 let col = self.grid.cursor_col;
                 let cols = self.grid.cols;
@@ -366,16 +365,15 @@ impl<'a> Perform for BenchPerformer<'a> {
                                     self.grid.attr.fg_index = params[i] as u8;
                                 }
                             }
-                            2 => {
-                                if i + 3 < params.len() {
-                                    self.grid.attr.fg_index = tty::config::rgb_to_palette(
-                                        params[i + 1] as u8,
-                                        params[i + 2] as u8,
-                                        params[i + 3] as u8,
-                                    );
-                                    i += 3;
-                                }
+                            2 if i + 3 < params.len() => {
+                                self.grid.attr.fg_index = tty::config::rgb_to_palette(
+                                    params[i + 1] as u8,
+                                    params[i + 2] as u8,
+                                    params[i + 3] as u8,
+                                );
+                                i += 3;
                             }
+                            2 => {}
                             _ => {}
                         }
                     }
@@ -392,16 +390,15 @@ impl<'a> Perform for BenchPerformer<'a> {
                                     self.grid.attr.bg_index = params[i] as u8;
                                 }
                             }
-                            2 => {
-                                if i + 3 < params.len() {
-                                    self.grid.attr.bg_index = tty::config::rgb_to_palette(
-                                        params[i + 1] as u8,
-                                        params[i + 2] as u8,
-                                        params[i + 3] as u8,
-                                    );
-                                    i += 3;
-                                }
+                            2 if i + 3 < params.len() => {
+                                self.grid.attr.bg_index = tty::config::rgb_to_palette(
+                                    params[i + 1] as u8,
+                                    params[i + 2] as u8,
+                                    params[i + 3] as u8,
+                                );
+                                i += 3;
                             }
+                            2 => {}
                             _ => {}
                         }
                     }
@@ -987,195 +984,190 @@ fn make_ls_output(n: usize) -> Vec<u8> {
 fn bench_parser(c: &mut Criterion) {
     let mut group = c.benchmark_group("parser");
 
-    for &size in &[10_000] {
-        // Pure ASCII throughput
-        let ascii = make_ascii(size);
-        group.throughput(Throughput::Bytes(ascii.len() as u64));
-        group.bench_with_input(BenchmarkId::new("ascii", size), &ascii, |b, data| {
-            b.iter(|| {
-                let mut grid = Grid::new(80, 24);
-                let mut sb = Scrollback::new(0);
-                parse_bytes(&mut grid, &mut sb, data);
-                black_box(&grid);
-            });
+    let size = 10_000;
+    // Pure ASCII throughput
+    let ascii = make_ascii(size);
+    group.throughput(Throughput::Bytes(ascii.len() as u64));
+    group.bench_with_input(BenchmarkId::new("ascii", size), &ascii, |b, data| {
+        b.iter(|| {
+            let mut grid = Grid::new(80, 24);
+            let mut sb = Scrollback::new(0);
+            parse_bytes(&mut grid, &mut sb, data);
+            black_box(&grid);
         });
+    });
 
-        // Mixed ASCII + CSI
-        let mixed = make_mixed_csi(size);
-        group.throughput(Throughput::Bytes(mixed.len() as u64));
-        group.bench_with_input(BenchmarkId::new("mixed_csi", size), &mixed, |b, data| {
-            b.iter(|| {
-                let mut grid = Grid::new(80, 24);
-                let mut sb = Scrollback::new(0);
-                parse_bytes(&mut grid, &mut sb, data);
-                black_box(&grid);
-            });
+    // Mixed ASCII + CSI
+    let mixed = make_mixed_csi(size);
+    group.throughput(Throughput::Bytes(mixed.len() as u64));
+    group.bench_with_input(BenchmarkId::new("mixed_csi", size), &mixed, |b, data| {
+        b.iter(|| {
+            let mut grid = Grid::new(80, 24);
+            let mut sb = Scrollback::new(0);
+            parse_bytes(&mut grid, &mut sb, data);
+            black_box(&grid);
         });
+    });
 
-        // UTF-8 heavy
-        let utf8 = make_utf8_heavy(size);
-        group.throughput(Throughput::Bytes(utf8.len() as u64));
-        group.bench_with_input(BenchmarkId::new("utf8_heavy", size), &utf8, |b, data| {
-            b.iter(|| {
-                let mut grid = Grid::new(80, 24);
-                let mut sb = Scrollback::new(0);
-                parse_bytes(&mut grid, &mut sb, data);
-                black_box(&grid);
-            });
+    // UTF-8 heavy
+    let utf8 = make_utf8_heavy(size);
+    group.throughput(Throughput::Bytes(utf8.len() as u64));
+    group.bench_with_input(BenchmarkId::new("utf8_heavy", size), &utf8, |b, data| {
+        b.iter(|| {
+            let mut grid = Grid::new(80, 24);
+            let mut sb = Scrollback::new(0);
+            parse_bytes(&mut grid, &mut sb, data);
+            black_box(&grid);
         });
+    });
 
-        // Pure box-drawing (worst case for per-char UTF-8 overhead)
-        let boxes = make_box_drawing(size);
-        group.throughput(Throughput::Bytes(boxes.len() as u64));
-        group.bench_with_input(BenchmarkId::new("box_drawing", size), &boxes, |b, data| {
-            b.iter(|| {
-                let mut grid = Grid::new(80, 24);
-                let mut sb = Scrollback::new(0);
-                parse_bytes(&mut grid, &mut sb, data);
-                black_box(&grid);
-            });
+    // Pure box-drawing (worst case for per-char UTF-8 overhead)
+    let boxes = make_box_drawing(size);
+    group.throughput(Throughput::Bytes(boxes.len() as u64));
+    group.bench_with_input(BenchmarkId::new("box_drawing", size), &boxes, |b, data| {
+        b.iter(|| {
+            let mut grid = Grid::new(80, 24);
+            let mut sb = Scrollback::new(0);
+            parse_bytes(&mut grid, &mut sb, data);
+            black_box(&grid);
         });
+    });
 
-        // TUI-like: box borders + ASCII content
-        let tui = make_tui_mixed(size);
-        group.throughput(Throughput::Bytes(tui.len() as u64));
-        group.bench_with_input(BenchmarkId::new("tui_mixed", size), &tui, |b, data| {
-            b.iter(|| {
-                let mut grid = Grid::new(80, 24);
-                let mut sb = Scrollback::new(0);
-                parse_bytes(&mut grid, &mut sb, data);
-                black_box(&grid);
-            });
+    // TUI-like: box borders + ASCII content
+    let tui = make_tui_mixed(size);
+    group.throughput(Throughput::Bytes(tui.len() as u64));
+    group.bench_with_input(BenchmarkId::new("tui_mixed", size), &tui, |b, data| {
+        b.iter(|| {
+            let mut grid = Grid::new(80, 24);
+            let mut sb = Scrollback::new(0);
+            parse_bytes(&mut grid, &mut sb, data);
+            black_box(&grid);
         });
+    });
 
-        // Realistic ls output
-        let ls = make_ls_output(size);
-        group.throughput(Throughput::Bytes(ls.len() as u64));
-        group.bench_with_input(BenchmarkId::new("ls_output", size), &ls, |b, data| {
+    // Realistic ls output
+    let ls = make_ls_output(size);
+    group.throughput(Throughput::Bytes(ls.len() as u64));
+    group.bench_with_input(BenchmarkId::new("ls_output", size), &ls, |b, data| {
+        b.iter(|| {
+            let mut grid = Grid::new(120, 40);
+            let mut sb = Scrollback::new(1000);
+            parse_bytes(&mut grid, &mut sb, data);
+            black_box(&grid);
+        });
+    });
+
+    // SGR-dense: git diff --color style (frequent color changes per line)
+    let diff = make_git_diff_color(size);
+    group.throughput(Throughput::Bytes(diff.len() as u64));
+    group.bench_with_input(
+        BenchmarkId::new("git_diff_color", size),
+        &diff,
+        |b, data| {
             b.iter(|| {
                 let mut grid = Grid::new(120, 40);
                 let mut sb = Scrollback::new(1000);
                 parse_bytes(&mut grid, &mut sb, data);
                 black_box(&grid);
             });
-        });
+        },
+    );
 
-        // SGR-dense: git diff --color style (frequent color changes per line)
-        let diff = make_git_diff_color(size);
-        group.throughput(Throughput::Bytes(diff.len() as u64));
-        group.bench_with_input(
-            BenchmarkId::new("git_diff_color", size),
-            &diff,
-            |b, data| {
-                b.iter(|| {
-                    let mut grid = Grid::new(120, 40);
-                    let mut sb = Scrollback::new(1000);
-                    parse_bytes(&mut grid, &mut sb, data);
-                    black_box(&grid);
-                });
-            },
-        );
+    // Dense scroll: short lines, isolates scroll_up + scrollback throughput
+    let scroll = make_dense_scroll(size);
+    group.throughput(Throughput::Bytes(scroll.len() as u64));
+    group.bench_with_input(
+        BenchmarkId::new("dense_scroll", size),
+        &scroll,
+        |b, data| {
+            b.iter(|| {
+                let mut grid = Grid::new(80, 24);
+                let mut sb = Scrollback::new(1000);
+                parse_bytes(&mut grid, &mut sb, data);
+                black_box(&grid);
+            });
+        },
+    );
 
-        // Dense scroll: short lines, isolates scroll_up + scrollback throughput
-        let scroll = make_dense_scroll(size);
-        group.throughput(Throughput::Bytes(scroll.len() as u64));
-        group.bench_with_input(
-            BenchmarkId::new("dense_scroll", size),
-            &scroll,
-            |b, data| {
-                b.iter(|| {
-                    let mut grid = Grid::new(80, 24);
-                    let mut sb = Scrollback::new(1000);
-                    parse_bytes(&mut grid, &mut sb, data);
-                    black_box(&grid);
-                });
-            },
-        );
-
-        // Claude Code CLI-style TUI: streaming text + spinner + status bar
-        let claude = make_claude_code_tui(size);
-        group.throughput(Throughput::Bytes(claude.len() as u64));
-        group.bench_with_input(
-            BenchmarkId::new("claude_code_tui", size),
-            &claude,
-            |b, data| {
-                b.iter(|| {
-                    let mut grid = Grid::new(120, 24);
-                    let mut sb = Scrollback::new(1000);
-                    parse_bytes(&mut grid, &mut sb, data);
-                    black_box(&grid);
-                });
-            },
-        );
-    }
+    // Claude Code CLI-style TUI: streaming text + spinner + status bar
+    let claude = make_claude_code_tui(size);
+    group.throughput(Throughput::Bytes(claude.len() as u64));
+    group.bench_with_input(
+        BenchmarkId::new("claude_code_tui", size),
+        &claude,
+        |b, data| {
+            b.iter(|| {
+                let mut grid = Grid::new(120, 24);
+                let mut sb = Scrollback::new(1000);
+                parse_bytes(&mut grid, &mut sb, data);
+                black_box(&grid);
+            });
+        },
+    );
 
     // Full-screen redraw (outside the size loop — measured in frames, not lines)
-    for &frames in &[100] {
-        let redraw = make_fullscreen_redraw(frames, 120, 40);
-        group.throughput(Throughput::Bytes(redraw.len() as u64));
-        group.bench_with_input(
-            BenchmarkId::new("fullscreen_redraw_120x40", frames),
-            &redraw,
-            |b, data| {
-                b.iter(|| {
-                    let mut grid = Grid::new(120, 40);
-                    let mut sb = Scrollback::new(0);
-                    parse_bytes(&mut grid, &mut sb, data);
-                    black_box(&grid);
-                });
-            },
-        );
-    }
+    let frames = 100;
+    let redraw = make_fullscreen_redraw(frames, 120, 40);
+    group.throughput(Throughput::Bytes(redraw.len() as u64));
+    group.bench_with_input(
+        BenchmarkId::new("fullscreen_redraw_120x40", frames),
+        &redraw,
+        |b, data| {
+            b.iter(|| {
+                let mut grid = Grid::new(120, 40);
+                let mut sb = Scrollback::new(0);
+                parse_bytes(&mut grid, &mut sb, data);
+                black_box(&grid);
+            });
+        },
+    );
 
     // tmux 2-pane redraw (outside size loop — measured in frames)
-    for &frames in &[100] {
-        let tmux = make_tmux_pane_redraw(frames, 160, 40);
-        group.throughput(Throughput::Bytes(tmux.len() as u64));
-        group.bench_with_input(
-            BenchmarkId::new("tmux_pane_redraw_160x40", frames),
-            &tmux,
-            |b, data| {
-                b.iter(|| {
-                    let mut grid = Grid::new(160, 40);
-                    let mut sb = Scrollback::new(0);
-                    parse_bytes(&mut grid, &mut sb, data);
-                    black_box(&grid);
-                });
-            },
-        );
-    }
+    let frames = 100;
+    let tmux = make_tmux_pane_redraw(frames, 160, 40);
+    group.throughput(Throughput::Bytes(tmux.len() as u64));
+    group.bench_with_input(
+        BenchmarkId::new("tmux_pane_redraw_160x40", frames),
+        &tmux,
+        |b, data| {
+            b.iter(|| {
+                let mut grid = Grid::new(160, 40);
+                let mut sb = Scrollback::new(0);
+                parse_bytes(&mut grid, &mut sb, data);
+                black_box(&grid);
+            });
+        },
+    );
 
     // 256-color heavy (bat/delta style syntax highlighting)
-    for &size in &[10_000] {
-        let c256 = make_256color_heavy(size);
-        group.throughput(Throughput::Bytes(c256.len() as u64));
-        group.bench_with_input(
-            BenchmarkId::new("256color_heavy", size),
-            &c256,
-            |b, data| {
-                b.iter(|| {
-                    let mut grid = Grid::new(120, 40);
-                    let mut sb = Scrollback::new(1000);
-                    parse_bytes(&mut grid, &mut sb, data);
-                    black_box(&grid);
-                });
-            },
-        );
-    }
-
-    // Truecolor heavy (modern syntax highlighters)
-    for &size in &[10_000] {
-        let tc = make_truecolor_heavy(size);
-        group.throughput(Throughput::Bytes(tc.len() as u64));
-        group.bench_with_input(BenchmarkId::new("truecolor_heavy", size), &tc, |b, data| {
+    let size = 10_000;
+    let c256 = make_256color_heavy(size);
+    group.throughput(Throughput::Bytes(c256.len() as u64));
+    group.bench_with_input(
+        BenchmarkId::new("256color_heavy", size),
+        &c256,
+        |b, data| {
             b.iter(|| {
                 let mut grid = Grid::new(120, 40);
                 let mut sb = Scrollback::new(1000);
                 parse_bytes(&mut grid, &mut sb, data);
                 black_box(&grid);
             });
+        },
+    );
+
+    // Truecolor heavy (modern syntax highlighters)
+    let size = 10_000;
+    let tc = make_truecolor_heavy(size);
+    group.throughput(Throughput::Bytes(tc.len() as u64));
+    group.bench_with_input(BenchmarkId::new("truecolor_heavy", size), &tc, |b, data| {
+        b.iter(|| {
+            let mut grid = Grid::new(120, 40);
+            let mut sb = Scrollback::new(1000);
+            parse_bytes(&mut grid, &mut sb, data);
+            black_box(&grid);
         });
-    }
+    });
 
     group.finish();
 }
@@ -1281,41 +1273,39 @@ fn bench_grid(c: &mut Criterion) {
     }
 
     // write_char throughput — fill entire grid
-    for &(cols, rows) in &[(80, 24)] {
-        let total = cols as u64 * rows as u64;
-        group.throughput(Throughput::Elements(total));
-        group.bench_function(format!("write_char_{cols}x{rows}"), |b| {
-            b.iter(|| {
-                let mut grid = Grid::new(cols, rows);
-                for _ in 0..total {
-                    grid.write_char('A', 0, 0);
-                }
-                black_box(&grid);
-            });
+    let (cols, rows) = (80, 24);
+    let total = cols as u64 * rows as u64;
+    group.throughput(Throughput::Elements(total));
+    group.bench_function(format!("write_char_{cols}x{rows}"), |b| {
+        b.iter(|| {
+            let mut grid = Grid::new(cols, rows);
+            for _ in 0..total {
+                grid.write_char('A', 0, 0);
+            }
+            black_box(&grid);
         });
-    }
+    });
 
     // write_ascii_run throughput — bulk write path (the hot path for ASCII content)
-    for &(cols, rows) in &[(80, 24)] {
-        let line: Vec<u8> = (0..cols).map(|i| b' ' + (i % 95) as u8).collect();
-        let total = cols as u64 * rows as u64;
-        group.throughput(Throughput::Elements(total));
-        group.bench_function(format!("write_ascii_run_{cols}x{rows}"), |b| {
-            b.iter(|| {
-                let mut grid = Grid::new(cols, rows);
-                for _ in 0..rows {
-                    grid.write_ascii_run(&line);
-                    // Newline: CR + LF
-                    grid.cursor_col = 0;
-                    grid.cursor_pending_wrap = false;
-                    if grid.cursor_row < grid.rows - 1 {
-                        grid.cursor_row += 1;
-                    }
+    let (cols, rows) = (80, 24);
+    let line: Vec<u8> = (0..cols).map(|i| b' ' + (i % 95) as u8).collect();
+    let total = cols as u64 * rows as u64;
+    group.throughput(Throughput::Elements(total));
+    group.bench_function(format!("write_ascii_run_{cols}x{rows}"), |b| {
+        b.iter(|| {
+            let mut grid = Grid::new(cols, rows);
+            for _ in 0..rows {
+                grid.write_ascii_run(&line);
+                // Newline: CR + LF
+                grid.cursor_col = 0;
+                grid.cursor_pending_wrap = false;
+                if grid.cursor_row < grid.rows - 1 {
+                    grid.cursor_row += 1;
                 }
-                black_box(&grid);
-            });
+            }
+            black_box(&grid);
         });
-    }
+    });
 
     // scroll_up — bulk scrolling
     for &n in &[1, 10] {
@@ -1917,7 +1907,7 @@ fn make_htop_frame(frame: usize, cols: u16, rows: u16) -> Vec<u8> {
             // CPU bar — changes every frame
             buf.extend_from_slice(b"\x1b[7m"); // inverse
             let pct = (frame * 7 + 13) % 100;
-            let filled = (pct as usize * cols as usize) / 100;
+            let filled = (pct * cols as usize) / 100;
             buf.extend_from_slice(format!(" CPU [{:>3}%] ", pct).as_bytes());
             for j in 12..cols as usize {
                 if j < filled {
@@ -1933,7 +1923,7 @@ fn make_htop_frame(frame: usize, cols: u16, rows: u16) -> Vec<u8> {
             let pct = (frame * 3 + 42) % 100;
             buf.extend_from_slice(format!(" Mem [{:>3}%] ", pct).as_bytes());
             for j in 12..cols as usize {
-                if j < (pct as usize * cols as usize) / 100 {
+                if j < (pct * cols as usize) / 100 {
                     buf.push(b'#');
                 } else {
                     buf.push(b' ');

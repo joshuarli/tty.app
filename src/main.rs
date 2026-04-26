@@ -224,7 +224,7 @@ impl App {
                 let start = pos + 9;
                 if let Some(end) = data[start..].iter().position(|&b| b == 0x07) {
                     let b64 = &data[start..start + end];
-                    if let Ok(text_bytes) = base64_decode(b64)
+                    if let Some(text_bytes) = base64_decode(b64)
                         && let Ok(text) = String::from_utf8(text_bytes)
                     {
                         set_clipboard(&text);
