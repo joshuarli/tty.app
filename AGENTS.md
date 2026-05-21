@@ -29,7 +29,7 @@ src/
 │   ├── metal.rs            # Metal device, double-buffered per-dirty-row upload, compute dispatch
 │   ├── shader.metal        # Per-pixel compute kernel: bg → glyph → decoration → cursor
 │   ├── atlas.rs            # 2048×2048 R8Unorm glyph atlas with LRU eviction
-│   ├── font.rs             # CoreText rasterization → 8-bit alpha bitmaps
+│   ├── font.rs             # Embedded Hack + CoreText fallback rasterization → 8-bit alpha bitmaps
 │   └── mod.rs
 └── terminal/
     ├── cell.rs             # Cell struct (repr(C), 8 bytes) — IS the GPU format directly
@@ -123,6 +123,10 @@ Each frame, only rows marked dirty are copied to the GPU buffer. The renderer ma
 
 Grid stores `ascii_atlas: [[u8; 2]; 128]` — atlas (x, y) for every ASCII codepoint. Set once after atlas preload. `write_ascii_run()` indexes this table per byte to fill atlas_x/atlas_y, avoiding HashMap lookups for the common case (printable ASCII is ~95% of terminal traffic).
 
+### Embedded Hack font
+
+Hack Regular is vendored in `vendor/hack/Hack-Regular.ttf` with its license and embedded with `include_bytes!` in `renderer/font.rs`. `FontRasterizer` creates a `CGFont` from those in-memory TTF bytes, so users do not need Hack installed. Glyphs are still rasterized through CoreText/CoreGraphics into the runtime atlas: ASCII is preloaded at startup and non-ASCII glyphs are inserted on first use. System fallback fonts are checked only when embedded Hack does not contain the codepoint, preserving support for glyphs outside Hack's coverage without putting fallback fonts in the binary.
+
 ### Double-buffered async GPU
 
 Two cell buffers alternate. CPU writes to buffer A while GPU reads buffer B. An `AtomicBool` per buffer is set by a Metal completed handler when the GPU finishes. The render path skips the frame (non-blocking) if the target buffer is still in flight, setting `needs_render` to retry next iteration.
@@ -214,7 +218,7 @@ The grid is a flat `Vec<Cell>` with ring buffer addressing: `row_start(logical_r
 
 ### renderer/atlas.rs
 
-Grid-based packing in a 2048×2048 texture. Each slot is one cell wide (`cell_width` pixels); wide CJK glyphs overflow into the adjacent slot's pixel space. ASCII glyphs (0x20-0x7E) are pre-loaded and pinned (never evicted). Non-ASCII glyphs use LRU eviction (the `frame` counter tracks last-access; `evict_lru()` finds the minimum). Font fallback uses `CTFontCreateForString` to find system fonts for missing glyphs. `ascii_table_raw()` exports the preloaded ASCII positions for Grid's `ascii_atlas` table.
+Grid-based packing in a 2048×2048 texture. Each slot is one cell wide (`cell_width` pixels); wide CJK glyphs overflow into the adjacent slot's pixel space. ASCII glyphs (0x20-0x7E) are pre-loaded and pinned at startup. Runtime rasterized non-ASCII glyphs use LRU eviction (the `frame` counter tracks last-access; `evict_lru()` finds the minimum). `ascii_table_raw()` exports the preloaded ASCII positions for Grid's `ascii_atlas` table.
 
 ### renderer/shader.metal
 

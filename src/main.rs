@@ -10,6 +10,7 @@ mod unicode;
 mod window;
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSEventMask, NSEventModifierFlags, NSEventType};
@@ -740,6 +741,55 @@ fn spawn_terminal(mtm: MainThreadMarker) -> Terminal {
     Terminal { win, app }
 }
 
+fn run_startup_bench() {
+    let total = Instant::now();
+    let scale = 2.0;
+    let phys_w = 2880;
+    let phys_h = 1800;
+    let safe_area_top = 0;
+
+    let t = Instant::now();
+    let device = metal::Device::system_default().expect("no Metal device found");
+    let metal_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    let t = Instant::now();
+    let rasterizer = FontRasterizer::new(config::FONT_FAMILY, config::FONT_SIZE, scale);
+    let rasterizer_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    let cell_width = rasterizer.metrics.cell_width;
+    let cell_height = rasterizer.metrics.cell_height;
+    let padding_px = (config::PADDING as f64 * scale) as u32;
+    let padding_top_px = padding_px.max(safe_area_top);
+    let cols = (phys_w - padding_px * 2) / cell_width;
+    let rows = (phys_h - padding_top_px - padding_px) / cell_height;
+
+    let t = Instant::now();
+    let mut atlas = Atlas::new(&device, cell_width, cell_height);
+    atlas.preload_ascii(&rasterizer);
+    let atlas_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    let t = Instant::now();
+    let mut grid = Grid::new(cols as u16, rows as u16);
+    grid.set_ascii_atlas(&atlas.ascii_table_raw());
+    let _scrollback = Scrollback::new(config::SCROLLBACK_LINES);
+    let grid_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    let t = Instant::now();
+    let _pty = Pty::spawn(
+        cols as u16,
+        rows as u16,
+        cell_width as u16,
+        cell_height as u16,
+    )
+    .expect("failed to spawn PTY");
+    let pty_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    let total_ms = total.elapsed().as_secs_f64() * 1000.0;
+    println!(
+        "startup_bench_headless font=embedded_ttf total_ms={total_ms:.3} metal_ms={metal_ms:.3} rasterizer_ms={rasterizer_ms:.3} atlas_ms={atlas_ms:.3} grid_ms={grid_ms:.3} pty_ms={pty_ms:.3} cols={cols} rows={rows}"
+    );
+}
+
 fn main() {
     if std::env::args().any(|a| a == "-v" || a == "--version") {
         let commit = &env!("TTY_RUSTC_COMMIT")[..7];
@@ -749,6 +799,11 @@ fn main() {
 
     if std::env::args().any(|a| a == "--stats") {
         unsafe { std::env::set_var("MTL_HUD_ENABLED", "1") };
+    }
+
+    if std::env::args().any(|a| a == "--startup-bench") {
+        run_startup_bench();
+        return;
     }
 
     let mtm = MainThreadMarker::new().expect("must be called from the main thread");

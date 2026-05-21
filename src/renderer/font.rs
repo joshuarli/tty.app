@@ -2,10 +2,13 @@ use crate::config;
 use core_graphics::base::kCGImageAlphaNoneSkipLast;
 use core_graphics::color_space::CGColorSpace;
 use core_graphics::context::CGContext;
-use core_graphics::font::CGGlyph;
+use core_graphics::data_provider::CGDataProvider;
+use core_graphics::font::{CGFont, CGGlyph};
 use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use core_text::font::{self as ct_font, CTFont};
 use core_text::font_descriptor::kCTFontOrientationDefault;
+
+const HACK_REGULAR_TTF: &[u8] = include_bytes!("../../vendor/hack/Hack-Regular.ttf");
 
 /// Rasterized glyph data (grayscale alpha).
 pub struct RasterizedGlyph {
@@ -44,7 +47,12 @@ const FALLBACK_FAMILIES: &[&str] = &[
 impl FontRasterizer {
     pub fn new(family: &str, size: f64, scale: f64) -> Self {
         let font_size = size * scale;
-        let ct_font = ct_font::new_from_name(family, font_size).expect("failed to load font");
+        let ct_font = if family == "Hack" {
+            Self::embedded_hack(font_size)
+        } else {
+            ct_font::new_from_name(family, font_size)
+                .unwrap_or_else(|_| Self::embedded_hack(font_size))
+        };
 
         let ascent = ct_font.ascent();
         let descent = ct_font.descent();
@@ -93,29 +101,32 @@ impl FontRasterizer {
         }
     }
 
+    fn embedded_hack(font_size: f64) -> CTFont {
+        // SAFETY: HACK_REGULAR_TTF is a static include and outlives the data provider.
+        let provider = unsafe { CGDataProvider::from_slice(HACK_REGULAR_TTF) };
+        let cg_font = CGFont::from_data_provider(provider).expect("failed to load embedded Hack");
+        ct_font::new_from_CGFont(&cg_font, font_size)
+    }
+
     /// Return the best font for rendering `codepoint`, or None to use the primary font.
     ///
     /// For ASCII, the primary font is always used (fast path).
-    /// For non-ASCII, we skip the primary font and check the explicit fallback list.
-    /// This is necessary because in a GUI app bundle context,
-    /// CTFontGetGlyphsForCharacters on a user-installed font (Hack) can report
-    /// non-zero glyph IDs for characters the font doesn't actually support —
-    /// CoreText's cascade fires at the API level and returns the .notdef glyph
-    /// (rendered as "_" in Hack) rather than returning false.
-    /// System fonts loaded explicitly by name don't exhibit this behaviour.
+    /// For non-ASCII, the embedded primary font is checked before system fallbacks.
+    /// The embedded font avoids the installed-font cascade behaviour that previously
+    /// made Hack report unsupported glyphs as present in GUI app bundle contexts.
     fn font_for_codepoint(&self, codepoint: u32) -> Option<&CTFont> {
         // ASCII fast path: primary font always has these.
         if codepoint < 0x80 {
             return None; // use self.ct_font
         }
 
-        // Non-ASCII: query the explicit fallback list only.
+        if Self::font_has_glyph(&self.ct_font, codepoint) {
+            return None;
+        }
+
         self.fallback_fonts
             .iter()
-            .find(|&font| Self::font_has_glyph(font, codepoint));
-
-        // No fallback has it — let the primary font render whatever it has.
-        None
+            .find(|&font| Self::font_has_glyph(font, codepoint))
     }
 
     /// Check if a font has a glyph for a codepoint, handling surrogate pairs for non-BMP.
