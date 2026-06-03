@@ -14,6 +14,8 @@ pub struct StateMachine {
     param_count: usize,
     current_param: u32,
     osc_data: Vec<u8>,
+    dcs_data: Vec<u8>,
+    dcs_final: u8,
     ignoring: bool,
 }
 
@@ -33,6 +35,8 @@ impl StateMachine {
             param_count: 0,
             current_param: 0,
             osc_data: Vec::new(),
+            dcs_data: Vec::new(),
+            dcs_final: 0,
             ignoring: false,
         }
     }
@@ -62,6 +66,8 @@ impl StateMachine {
                 self.params = [0; MAX_PARAMS];
                 self.param_count = 0;
                 self.current_param = 0;
+                self.dcs_data.clear();
+                self.dcs_final = 0;
                 self.ignoring = false;
             }
             ACTION_COLLECT => {
@@ -114,15 +120,37 @@ impl StateMachine {
             ACTION_HOOK if self.param_count < MAX_PARAMS => {
                 self.params[self.param_count] = self.current_param.min(u16::MAX as u32) as u16;
                 self.param_count += 1;
+                self.dcs_final = byte;
+                self.dcs_data.clear();
             }
             ACTION_HOOK => {
-                // We don't fully support DCS; just enter passthrough
+                self.dcs_final = byte;
+                self.dcs_data.clear();
             }
             ACTION_PUT => {
-                // DCS passthrough data — ignore for now
+                self.dcs_data.push(byte);
             }
             ACTION_UNHOOK => {
-                // DCS end — ignore for now
+                self.dispatch_dcs_passthrough(performer);
+                self.dcs_data.clear();
+                self.dcs_final = 0;
+            }
+            ACTION_DCS_ESC => {
+                if byte == b'\\' {
+                    self.dispatch_dcs_passthrough(performer);
+                    self.dcs_data.clear();
+                    self.dcs_final = 0;
+                    self.state = GROUND;
+                    return;
+                }
+                if byte == 0x1B {
+                    self.dcs_data.push(0x1B);
+                } else {
+                    self.dcs_data.push(0x1B);
+                    self.dcs_data.push(byte);
+                }
+                self.state = DCS_PASSTHROUGH;
+                return;
             }
             ACTION_OSC_START => {
                 self.osc_data.clear();
@@ -150,5 +178,16 @@ impl StateMachine {
         }
 
         self.state = next_state;
+    }
+
+    fn dispatch_dcs_passthrough<P: Perform>(&self, performer: &mut P) {
+        if self.dcs_final != b't' || !self.dcs_data.starts_with(b"mux;") {
+            return;
+        }
+
+        let mut passthrough = StateMachine::new();
+        for &byte in &self.dcs_data[4..] {
+            passthrough.advance(byte, performer);
+        }
     }
 }

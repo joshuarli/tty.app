@@ -1253,6 +1253,38 @@ fn osc_window_title() {
 }
 
 #[test]
+fn osc52_clipboard_set_bel() {
+    let mut t = Term::new(20, 3);
+    t.feed(b"\x1B]52;c;aGVsbG8=\x07");
+    let response = t.take_response();
+    assert_eq!(response, b"\x1B]52;set:aGVsbG8=\x07");
+}
+
+#[test]
+fn osc52_clipboard_set_empty_selection() {
+    let mut t = Term::new(20, 3);
+    t.feed(b"\x1B]52;;aGVsbG8=\x07");
+    let response = t.take_response();
+    assert_eq!(response, b"\x1B]52;set:aGVsbG8=\x07");
+}
+
+#[test]
+fn osc52_clipboard_set_st() {
+    let mut t = Term::new(20, 3);
+    t.feed(b"\x1B]52;c;aGVsbG8=\x1B\\");
+    let response = t.take_response();
+    assert_eq!(response, b"\x1B]52;set:aGVsbG8=\x07");
+}
+
+#[test]
+fn osc52_clipboard_set_tmux_dcs_passthrough() {
+    let mut t = Term::new(20, 3);
+    t.feed(b"\x1BPtmux;\x1B\x1B]52;;aGVsbG8=\x07\x1B\\");
+    let response = t.take_response();
+    assert_eq!(response, b"\x1B]52;set:aGVsbG8=\x07");
+}
+
+#[test]
 fn ris_full_reset() {
     let mut t = Term::new(10, 3);
     // Set some state

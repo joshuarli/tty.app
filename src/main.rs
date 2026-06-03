@@ -58,6 +58,7 @@ struct App {
     // Previously rendered selection range for targeted clearing
     prev_sel_rows: Option<(u16, u16)>, // (first_row, last_row) inclusive
     mouse_pressed: bool,
+    pending_mouse_release: Option<Vec<u8>>,
     cursor_pos: (f64, f64), // Physical pixel position of mouse cursor
 
     // Scrollback viewport: 0 = live, >0 = N rows into history
@@ -140,6 +141,7 @@ impl App {
             selection_end: None,
             prev_sel_rows: None,
             mouse_pressed: false,
+            pending_mouse_release: None,
             cursor_pos: (0.0, 0.0),
             viewport_offset: 0,
             scroll_accumulator: 0.0,
@@ -247,6 +249,15 @@ impl App {
                 let _ = self.pty.write(&data[pos..end]);
                 pos = end;
             }
+        }
+    }
+
+    fn flush_pending_mouse_release(&mut self) -> bool {
+        if let Some(bytes) = self.pending_mouse_release.take() {
+            let _ = self.pty.write(&bytes);
+            true
+        } else {
+            false
         }
     }
 
@@ -554,26 +565,22 @@ impl App {
                         );
                         let _ = self.pty.write(&bytes);
                     }
-                    if sgr {
-                        let bytes = input::mouse_to_bytes(
+                    let release = if sgr {
+                        input::mouse_to_bytes(
                             Self::mouse_button_code(*button),
                             modifiers,
                             cell.0 + 1,
                             cell.1 + 1,
                             false,
                             true,
-                        );
-                        let _ = self.pty.write(&bytes);
+                        )
                     } else {
-                        let bytes = input::mouse_to_bytes(
-                            3,
-                            modifiers,
-                            cell.0 + 1,
-                            cell.1 + 1,
-                            true,
-                            false,
-                        );
-                        let _ = self.pty.write(&bytes);
+                        input::mouse_to_bytes(3, modifiers, cell.0 + 1, cell.1 + 1, true, false)
+                    };
+                    if motion_mode && self.mouse_pressed {
+                        self.pending_mouse_release = Some(release);
+                    } else {
+                        let _ = self.pty.write(&release);
                     }
                 }
                 self.mouse_pressed = false;
@@ -848,6 +855,11 @@ fn main() {
                 }
             }
 
+            let mut sent_deferred_mouse = false;
+            for t in terminals.iter_mut() {
+                sent_deferred_mouse |= t.app.flush_pending_mouse_release();
+            }
+
             // Drain NSEvents globally
             let mut spawn_pending = false;
             let mut quit = false;
@@ -951,7 +963,7 @@ fn main() {
                 all_idle &= t.app.render();
             }
 
-            let idle = !got_any_pty_data && !got_events && all_idle;
+            let idle = !got_any_pty_data && !sent_deferred_mouse && !got_events && all_idle;
             (idle, quit)
         });
 

@@ -17,8 +17,9 @@ pub const DCS_PASSTHROUGH: u8 = 10;
 pub const DCS_IGNORE: u8 = 11;
 pub const OSC_STRING: u8 = 12;
 pub const SOS_PM_APC_STRING: u8 = 13;
+pub const DCS_ESCAPE: u8 = 14;
 
-pub const NUM_STATES: usize = 14;
+pub const NUM_STATES: usize = 15;
 
 // Actions
 pub const ACTION_NONE: u8 = 0;
@@ -36,6 +37,7 @@ pub const ACTION_OSC_START: u8 = 11;
 pub const ACTION_OSC_PUT: u8 = 12;
 pub const ACTION_OSC_END: u8 = 13;
 pub const ACTION_IGNORE: u8 = 14;
+pub const ACTION_DCS_ESC: u8 = 15;
 
 /// Pack action + state into a single byte.
 const fn pack(action: u8, state: u8) -> u8 {
@@ -294,7 +296,7 @@ const fn build_table() -> [[u8; NUM_CLASSES]; NUM_STATES] {
     t[DCS_PASSTHROUGH as usize][0] = pack(ACTION_PUT, DCS_PASSTHROUGH);
     t[DCS_PASSTHROUGH as usize][1] = pack(ACTION_UNHOOK, GROUND);
     t[DCS_PASSTHROUGH as usize][2] = pack(ACTION_UNHOOK, GROUND);
-    t[DCS_PASSTHROUGH as usize][3] = pack(ACTION_UNHOOK, ESCAPE); // ESC in DCS ends it
+    t[DCS_PASSTHROUGH as usize][3] = pack(ACTION_NONE, DCS_ESCAPE);
     t[DCS_PASSTHROUGH as usize][4] = pack(ACTION_PUT, DCS_PASSTHROUGH);
     t[DCS_PASSTHROUGH as usize][5] = pack(ACTION_PUT, DCS_PASSTHROUGH);
     t[DCS_PASSTHROUGH as usize][6] = pack(ACTION_PUT, DCS_PASSTHROUGH);
@@ -305,6 +307,12 @@ const fn build_table() -> [[u8; NUM_CLASSES]; NUM_STATES] {
     t[DCS_PASSTHROUGH as usize][11] = pack(ACTION_IGNORE, DCS_PASSTHROUGH);
     // ST (0x9C) ends DCS
     t[DCS_PASSTHROUGH as usize][16] = pack(ACTION_UNHOOK, GROUND);
+
+    let mut c = 0;
+    while c < NUM_CLASSES {
+        t[DCS_ESCAPE as usize][c] = pack(ACTION_DCS_ESC, DCS_PASSTHROUGH);
+        c += 1;
+    }
 
     // ── DCS_IGNORE ──
     t[DCS_IGNORE as usize][0] = pack(ACTION_IGNORE, DCS_IGNORE);

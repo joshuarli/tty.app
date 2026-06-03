@@ -1,7 +1,9 @@
 use objc2::MainThreadMarker;
 use objc2_app_kit::NSApplication;
 
-use tty::clipboard::{clipboard_has_image, get_clipboard, set_clipboard, set_clipboard_image};
+use tty::clipboard::{
+    base64_decode, clipboard_has_image, get_clipboard, set_clipboard, set_clipboard_image,
+};
 
 /// Minimal valid 1×1 red PNG (68 bytes).
 const PNG_1PX: &[u8] = &[
@@ -65,6 +67,15 @@ fn text_clipboard_is_not_image() {
     );
 }
 
+fn base64_decode_handles_padding() {
+    assert_eq!(
+        base64_decode(b"aGVsbG8=").as_deref(),
+        Some(b"hello".as_slice())
+    );
+    assert_eq!(base64_decode(b"aGk=").as_deref(), Some(b"hi".as_slice()));
+    assert_eq!(base64_decode(b"aA==").as_deref(), Some(b"h".as_slice()));
+}
+
 // Custom harness: NSPasteboard requires an initialized NSApplication on the
 // main thread. The default test harness runs tests on worker threads, which
 // causes SIGABRT. Using harness = false lets us run from main() directly.
@@ -83,6 +94,10 @@ fn main() {
             image_on_clipboard_is_detected_as_tiff,
         ),
         ("text_clipboard_is_not_image", text_clipboard_is_not_image),
+        (
+            "base64_decode_handles_padding",
+            base64_decode_handles_padding,
+        ),
     ];
 
     let mut passed = 0;

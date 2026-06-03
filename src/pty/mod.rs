@@ -67,23 +67,13 @@ impl Pty {
 
         // Set TERM and declare a modern terminal so programs like Claude Code
         // use Unicode/rich output instead of ASCII fallbacks.
-        // Each CString must stay alive until execvp replaces the process image.
-        let env_term = CString::new("TERM=xterm-256color").unwrap();
-        let env_colorterm = CString::new("COLORTERM=truecolor").unwrap();
-        let env_term_program = CString::new("TERM_PROGRAM=tty").unwrap();
         // When launched as an app bundle, macOS doesn't source shell profiles,
         // so LANG is often unset. Without a UTF-8 locale, programs like Claude
         // Code fall back to ASCII and Unicode glyphs render as underscores.
-        let env_lang = CString::new("LANG=en_US.UTF-8").unwrap();
-        // SAFETY: The CString values are kept alive on the stack until execvp replaces
-        // the process image. putenv stores the pointer directly (no copy), so the
-        // CStrings must not be dropped before exec — which they aren't.
-        unsafe {
-            libc::putenv(env_term.as_ptr() as *mut _);
-            libc::putenv(env_colorterm.as_ptr() as *mut _);
-            libc::putenv(env_term_program.as_ptr() as *mut _);
-            libc::putenv(env_lang.as_ptr() as *mut _);
-        }
+        Self::set_child_env("TERM", "xterm-256color");
+        Self::set_child_env("COLORTERM", "truecolor");
+        Self::set_child_env("TERM_PROGRAM", "tty");
+        Self::set_child_env("LANG", "en_US.UTF-8");
 
         // Get user's shell
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
@@ -104,6 +94,16 @@ impl Pty {
         unsafe {
             libc::execvp(c_shell.as_ptr(), args.as_ptr());
             libc::_exit(1);
+        }
+    }
+
+    fn set_child_env(key: &str, value: &str) {
+        let key = CString::new(key).unwrap();
+        let value = CString::new(value).unwrap();
+        // SAFETY: setenv copies both strings into the process environment.
+        // The CStrings only need to remain valid for the duration of this call.
+        unsafe {
+            libc::setenv(key.as_ptr(), value.as_ptr(), 1);
         }
     }
 
