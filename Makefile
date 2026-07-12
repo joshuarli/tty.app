@@ -4,7 +4,7 @@ ARCH       := $(shell uname -m | sed 's/arm64/aarch64/')
 TARGET     := $(ARCH)-apple-darwin
 LLVM_BIN   := $(shell rustc --print sysroot)/lib/rustlib/$(TARGET)/bin
 
-.PHONY: build pgo-profile dist-pgo bench-pgo dist install test test-ci coverage pc bump-version
+.PHONY: build prof pgo-profile dist-pgo bench-pgo dist install test test-ci coverage pc bump-version
 
 build:
 	cargo build
@@ -15,13 +15,15 @@ lint:
 
 PGO_DIR    := $(CURDIR)/target/pgo-profiles
 PGO_MERGED := $(PGO_DIR)/merged.profdata
+PROF_SCRIPT := $(CURDIR)/scripts/profile.sh
+
+prof:
+	$(MAKE) pgo-profile
+	$(MAKE) dist-pgo
+	$(MAKE) bench-pgo
 
 pgo-profile:
-	rm -rf $(PGO_DIR)
-	mkdir -p $(PGO_DIR)
-	RUSTFLAGS="-Cprofile-generate=$(PGO_DIR)" \
-	cargo bench --bench bench -- --profile-time 1 "parser|pipeline|end_to_end"
-	$(LLVM_BIN)/llvm-profdata merge -o $(PGO_MERGED) $(PGO_DIR)
+	$(PROF_SCRIPT)
 
 dist-pgo: $(PGO_MERGED)
 	cargo clean -p $(NAME) --profile dist --target $(TARGET)

@@ -8,14 +8,14 @@
 #
 # Baselines:
 #   target/criterion/*/baseline/   — criterion's named baseline (local, not committed)
-#   benchmarks/baseline.json       — critcmp export (committed, tracks perf across commits)
+#   target/criterion/baseline.json — critcmp export (local to this checkout)
 #
 # Requires: critcmp (cargo install critcmp)
 
 set -euo pipefail
 
 BASELINE_NAME="baseline"
-EXPORT_FILE="benchmarks/baseline.json"
+EXPORT_FILE="target/criterion/baseline.json"
 ALLOC_STDERR=$(mktemp)
 UPDATE=false
 COMPARE_ONLY=false
