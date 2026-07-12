@@ -23,6 +23,11 @@ impl Scrollback {
         self.len
     }
 
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     /// Clear all scrollback content.
     pub fn clear(&mut self) {
         self.buf.clear();

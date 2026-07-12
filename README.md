@@ -16,6 +16,10 @@ tmux is not present.
 - xterm-256color subset sufficient for tmux, vim, htop
 - Single-threaded: non-blocking PTY I/O with kqueue, no mutexes
 
+## Install
+
+Edit `src/config.rs` and run `make install`.
+
 ### Design
 
 The 8-byte Cell (`#[repr(C)]`: codepoint, flags, fg, bg, atlas_x, atlas_y) is resolved completely at parse time — glyph atlas coordinates are looked up when a character is printed, not when it's rendered. This means:
@@ -49,8 +53,3 @@ The fixed-size 8-byte Cell is the foundation of the entire architecture — it e
 
 These are accepted limitations, not planned features.
 
-## Custom Install
-
-Edit `src/config.rs` and run `make install`
-
-`brew install --cask font-hack`

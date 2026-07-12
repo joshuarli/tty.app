@@ -7,7 +7,7 @@ branch/call patterns, then recompiles using those profiles. Typical gains:
 ## Quick start
 
 ```bash
-make release-pgo
+make dist-pgo
 ```
 
 This runs the benchmark suite under instrumentation, then recompiles with the
@@ -17,7 +17,7 @@ gathered profiles. For better coverage, add a manual session first (see below).
 
 ### Automatic profiles (benches)
 
-`make release-pgo` runs the criterion benchmarks under an instrumented build.
+`make dist-pgo` runs the criterion benchmarks under an instrumented build.
 This exercises the parser hot path (SIMD scanner, CSI fast path, state machine,
 grid mutations) with realistic byte patterns.
 
@@ -80,11 +80,11 @@ cargo pgo bench
 
 # 2. (Optional) manual session profiling — profiles accumulate
 cargo pgo build
-./target/release/tty  # use it, then exit
+./target/dist/tty  # use it, then exit
 
 # 3. PGO + BOLT
 cargo pgo bolt build --with-pgo
-./target/release/tty-bolt-instrumented  # use it, then exit
+./target/dist/tty-bolt-instrumented  # use it, then exit
 cargo pgo bolt optimize --with-pgo
 ```
 

@@ -4,22 +4,14 @@ ARCH       := $(shell uname -m | sed 's/arm64/aarch64/')
 TARGET     := $(ARCH)-apple-darwin
 LLVM_BIN   := $(shell rustc --print sysroot)/lib/rustlib/$(TARGET)/bin
 
-.PHONY: setup build release-bin pgo-profile release-pgo bench-pgo release install run run-release stats test test-ci pc bump-version
-
-setup:
-	rustup show active-toolchain
-	prek install --install-hooks
+.PHONY: build pgo-profile dist-pgo bench-pgo dist install test test-ci pc bump-version
 
 build:
 	cargo build
 
-release-bin:
-	cargo clean -p $(NAME) --release --target $(TARGET)
-	RUSTFLAGS="-Zlocation-detail=none -Zunstable-options -Cpanic=immediate-abort" \
-	cargo build --release --bin $(NAME) \
-	  -Z build-std=std \
-	  -Z build-std-features= \
-	  --target $(TARGET)
+lint:
+	cargo fmt --all
+	cargo clippy --fix --allow-dirty --workspace --all-targets -- --deny warnings
 
 PGO_DIR    := $(CURDIR)/target/pgo-profiles
 PGO_MERGED := $(PGO_DIR)/merged.profdata
@@ -31,20 +23,20 @@ pgo-profile:
 	cargo bench --bench bench -- --profile-time 1 "parser|pipeline|end_to_end"
 	$(LLVM_BIN)/llvm-profdata merge -o $(PGO_MERGED) $(PGO_DIR)
 
-release-pgo: $(PGO_MERGED)
-	cargo clean -p $(NAME) --release --target $(TARGET)
+dist-pgo: $(PGO_MERGED)
+	cargo clean -p $(NAME) --profile dist --target $(TARGET)
 	RUSTFLAGS="-Zlocation-detail=none -Zunstable-options -Cpanic=immediate-abort -Cprofile-use=$(PGO_MERGED)" \
-	cargo build --release --bin $(NAME) \
+	cargo build --profile dist --bin $(NAME) \
 	  -Z build-std=std \
 	  -Z build-std-features= \
 	  --target $(TARGET)
-	@echo "==> PGO release binary: target/$(TARGET)/release/$(NAME)"
+	@echo "==> PGO dist binary: target/$(TARGET)/dist/$(NAME)"
 
-# Benchmark regular release vs PGO. Requires: critcmp (cargo install critcmp)
+# Benchmark dist vs PGO dist. Requires: critcmp (cargo install critcmp)
 bench-pgo: $(PGO_MERGED)
-	cargo bench --bench bench -- --save-baseline regular 2>/dev/null
+	cargo bench --bench bench --profile dist -- --save-baseline regular 2>/dev/null
 	RUSTFLAGS="-Cprofile-use=$(PGO_MERGED)" \
-	cargo bench --bench bench -- --save-baseline pgo 2>/dev/null
+	cargo bench --bench bench --profile dist -- --save-baseline pgo 2>/dev/null
 	critcmp regular pgo
 
 $(PGO_MERGED):
@@ -65,36 +57,23 @@ icon.icns: icon.png
 	iconutil -c icns icon.iconset -o icon.icns
 	rm -rf icon.iconset
 
-release: release-pgo icon.icns
+dist: dist-pgo icon.icns
 	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	cp Info.plist $(APP)/Contents/
 	cp icon.icns $(APP)/Contents/Resources/
-	cp target/$(TARGET)/release/$(NAME) $(APP)/Contents/MacOS/
+	cp target/$(TARGET)/dist/$(NAME) $(APP)/Contents/MacOS/
 	zip -r $(APP).zip $(APP)
 
-install: release
+install: dist
 	unzip -o $(APP).zip -d /Applications
 	codesign --force --sign - /Applications/$(APP)
 	@echo "Installed to /Applications/$(APP)"
 
-run:
-	cargo run
-
-run-release:
-	cargo run --release
-
-stats:
-	cargo run -- --stats
-
 test:
-	@OUT=$$(cargo test --quiet -- --test-threads=32 2>&1) || { echo "$$OUT"; exit 1; }
+	cargo test --quiet
 
-# So we don't do duplicate work (building both debug and release) in CI.
 test-ci:
-	@OUT=$$(cargo test --quiet --release -- --test-threads=32 2>&1) || { echo "$$OUT"; exit 1; }
-
-pc:
-	prek run --quiet --all-files
+	cargo test --profile dist
 
 # Usage: make bump-version [V=x.y.z]
 # Without V, increments the patch version.

@@ -1934,9 +1934,7 @@ fn make_htop_frame(frame: usize, cols: u16, rows: u16) -> Vec<u8> {
             // Status bar — static
             buf.extend_from_slice(b"\x1b[7m");
             buf.extend_from_slice(b" F1Help F2Setup F3Search F9Kill F10Quit");
-            for _ in 38..cols {
-                buf.push(b' ');
-            }
+            buf.extend(std::iter::repeat_n(b' ', (cols - 38) as usize));
             buf.extend_from_slice(b"\x1b[0m");
         } else if row == 3 {
             // Column headers — static
@@ -2246,6 +2244,321 @@ fn bench_slow_paths(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// Atlas HashMap benchmarks — mirrors the GlyphKey→AtlasPos lookup that
+// Atlas::get_or_insert() performs for every non-ASCII character rendered.
+// ---------------------------------------------------------------------------
+
+use rustc_hash::{FxBuildHasher, FxHashMap};
+
+/// Mirrors the real GlyphKey in renderer/atlas.rs.
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
+struct GlyphKey {
+    codepoint: u32,
+    wide: bool,
+}
+
+/// Mirrors AtlasPos in renderer/atlas.rs.
+#[derive(Clone, Copy, Debug, Default)]
+struct AtlasPos {
+    x: u8,
+    y: u8,
+}
+
+/// Generate unique codepoints in the non-ASCII range (0x80..0x10FFFF).
+fn gen_codepoints(n: usize) -> Vec<GlyphKey> {
+    let mut out = Vec::with_capacity(n);
+    // Use deterministic spacing to cover a range of Unicode blocks
+    for i in 0..n {
+        out.push(GlyphKey {
+            codepoint: 0x80 + (i * 137 % 0x10_0000) as u32,
+            wide: i % 20 == 0, // 5% wide
+        });
+    }
+    out
+}
+
+/// Benchmark HashMap vs FxHashMap for the same key/insert/lookup patterns.
+/// Each function compares two hashers side-by-side in the same binary.
+fn bench_atlas_hash(c: &mut Criterion) {
+    let keys = gen_codepoints(10_000);
+    let prev_keys: Vec<GlyphKey> = (0..10_000)
+        .map(|i| GlyphKey {
+            codepoint: 0x100_000 + (i * 137 % 0xF_0000) as u32,
+            wide: false,
+        })
+        .collect();
+
+    let ops: Vec<(bool, GlyphKey)> = {
+        let existing = gen_codepoints(500);
+        (0..10_000)
+            .map(|i| {
+                if i % 10 < 9 {
+                    (true, existing[i % existing.len()])
+                } else {
+                    (
+                        false,
+                        GlyphKey {
+                            codepoint: 0x80_000 + i as u32,
+                            wide: false,
+                        },
+                    )
+                }
+            })
+            .collect()
+    };
+
+    // --- Insert unique ---
+    {
+        let mut group = c.benchmark_group("atlas_hash");
+        group.bench_function("insert_std_10k", |b| {
+            b.iter(|| {
+                let mut map: FxHashMap<GlyphKey, AtlasPos> =
+                    FxHashMap::with_capacity_and_hasher(512, Default::default());
+                for (i, key) in keys.iter().enumerate() {
+                    map.insert(
+                        *key,
+                        AtlasPos {
+                            x: (i % 256) as u8,
+                            y: (i / 256) as u8,
+                        },
+                    );
+                }
+                black_box(&map);
+            });
+        });
+        group.bench_function("insert_fx_10k", |b| {
+            b.iter(|| {
+                let mut map: FxHashMap<GlyphKey, AtlasPos> =
+                    FxHashMap::with_capacity_and_hasher(512, FxBuildHasher);
+                for (i, key) in keys.iter().enumerate() {
+                    map.insert(
+                        *key,
+                        AtlasPos {
+                            x: (i % 256) as u8,
+                            y: (i / 256) as u8,
+                        },
+                    );
+                }
+                black_box(&map);
+            });
+        });
+        group.finish();
+    }
+
+    // --- Lookup hit ---
+    {
+        let mut std_map: FxHashMap<GlyphKey, AtlasPos> =
+            FxHashMap::with_capacity_and_hasher(keys.len(), Default::default());
+        for (i, key) in keys.iter().enumerate() {
+            std_map.insert(
+                *key,
+                AtlasPos {
+                    x: (i % 256) as u8,
+                    y: (i / 256) as u8,
+                },
+            );
+        }
+        let mut fx_map: FxHashMap<GlyphKey, AtlasPos> =
+            FxHashMap::with_capacity_and_hasher(keys.len(), FxBuildHasher);
+        for (i, key) in keys.iter().enumerate() {
+            fx_map.insert(
+                *key,
+                AtlasPos {
+                    x: (i % 256) as u8,
+                    y: (i / 256) as u8,
+                },
+            );
+        }
+
+        let mut group = c.benchmark_group("atlas_hash");
+        group.bench_function("lookup_hit_std_10k", |b| {
+            b.iter(|| {
+                for key in &keys {
+                    black_box(std_map.get(key));
+                }
+            });
+        });
+        group.bench_function("lookup_hit_fx_10k", |b| {
+            b.iter(|| {
+                for key in &keys {
+                    black_box(fx_map.get(key));
+                }
+            });
+        });
+        group.finish();
+    }
+
+    // --- Lookup miss ---
+    {
+        let mut std_map: FxHashMap<GlyphKey, AtlasPos> =
+            FxHashMap::with_capacity_and_hasher(keys.len(), Default::default());
+        for (i, key) in keys.iter().enumerate() {
+            std_map.insert(
+                *key,
+                AtlasPos {
+                    x: (i % 256) as u8,
+                    y: (i / 256) as u8,
+                },
+            );
+        }
+        let mut fx_map: FxHashMap<GlyphKey, AtlasPos> =
+            FxHashMap::with_capacity_and_hasher(keys.len(), FxBuildHasher);
+        for (i, key) in keys.iter().enumerate() {
+            fx_map.insert(
+                *key,
+                AtlasPos {
+                    x: (i % 256) as u8,
+                    y: (i / 256) as u8,
+                },
+            );
+        }
+
+        let mut group = c.benchmark_group("atlas_hash");
+        group.bench_function("lookup_miss_std_10k", |b| {
+            b.iter(|| {
+                for key in &prev_keys {
+                    black_box(std_map.get(key));
+                }
+            });
+        });
+        group.bench_function("lookup_miss_fx_10k", |b| {
+            b.iter(|| {
+                for key in &prev_keys {
+                    black_box(fx_map.get(key));
+                }
+            });
+        });
+        group.finish();
+    }
+
+    // --- Mixed 90/10 ---
+    {
+        let mut group = c.benchmark_group("atlas_hash");
+        group.bench_function("mixed_std_10k", |b| {
+            b.iter(|| {
+                let mut map: FxHashMap<GlyphKey, AtlasPos> =
+                    FxHashMap::with_capacity_and_hasher(512, Default::default());
+                for (i, key) in keys.iter().take(500).enumerate() {
+                    map.insert(
+                        *key,
+                        AtlasPos {
+                            x: (i % 256) as u8,
+                            y: (i / 256) as u8,
+                        },
+                    );
+                }
+                for (is_hit, key) in &ops {
+                    if *is_hit {
+                        black_box(map.get(key));
+                    } else {
+                        map.insert(*key, AtlasPos { x: 0, y: 0 });
+                    }
+                }
+                black_box(&map);
+            });
+        });
+        group.bench_function("mixed_fx_10k", |b| {
+            b.iter(|| {
+                let mut map: FxHashMap<GlyphKey, AtlasPos> =
+                    FxHashMap::with_capacity_and_hasher(512, FxBuildHasher);
+                for (i, key) in keys.iter().take(500).enumerate() {
+                    map.insert(
+                        *key,
+                        AtlasPos {
+                            x: (i % 256) as u8,
+                            y: (i / 256) as u8,
+                        },
+                    );
+                }
+                for (is_hit, key) in &ops {
+                    if *is_hit {
+                        black_box(map.get(key));
+                    } else {
+                        map.insert(*key, AtlasPos { x: 0, y: 0 });
+                    }
+                }
+                black_box(&map);
+            });
+        });
+        group.finish();
+    }
+
+    // --- Eviction: fill 512, retain-evict one, insert one ---
+    {
+        let mut group = c.benchmark_group("atlas_hash");
+        group.bench_function("evict_std_512", |b| {
+            let mut rng = 0u32;
+            b.iter(|| {
+                let mut map: FxHashMap<GlyphKey, AtlasPos> =
+                    FxHashMap::with_capacity_and_hasher(512, Default::default());
+                for i in 0..512 {
+                    map.insert(
+                        GlyphKey {
+                            codepoint: i as u32,
+                            wide: false,
+                        },
+                        AtlasPos {
+                            x: (i % 256) as u8,
+                            y: (i / 256) as u8,
+                        },
+                    );
+                }
+                let evict_x = (rng % 256) as u8;
+                rng = rng.wrapping_add(1);
+                let evict_y = (rng % 8) as u8;
+                map.retain(|_, pos| !(pos.x == evict_x && pos.y == evict_y));
+                map.insert(
+                    GlyphKey {
+                        codepoint: 0x100_000 + rng,
+                        wide: false,
+                    },
+                    AtlasPos {
+                        x: evict_x,
+                        y: evict_y,
+                    },
+                );
+                black_box(&map);
+            });
+        });
+        group.bench_function("evict_fx_512", |b| {
+            let mut rng = 0u32;
+            b.iter(|| {
+                let mut map: FxHashMap<GlyphKey, AtlasPos> =
+                    FxHashMap::with_capacity_and_hasher(512, FxBuildHasher);
+                for i in 0..512 {
+                    map.insert(
+                        GlyphKey {
+                            codepoint: i as u32,
+                            wide: false,
+                        },
+                        AtlasPos {
+                            x: (i % 256) as u8,
+                            y: (i / 256) as u8,
+                        },
+                    );
+                }
+                let evict_x = (rng % 256) as u8;
+                rng = rng.wrapping_add(1);
+                let evict_y = (rng % 8) as u8;
+                map.retain(|_, pos| !(pos.x == evict_x && pos.y == evict_y));
+                map.insert(
+                    GlyphKey {
+                        codepoint: 0x100_000 + rng,
+                        wide: false,
+                    },
+                    AtlasPos {
+                        x: evict_x,
+                        y: evict_y,
+                    },
+                );
+                black_box(&map);
+            });
+        });
+        group.finish();
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 criterion_group! {
     name = benches;
@@ -2263,5 +2576,6 @@ criterion_group! {
         bench_alloc_audit,
         bench_tui_redraw,
         bench_slow_paths,
+        bench_atlas_hash,
 }
 criterion_main!(benches);

@@ -1,7 +1,8 @@
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 
 use metal::*;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use crate::renderer::font::{FontRasterizer, RasterizedGlyph};
 
@@ -28,7 +29,7 @@ pub struct Atlas {
     cell_height: u32,
     cols: u32,
     rows: u32,
-    map: HashMap<GlyphKey, AtlasPos>,
+    map: FxHashMap<GlyphKey, AtlasPos>,
     // Next allocation slot
     next_slot: u32,
     // LRU: slot → last used frame
@@ -62,7 +63,7 @@ impl Atlas {
             cell_height,
             cols,
             rows,
-            map: HashMap::with_capacity(512),
+            map: FxHashMap::with_capacity_and_hasher(512, FxBuildHasher),
             next_slot: 0,
             usage: vec![0; (cols * rows) as usize],
             frame: 0,

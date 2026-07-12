@@ -1,4 +1,4 @@
-name: Build
+name: dist
 
 on:
   push:
@@ -9,8 +9,8 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build release
+  dist:
+    name: build dist
     runs-on: macos-15
     timeout-minutes: 10
     defaults:
@@ -22,10 +22,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: test and release
+      - name: test
         run: |
           make test-ci
-          make release
+
+      - name: build dist
+        run: |
+          make dist
 
       - name: Create GitHub release
         env:
