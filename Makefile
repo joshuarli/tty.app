@@ -4,7 +4,7 @@ ARCH       := $(shell uname -m | sed 's/arm64/aarch64/')
 TARGET     := $(ARCH)-apple-darwin
 LLVM_BIN   := $(shell rustc --print sysroot)/lib/rustlib/$(TARGET)/bin
 
-.PHONY: build pgo-profile dist-pgo bench-pgo dist install test test-ci pc bump-version
+.PHONY: build pgo-profile dist-pgo bench-pgo dist install test test-ci coverage pc bump-version
 
 build:
 	cargo build
@@ -74,6 +74,12 @@ test:
 
 test-ci:
 	cargo test --profile dist
+
+coverage:
+	cargo llvm-cov --all-targets --ignore-run-fail --lcov --output-path lcov.info
+
+coverage-report:
+	cargo llvm-cov --all-targets --ignore-run-fail --open
 
 # Usage: make bump-version [V=x.y.z]
 # Without V, increments the patch version.
