@@ -1,9 +1,14 @@
 use std::ffi::CString;
 use std::fs;
 use std::io;
-use std::os::fd::RawFd;
+use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
+
+use rustix::event::{FdSetElement, Timespec, fd_set_insert, fd_set_num_elements, select};
+use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+use rustix::io::read;
+use rustix::process::{Pid, Signal, kill_process};
 
 fn tmux_available() -> bool {
     Command::new("tmux")
@@ -17,41 +22,35 @@ fn drain_fd(fd: RawFd, timeout: Duration) -> Vec<u8> {
     let start = Instant::now();
     while start.elapsed() < timeout {
         let remaining = timeout.saturating_sub(start.elapsed());
-        let mut readfds = unsafe { std::mem::zeroed::<libc::fd_set>() };
-        unsafe {
-            libc::FD_ZERO(&mut readfds);
-            libc::FD_SET(fd, &mut readfds);
-        }
-
-        let mut tv = libc::timeval {
-            tv_sec: remaining.as_secs().min(1) as libc::time_t,
-            tv_usec: remaining.subsec_micros() as libc::suseconds_t,
+        let mut readfds = vec![FdSetElement::default(); fd_set_num_elements(1, fd + 1)];
+        fd_set_insert(&mut readfds, fd);
+        let tv = Timespec {
+            tv_sec: remaining.as_secs().min(1) as i64,
+            tv_nsec: remaining.subsec_nanos() as _,
         };
-
-        let ready = unsafe {
-            libc::select(
-                fd + 1,
-                &mut readfds,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &mut tv,
-            )
+        let ready = match unsafe { select(fd + 1, Some(&mut readfds), None, None, Some(&tv)) } {
+            Ok(ready) => ready,
+            Err(_) => continue,
         };
         if ready <= 0 {
             continue;
         }
 
         let mut buf = [0u8; 65536];
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-        if n <= 0 {
+        let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+        let n = match read(borrowed, &mut buf) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if n == 0 {
             break;
         }
-        out.extend_from_slice(&buf[..n as usize]);
+        out.extend_from_slice(&buf[..n]);
     }
     out
 }
 
-fn spawn_tmux_client(socket: &str, config: &str) -> io::Result<(libc::pid_t, RawFd)> {
+fn spawn_tmux_client(socket: &str, config: &str) -> io::Result<(i32, RawFd)> {
     let mut master_fd: RawFd = -1;
     let mut ws = libc::winsize {
         ws_row: 24,
@@ -87,10 +86,10 @@ fn spawn_tmux_client(socket: &str, config: &str) -> io::Result<(libc::pid_t, Raw
         execvp(&args);
     }
 
-    let flags = unsafe { libc::fcntl(master_fd, libc::F_GETFL) };
-    unsafe {
-        libc::fcntl(master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-    }
+    let master = unsafe { OwnedFd::from_raw_fd(master_fd) };
+    let flags = fcntl_getfl(&master)?;
+    fcntl_setfl(&master, flags | OFlags::NONBLOCK)?;
+    let master_fd = master.into_raw_fd();
     Ok((pid, master_fd))
 }
 
@@ -170,10 +169,10 @@ fn tmux256color_client_with_clipboard_feature_emits_osc52() {
         .args(["-L", &unique, "kill-server"])
         .output()
         .ok();
-    unsafe {
-        libc::kill(pid, libc::SIGHUP);
-        libc::close(fd);
+    if let Some(pid) = Pid::from_raw(pid) {
+        let _ = kill_process(pid, Signal::HUP);
     }
+    unsafe { drop(OwnedFd::from_raw_fd(fd)) };
     fs::remove_file(config).ok();
 
     assert!(

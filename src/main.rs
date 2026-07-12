@@ -12,12 +12,14 @@ mod terminal;
 mod unicode;
 mod window;
 
+use std::os::fd::OwnedFd;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSEventMask, NSEventModifierFlags, NSEventType};
 use objc2_foundation::NSDefaultRunLoopMode;
+use rustix::event::kqueue::{Event as KqueueEvent, EventFilter, EventFlags, kevent, kqueue};
 
 use crate::clipboard::{base64_decode, clipboard_has_image, get_clipboard, set_clipboard};
 
@@ -716,17 +718,14 @@ struct Terminal {
     app: App,
 }
 
-fn register_pty_fd(kq: i32, fd: std::os::fd::RawFd) {
-    let ev = libc::kevent {
-        ident: fd as libc::uintptr_t,
-        filter: libc::EVFILT_READ,
-        flags: libc::EV_ADD | libc::EV_ENABLE,
-        fflags: 0,
-        data: 0,
-        udata: std::ptr::null_mut(),
-    };
-    let ret = unsafe { libc::kevent(kq, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
-    assert!(ret >= 0, "kevent register failed");
+fn register_pty_fd(kq: &OwnedFd, fd: std::os::fd::RawFd) {
+    let ev = KqueueEvent::new(
+        EventFilter::Read(fd),
+        EventFlags::ADD | EventFlags::ENABLE,
+        std::ptr::null_mut(),
+    );
+    let mut out: [std::mem::MaybeUninit<KqueueEvent>; 0] = [];
+    unsafe { kevent(kq, &[ev], &mut out, None).expect("kevent register failed") };
 }
 
 fn spawn_terminal(mtm: MainThreadMarker) -> Terminal {
@@ -806,9 +805,8 @@ fn main() {
     let mut terminals: Vec<Terminal> = Vec::new();
     terminals.push(spawn_terminal(mtm));
 
-    let kq = unsafe { libc::kqueue() };
-    assert!(kq >= 0, "kqueue() failed");
-    register_pty_fd(kq, terminals[0].app.pty_fd());
+    let kq = kqueue().expect("kqueue() failed");
+    register_pty_fd(&kq, terminals[0].app.pty_fd());
 
     let mut state_events = Vec::new();
 
@@ -828,14 +826,10 @@ fn main() {
             // writes (e.g., tmux hiding cursor, drawing, then showing cursor).
             // Single pass only — looping would hang on continuous output (yes).
             if got_any_pty_data {
-                let coalesce = libc::timespec {
-                    tv_sec: 0,
-                    tv_nsec: 500_000,
-                };
-                let mut ev = std::mem::MaybeUninit::<libc::kevent>::uninit();
-                let n =
-                    unsafe { libc::kevent(kq, std::ptr::null(), 0, ev.as_mut_ptr(), 1, &coalesce) };
-                if n > 0 {
+                let mut ev = [std::mem::MaybeUninit::<KqueueEvent>::uninit()];
+                let events = unsafe { kevent(&kq, &[], &mut ev, Some(Duration::from_micros(500))) }
+                    .expect("kevent coalesce failed");
+                if !events.0.is_empty() {
                     for t in terminals.iter_mut() {
                         t.app.process_pty_output(&t.win, PTY_BUDGET);
                     }
@@ -930,7 +924,7 @@ fn main() {
             // Spawn new terminal if Cmd+N was pressed or dock menu clicked
             if spawn_pending || new_window_requested() {
                 let t = spawn_terminal(mtm);
-                register_pty_fd(kq, t.app.pty_fd());
+                register_pty_fd(&kq, t.app.pty_fd());
                 terminals.push(t);
             }
 
@@ -960,16 +954,11 @@ fn main() {
 
         // When idle, block until any PTY has data or 8ms elapses
         if idle {
-            let timeout = libc::timespec {
-                tv_sec: 0,
-                tv_nsec: 8_000_000,
-            };
-            let mut ev_out = std::mem::MaybeUninit::<libc::kevent>::uninit();
+            let mut ev_out = [std::mem::MaybeUninit::<KqueueEvent>::uninit()];
             unsafe {
-                libc::kevent(kq, std::ptr::null(), 0, ev_out.as_mut_ptr(), 1, &timeout);
+                kevent(&kq, &[], &mut ev_out, Some(Duration::from_millis(8)))
+                    .expect("kevent wait failed");
             }
         }
     }
-
-    unsafe { libc::close(kq) };
 }

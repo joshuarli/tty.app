@@ -982,6 +982,7 @@ dependencies = [
  "objc2-foundation",
  "proptest",
  "rustc-hash",
+ "rustix",
 ]
 
 [[package]]

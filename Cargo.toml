@@ -18,6 +18,7 @@ core-foundation = "0.10"
 core-text = "21"
 block = "0.1"
 libc = "0.2"
+rustix = { version = "1.1.4", features = ["event", "fs", "process", "termios"] }
 rustc-hash = "2"
 
 [dev-dependencies]
@@ -46,4 +47,3 @@ inherits = "release"
 lto = "fat"
 codegen-units = 1
 strip = true
-
