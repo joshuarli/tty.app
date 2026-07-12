@@ -16,6 +16,8 @@ lint:
 PGO_DIR    := $(CURDIR)/target/pgo-profiles
 PGO_MERGED := $(PGO_DIR)/merged.profdata
 PROF_SCRIPT := $(CURDIR)/scripts/profile.sh
+PROFILE_BENCH_ARGS := --noplot --sample-size 10 --warm-up-time 0.2 --measurement-time 0.5
+PROFILE_RUN_DIR := $(CURDIR)/target/profiling/latest
 
 prof:
 	$(MAKE) pgo-profile
@@ -23,7 +25,7 @@ prof:
 	$(MAKE) bench-pgo
 
 pgo-profile:
-	$(PROF_SCRIPT)
+	PROFILE_BENCH_ARGS='$(PROFILE_BENCH_ARGS)' $(PROF_SCRIPT)
 
 dist-pgo: $(PGO_MERGED)
 	cargo clean -p $(NAME) --profile dist --target $(TARGET)
@@ -36,9 +38,11 @@ dist-pgo: $(PGO_MERGED)
 
 # Benchmark dist vs PGO dist. Requires: critcmp (cargo install critcmp)
 bench-pgo: $(PGO_MERGED)
-	cargo bench --bench bench --profile dist -- --save-baseline regular 2>/dev/null
+	mkdir -p $(PROFILE_RUN_DIR)
+	cargo bench --bench bench --profile dist -- $(PROFILE_BENCH_ARGS) --save-baseline regular 2>$(PROFILE_RUN_DIR)/bench-pgo-regular.log
 	RUSTFLAGS="-Cprofile-use=$(PGO_MERGED)" \
-	cargo bench --bench bench --profile dist -- --save-baseline pgo 2>/dev/null
+	cargo bench --bench bench --profile dist -- $(PROFILE_BENCH_ARGS) --save-baseline pgo 2>$(PROFILE_RUN_DIR)/bench-pgo-pgo.log
+	@grep -h '^[[:space:]]*\[rss\]' $(PROFILE_RUN_DIR)/bench-pgo-regular.log $(PROFILE_RUN_DIR)/bench-pgo-pgo.log || true
 	critcmp regular pgo
 
 $(PGO_MERGED):

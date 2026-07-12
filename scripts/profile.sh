@@ -21,6 +21,7 @@ mkdir -p "$PGO_DIR" "$RUN_DIR"
 export CARGO_INCREMENTAL=0
 export LLVM_PROFILE_FILE="$PGO_DIR/%m-%p.profraw"
 export RUSTFLAGS="${RUSTFLAGS:-} -Cprofile-generate=$PGO_DIR"
+read -r -a BENCH_ARGS <<< "${PROFILE_BENCH_ARGS:---noplot --sample-size 10 --warm-up-time 0.2 --measurement-time 0.5}"
 
 {
   echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -28,7 +29,9 @@ export RUSTFLAGS="${RUSTFLAGS:-} -Cprofile-generate=$PGO_DIR"
   echo "rustc=$(rustc --version)"
   echo "host=$HOST"
   echo "tests=cargo test --workspace"
-  echo "benchmarks=cargo bench --workspace --bench bench -- --noplot"
+  printf 'benchmarks=cargo bench --workspace --bench bench --'
+  printf ' %q' "${BENCH_ARGS[@]}"
+  echo
   echo "pgo_dir=$PGO_DIR"
   echo "run_dir=$RUN_DIR"
 } > "$RUN_DIR/manifest.txt"
@@ -37,7 +40,7 @@ echo "==> Running the test suite with LLVM instrumentation"
 (cd "$ROOT" && cargo test --workspace 2>&1 | tee "$RUN_DIR/tests.log")
 
 echo "==> Running all Criterion benchmarks with LLVM instrumentation"
-(cd "$ROOT" && cargo bench --workspace --bench bench -- --noplot 2>&1 | tee "$RUN_DIR/bench.log")
+(cd "$ROOT" && cargo bench --workspace --bench bench -- "${BENCH_ARGS[@]}" 2>&1 | tee "$RUN_DIR/bench.log")
 
 shopt -s nullglob
 profiles=("$PGO_DIR"/*.profraw)

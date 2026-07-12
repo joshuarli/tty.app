@@ -742,7 +742,7 @@ fn run_startup_bench() {
     let safe_area_top = 0;
 
     let t = Instant::now();
-    let device = metal::Device::system_default().expect("no Metal device found");
+    let device = objc2_metal::MTLCreateSystemDefaultDevice().expect("no Metal device found");
     let metal_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     let t = Instant::now();

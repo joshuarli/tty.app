@@ -5,25 +5,25 @@ edition = "2024"
 build = "build.rs"
 
 [dependencies]
-metal = "0.33"
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSDate", "NSObjCRuntime", "NSRunLoop", "NSGeometry"] }
+block2 = "0.6"
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSArray", "NSData", "NSObjCRuntime", "NSRunLoop", "NSGeometry"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSView", "NSResponder", "NSPasteboard", "NSApplication", "NSEvent", "NSGraphics", "NSScreen", "NSWindow", "NSRunningApplication", "objc2-core-foundation"] }
+objc2-metal = { version = "0.3", default-features = false, features = ["std", "block2", "MTLAllocation", "MTLBuffer", "MTLCommandBuffer", "MTLCommandEncoder", "MTLCommandQueue", "MTLComputeCommandEncoder", "MTLComputePipeline", "MTLDevice", "MTLDrawable", "MTLLibrary", "MTLPipeline", "MTLPixelFormat", "MTLResource", "MTLTexture", "MTLTypes"] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "CALayer", "CAMetalLayer", "objc2-metal"] }
 bytemuck = { version = "1", features = ["derive"] }
 bitflags = "2"
 bitvec = "1"
 core-graphics = "0.25"
-core-graphics-types = "0.2"
-core-foundation = "0.10"
-core-text = "21"
-block = "0.1"
+core-text = "22"
 libc = "0.2"
 rustix = { version = "1.1.4", features = ["event", "fs", "process", "termios"] }
 rustc-hash = "2"
 
 [dev-dependencies]
 proptest = "1"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
 name = "bench"

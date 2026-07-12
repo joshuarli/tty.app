@@ -1,14 +1,18 @@
 use std::ffi::c_void;
 use std::mem;
+use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bitvec::prelude::*;
-use block::ConcreteBlock;
-use core_graphics_types::geometry::CGSize;
-use metal::foreign_types::ForeignType;
-use metal::*;
+use block2::RcBlock;
+use objc2::rc::{Retained, autoreleasepool};
+use objc2::runtime::ProtocolObject;
 use objc2_app_kit::NSView;
+use objc2_core_foundation::CGSize;
+use objc2_foundation::NSString;
+use objc2_metal::*;
+use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
 use crate::config;
 use crate::renderer_trait::Renderer;
@@ -41,26 +45,26 @@ const _: () = assert!(CELL_SIZE == 8, "Cell must be 8 bytes for GPU layout");
 const NUM_BUFFERS: usize = 2;
 
 pub struct MetalRenderer {
-    device: Device,
-    command_queue: CommandQueue,
-    pipeline: ComputePipelineState,
-    layer: MetalLayer,
+    device: Retained<ProtocolObject<dyn MTLDevice>>,
+    command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    layer: Retained<CAMetalLayer>,
 
     // Double-buffered cell data — CPU writes to one while GPU reads the other
-    cell_buffers: [Buffer; NUM_BUFFERS],
+    cell_buffers: [Retained<ProtocolObject<dyn MTLBuffer>>; NUM_BUFFERS],
     current_buffer: usize,
     buffer_ready: [Arc<AtomicBool>; NUM_BUFFERS],
     // Per-buffer dirty row tracking: each dirty row must be copied to BOTH buffers
     pending: [BitVec; NUM_BUFFERS],
 
     // Palette buffer (256 × half4)
-    palette_buffer: Buffer,
+    palette_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
 
     // Uniform buffer
-    uniform_buffer: Buffer,
+    uniform_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
 
     // Atlas texture
-    pub atlas_texture: Texture,
+    pub atlas_texture: Retained<ProtocolObject<dyn MTLTexture>>,
 
     // Grid dimensions
     pub cols: u32,
@@ -92,17 +96,19 @@ impl MetalRenderer {
         cell_height: u32,
         notch_px: u32,
     ) -> Self {
-        let device = Device::system_default().expect("no Metal device found");
-        let command_queue = device.new_command_queue();
+        let device = MTLCreateSystemDefaultDevice().expect("no Metal device found");
+        let command_queue = device
+            .newCommandQueue()
+            .expect("failed to create Metal command queue");
 
         // Set up CAMetalLayer
-        let layer = MetalLayer::new();
-        layer.set_device(&device);
-        layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-        layer.set_presents_with_transaction(true);
-        layer.set_display_sync_enabled(true);
-        layer.set_opaque(true);
-        layer.set_framebuffer_only(false); // compute shader writes to texture
+        let layer = CAMetalLayer::new();
+        layer.setDevice(Some(&device));
+        layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+        layer.setPresentsWithTransaction(true);
+        layer.setDisplaySyncEnabled(true);
+        layer.setOpaque(true);
+        layer.setFramebufferOnly(false); // compute shader writes to texture
 
         // Attach layer to NSView (layer-backed, then replace the layer)
         view.setWantsLayer(true);
@@ -110,32 +116,46 @@ impl MetalRenderer {
         // accepts any CALayer subclass, which CAMetalLayer is. The view retains
         // the layer, and both outlive this call.
         unsafe {
-            let layer_obj: *mut objc2::runtime::AnyObject = layer.as_ptr().cast();
+            let layer_obj: *mut objc2::runtime::AnyObject =
+                (Retained::as_ptr(&layer) as *mut CAMetalLayer).cast();
             let _: () = objc2::msg_send![view, setLayer: layer_obj];
         }
-        layer.set_contents_scale(scale_factor);
+        layer.setContentsScale(scale_factor);
 
-        layer.set_drawable_size(CGSize::new(width as f64, height as f64));
+        layer.setDrawableSize(CGSize::new(width as f64, height as f64));
 
         // Compile shader from source at runtime
         let shader_source = include_str!("shader.metal");
-        let compile_options = CompileOptions::new();
-        compile_options.set_fast_math_enabled(true);
+        let compile_options = MTLCompileOptions::new();
+        compile_options.setMathMode(MTLMathMode::Fast);
         let library = device
-            .new_library_with_source(shader_source, &compile_options)
+            .newLibraryWithSource_options_error(
+                &NSString::from_str(shader_source),
+                Some(&compile_options),
+            )
             .expect("failed to compile Metal shader");
         let function = library
-            .get_function("render", None)
+            .newFunctionWithName(&NSString::from_str("render"))
             .expect("shader function 'render' not found");
         let pipeline = device
-            .new_compute_pipeline_state_with_function(&function)
+            .newComputePipelineStateWithFunction_error(&function)
             .expect("failed to create compute pipeline");
 
         // Double-buffered cell data (Cell is the GPU format — no conversion needed)
         let buffer_size = (cols as usize * rows as usize * CELL_SIZE) as u64;
         let cell_buffers = [
-            device.new_buffer(buffer_size, MTLResourceOptions::StorageModeShared),
-            device.new_buffer(buffer_size, MTLResourceOptions::StorageModeShared),
+            device
+                .newBufferWithLength_options(
+                    buffer_size as usize,
+                    MTLResourceOptions::StorageModeShared,
+                )
+                .expect("failed to create cell buffer"),
+            device
+                .newBufferWithLength_options(
+                    buffer_size as usize,
+                    MTLResourceOptions::StorageModeShared,
+                )
+                .expect("failed to create cell buffer"),
         ];
         let buffer_ready = [
             Arc::new(AtomicBool::new(true)),
@@ -144,26 +164,38 @@ impl MetalRenderer {
 
         // Palette buffer (256 × half4 = 256 × 4 × 2 bytes)
         let palette_data = Self::build_palette_buffer();
-        let palette_buffer = device.new_buffer_with_data(
-            palette_data.as_ptr() as *const c_void,
-            (256 * 4 * mem::size_of::<u16>()) as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
+        let palette_buffer = unsafe {
+            device
+                .newBufferWithBytes_length_options(
+                    NonNull::new(palette_data.as_ptr() as *mut c_void).unwrap(),
+                    (256 * 4 * mem::size_of::<u16>()) as usize,
+                    MTLResourceOptions::StorageModeShared,
+                )
+                .expect("failed to create palette buffer")
+        };
 
         // Uniform buffer
-        let uniform_buffer = device.new_buffer(
-            mem::size_of::<Uniforms>() as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
+        let uniform_buffer = device
+            .newBufferWithLength_options(
+                mem::size_of::<Uniforms>(),
+                MTLResourceOptions::StorageModeShared,
+            )
+            .expect("failed to create uniform buffer");
 
         // Atlas texture (2048x2048 R8Unorm)
-        let atlas_desc = TextureDescriptor::new();
-        atlas_desc.set_pixel_format(MTLPixelFormat::R8Unorm);
-        atlas_desc.set_width(2048);
-        atlas_desc.set_height(2048);
-        atlas_desc.set_storage_mode(MTLStorageMode::Shared);
-        atlas_desc.set_usage(MTLTextureUsage::ShaderRead);
-        let atlas_texture = device.new_texture(&atlas_desc);
+        let atlas_desc = unsafe {
+            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                MTLPixelFormat::R8Unorm,
+                2048,
+                2048,
+                false,
+            )
+        };
+        atlas_desc.setStorageMode(MTLStorageMode::Shared);
+        atlas_desc.setUsage(MTLTextureUsage::ShaderRead);
+        let atlas_texture = device
+            .newTextureWithDescriptor(&atlas_desc)
+            .expect("failed to create atlas texture");
 
         MetalRenderer {
             device,
@@ -271,7 +303,7 @@ impl MetalRenderer {
         let cols = self.cols.min(grid.cols as u32) as usize;
         let row_bytes = cols * CELL_SIZE;
         let dst_stride = self.cols as usize * CELL_SIZE;
-        let dst_base = self.cell_buffers[cur].contents() as *mut u8;
+        let dst_base = self.cell_buffers[cur].contents().as_ptr() as *mut u8;
         for (row, pending) in self.pending[cur].iter().enumerate() {
             if *pending {
                 // Source row from scrollback or grid based on viewport offset
@@ -302,8 +334,8 @@ impl MetalRenderer {
         }
         self.pending[cur].fill(false);
 
-        objc2::rc::autoreleasepool(|_| {
-            let drawable = match self.layer.next_drawable() {
+        autoreleasepool(|_| {
+            let drawable = match self.layer.nextDrawable() {
                 Some(d) => d,
                 None => {
                     // No drawable available — retry next frame
@@ -334,41 +366,61 @@ impl MetalRenderer {
             // of shared storage. contents() returns a valid pointer to that region.
             // No GPU command buffer is reading this buffer yet (commit happens below).
             unsafe {
-                let ptr = self.uniform_buffer.contents() as *mut Uniforms;
+                let ptr = self.uniform_buffer.contents().as_ptr() as *mut Uniforms;
                 *ptr = uniforms;
             }
 
-            let command_buffer = self.command_queue.new_command_buffer();
-            let encoder = command_buffer.new_compute_command_encoder();
+            let command_buffer = self
+                .command_queue
+                .commandBuffer()
+                .expect("failed to create command buffer");
+            let encoder = command_buffer
+                .computeCommandEncoder()
+                .expect("failed to create compute command encoder");
 
-            encoder.set_compute_pipeline_state(&self.pipeline);
-            encoder.set_texture(0, Some(texture));
-            encoder.set_texture(1, Some(&self.atlas_texture));
-            encoder.set_buffer(0, Some(&self.cell_buffers[self.current_buffer]), 0);
-            encoder.set_buffer(1, Some(&self.palette_buffer), 0);
-            encoder.set_buffer(2, Some(&self.uniform_buffer), 0);
+            encoder.setComputePipelineState(&self.pipeline);
+            unsafe {
+                encoder.setTexture_atIndex(Some(&texture), 0);
+                encoder.setTexture_atIndex(Some(&self.atlas_texture), 1);
+                encoder.setBuffer_offset_atIndex(
+                    Some(&self.cell_buffers[self.current_buffer]),
+                    0,
+                    0,
+                );
+                encoder.setBuffer_offset_atIndex(Some(&self.palette_buffer), 0, 1);
+                encoder.setBuffer_offset_atIndex(Some(&self.uniform_buffer), 0, 2);
+            }
 
             let w = texture.width();
             let h = texture.height();
-            let threadgroup_size = MTLSize::new(16, 16, 1);
-            let grid_size = MTLSize::new(w, h, 1);
+            let threadgroup_size = MTLSize {
+                width: 16,
+                height: 16,
+                depth: 1,
+            };
+            let grid_size = MTLSize {
+                width: w,
+                height: h,
+                depth: 1,
+            };
 
-            encoder.dispatch_threads(grid_size, threadgroup_size);
-            encoder.end_encoding();
+            encoder.dispatchThreads_threadsPerThreadgroup(grid_size, threadgroup_size);
+            encoder.endEncoding();
 
             // Mark buffer as in-flight before commit
             self.buffer_ready[self.current_buffer].store(false, Ordering::Release);
 
             // Signal buffer availability when GPU finishes
             let ready_flag = self.buffer_ready[self.current_buffer].clone();
-            let handler = ConcreteBlock::new(move |_cb: &CommandBufferRef| {
+            let handler = RcBlock::new(move |_cb| {
                 ready_flag.store(true, Ordering::Release);
             });
-            let handler = handler.copy();
-            command_buffer.add_completed_handler(&handler);
+            unsafe {
+                command_buffer.addCompletedHandler(RcBlock::as_ptr(&handler));
+            }
 
             command_buffer.commit();
-            command_buffer.wait_until_scheduled();
+            command_buffer.waitUntilScheduled();
             drawable.present();
 
             // Swap to the other buffer for next frame.
@@ -388,8 +440,8 @@ impl MetalRenderer {
     pub fn resize(&mut self, width: u32, height: u32, scale: f64) {
         self.scale_factor = scale;
         self.layer
-            .set_drawable_size(CGSize::new(width as f64, height as f64));
-        self.layer.set_contents_scale(scale);
+            .setDrawableSize(CGSize::new(width as f64, height as f64));
+        self.layer.setContentsScale(scale);
 
         // Recalculate grid dimensions (all in physical pixels already)
         let padding_px = (config::PADDING as f64 * scale) as u32;
@@ -410,9 +462,17 @@ impl MetalRenderer {
         let buffer_size = (self.cols as usize * self.rows as usize * CELL_SIZE) as u64;
         self.cell_buffers = [
             self.device
-                .new_buffer(buffer_size, MTLResourceOptions::StorageModeShared),
+                .newBufferWithLength_options(
+                    buffer_size as usize,
+                    MTLResourceOptions::StorageModeShared,
+                )
+                .expect("failed to create cell buffer"),
             self.device
-                .new_buffer(buffer_size, MTLResourceOptions::StorageModeShared),
+                .newBufferWithLength_options(
+                    buffer_size as usize,
+                    MTLResourceOptions::StorageModeShared,
+                )
+                .expect("failed to create cell buffer"),
         ];
         // Mark all rows pending in both buffers after resize
         self.pending = [
@@ -422,7 +482,7 @@ impl MetalRenderer {
         self.needs_render = true;
     }
 
-    pub fn device(&self) -> &Device {
+    pub fn device(&self) -> &ProtocolObject<dyn MTLDevice> {
         &self.device
     }
 }

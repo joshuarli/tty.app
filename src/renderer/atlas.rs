@@ -1,7 +1,15 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use metal::*;
+use std::ffi::c_void;
+use std::ptr::NonNull;
+
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2_metal::{
+    MTLDevice, MTLPixelFormat, MTLRegion, MTLStorageMode, MTLTexture, MTLTextureDescriptor,
+    MTLTextureUsage,
+};
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use crate::renderer::Rasterize;
@@ -25,7 +33,7 @@ pub struct AtlasPos {
 
 /// Glyph texture atlas with grid-based packing.
 pub struct Atlas {
-    pub texture: Texture,
+    pub texture: Retained<ProtocolObject<dyn MTLTexture>>,
     cell_width: u32,
     cell_height: u32,
     cols: u32,
@@ -45,14 +53,20 @@ pub struct Atlas {
 }
 
 impl Atlas {
-    pub fn new(device: &Device, cell_width: u32, cell_height: u32) -> Self {
-        let desc = TextureDescriptor::new();
-        desc.set_pixel_format(MTLPixelFormat::R8Unorm);
-        desc.set_width(ATLAS_SIZE as u64);
-        desc.set_height(ATLAS_SIZE as u64);
-        desc.set_storage_mode(MTLStorageMode::Shared);
-        desc.set_usage(MTLTextureUsage::ShaderRead);
-        let texture = device.new_texture(&desc);
+    pub fn new(device: &ProtocolObject<dyn MTLDevice>, cell_width: u32, cell_height: u32) -> Self {
+        let desc = unsafe {
+            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                MTLPixelFormat::R8Unorm,
+                ATLAS_SIZE as usize,
+                ATLAS_SIZE as usize,
+                false,
+            )
+        };
+        desc.setStorageMode(MTLStorageMode::Shared);
+        desc.setUsage(MTLTextureUsage::ShaderRead);
+        let texture = device
+            .newTextureWithDescriptor(&desc)
+            .expect("failed to create atlas texture");
 
         // Use double cell width for the atlas grid to accommodate wide glyphs
         let cols = ATLAS_SIZE / cell_width;
@@ -146,21 +160,31 @@ impl Atlas {
         let grid_y = slot / self.cols;
 
         // Upload glyph data to atlas texture
-        let region = MTLRegion::new_2d(
-            (grid_x * self.cell_width) as u64,
-            (grid_y * self.cell_height) as u64,
-            glyph
-                .width
-                .min(self.cell_width * if key.wide { 2 } else { 1 }) as u64,
-            glyph.height.min(self.cell_height) as u64,
-        );
+        let region = MTLRegion {
+            origin: objc2_metal::MTLOrigin {
+                x: (grid_x * self.cell_width) as usize,
+                y: (grid_y * self.cell_height) as usize,
+                z: 0,
+            },
+            size: objc2_metal::MTLSize {
+                width: glyph
+                    .width
+                    .min(self.cell_width * if key.wide { 2 } else { 1 })
+                    as usize,
+                height: glyph.height.min(self.cell_height) as usize,
+                depth: 1,
+            },
+        };
 
-        self.texture.replace_region(
-            region,
-            0,
-            glyph.data.as_ptr() as *const _,
-            glyph.width as u64, // bytes per row (R8 = 1 byte per pixel)
-        );
+        unsafe {
+            self.texture
+                .replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                    region,
+                    0,
+                    NonNull::new(glyph.data.as_ptr() as *mut c_void).expect("empty glyph data"),
+                    glyph.width as usize, // bytes per row (R8 = 1 byte per pixel)
+                );
+        }
 
         let pos = AtlasPos {
             x: grid_x as u8,

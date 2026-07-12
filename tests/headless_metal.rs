@@ -1,7 +1,11 @@
 use std::ffi::c_void;
 use std::mem::size_of;
+use std::ptr::NonNull;
 
-use metal::*;
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2_foundation::NSString;
+use objc2_metal::*;
 
 use tty::config;
 use tty::terminal::cell::{Cell, CellFlags};
@@ -23,30 +27,71 @@ struct ShaderUniforms {
 }
 
 struct Ctx {
-    device: Device,
-    queue: CommandQueue,
-    pipeline: ComputePipelineState,
+    device: Retained<ProtocolObject<dyn MTLDevice>>,
+    queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
 fn setup() -> Ctx {
-    let device = Device::system_default().expect("no Metal device found");
-    let queue = device.new_command_queue();
+    let device = MTLCreateSystemDefaultDevice().expect("no Metal device found");
+    let queue = device
+        .newCommandQueue()
+        .expect("failed to create command queue");
     let src = include_str!("../src/renderer/shader.metal");
-    let opts = CompileOptions::new();
-    opts.set_fast_math_enabled(true);
+    let opts = MTLCompileOptions::new();
+    opts.setMathMode(MTLMathMode::Fast);
     let lib = device
-        .new_library_with_source(src, &opts)
+        .newLibraryWithSource_options_error(&NSString::from_str(src), Some(&opts))
         .expect("shader compilation failed");
     let func = lib
-        .get_function("render", None)
+        .newFunctionWithName(&NSString::from_str("render"))
         .expect("shader entry point 'render' not found");
     let pipeline = device
-        .new_compute_pipeline_state_with_function(&func)
+        .newComputePipelineStateWithFunction_error(&func)
         .expect("compute pipeline creation failed");
     Ctx {
         device,
         queue,
         pipeline,
+    }
+}
+
+fn region(x: u32, y: u32, width: u32, height: u32) -> MTLRegion {
+    MTLRegion {
+        origin: MTLOrigin {
+            x: x as usize,
+            y: y as usize,
+            z: 0,
+        },
+        size: MTLSize {
+            width: width as usize,
+            height: height as usize,
+            depth: 1,
+        },
+    }
+}
+
+fn size(width: u32, height: u32) -> MTLSize {
+    MTLSize {
+        width: width as usize,
+        height: height as usize,
+        depth: 1,
+    }
+}
+
+unsafe fn buffer_with_data(
+    device: &ProtocolObject<dyn MTLDevice>,
+    data: *const c_void,
+    length: usize,
+) -> Retained<ProtocolObject<dyn MTLBuffer>> {
+    unsafe {
+        device
+            .newBufferWithBytes_length_options(
+                NonNull::new(data as *mut c_void).expect("buffer data must not be null"),
+                length,
+                MTLResourceOptions::StorageModeShared,
+            )
+            .expect("failed to create buffer")
     }
 }
 
@@ -95,88 +140,113 @@ fn render_pixels_with_atlas(
     atlas_fill: Option<(u32, u32, u32, u32, u8)>,
 ) -> Vec<u8> {
     // Output texture
-    let out_desc = TextureDescriptor::new();
-    out_desc.set_texture_type(MTLTextureType::D2);
-    out_desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-    out_desc.set_width(out_w as u64);
-    out_desc.set_height(out_h as u64);
-    out_desc.set_usage(MTLTextureUsage::ShaderWrite);
-    out_desc.set_storage_mode(MTLStorageMode::Shared);
-    let output = ctx.device.new_texture(&out_desc);
+    let out_desc = unsafe {
+        MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+            MTLPixelFormat::BGRA8Unorm,
+            out_w as usize,
+            out_h as usize,
+            false,
+        )
+    };
+    out_desc.setUsage(MTLTextureUsage::ShaderWrite);
+    out_desc.setStorageMode(MTLStorageMode::Shared);
+    let output = ctx
+        .device
+        .newTextureWithDescriptor(&out_desc)
+        .expect("failed to create output texture");
 
     // Atlas texture (blank — all zeros means "no glyph contribution")
-    let atlas_desc = TextureDescriptor::new();
-    atlas_desc.set_texture_type(MTLTextureType::D2);
-    atlas_desc.set_pixel_format(MTLPixelFormat::R8Unorm);
-    atlas_desc.set_width(256);
-    atlas_desc.set_height(256);
-    atlas_desc.set_usage(MTLTextureUsage::ShaderRead);
-    atlas_desc.set_storage_mode(MTLStorageMode::Shared);
-    let atlas = ctx.device.new_texture(&atlas_desc);
+    let atlas_desc = unsafe {
+        MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+            MTLPixelFormat::R8Unorm,
+            256,
+            256,
+            false,
+        )
+    };
+    atlas_desc.setUsage(MTLTextureUsage::ShaderRead);
+    atlas_desc.setStorageMode(MTLStorageMode::Shared);
+    let atlas = ctx
+        .device
+        .newTextureWithDescriptor(&atlas_desc)
+        .expect("failed to create atlas texture");
     let zero = vec![0u8; 256 * 256];
-    atlas.replace_region(
-        MTLRegion::new_2d(0, 0, 256, 256),
-        0,
-        zero.as_ptr() as *const c_void,
-        256,
-    );
+    unsafe {
+        atlas.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+            region(0, 0, 256, 256),
+            0,
+            NonNull::new(zero.as_ptr() as *mut c_void).unwrap(),
+            256,
+        );
+    }
     if let Some((x, y, width, height, value)) = atlas_fill {
         let data = vec![value; (width * height) as usize];
-        atlas.replace_region(
-            MTLRegion::new_2d(x as u64, y as u64, width as u64, height as u64),
-            0,
-            data.as_ptr() as *const c_void,
-            width as u64,
-        );
+        unsafe {
+            atlas.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                region(x, y, width, height),
+                0,
+                NonNull::new(data.as_ptr() as *mut c_void).unwrap(),
+                width as usize,
+            );
+        }
     }
 
     // Cell data buffer (Cell IS the GPU format)
-    let cell_buf = ctx.device.new_buffer_with_data(
-        cells.as_ptr() as *const c_void,
-        std::mem::size_of_val(cells) as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
+    let cell_buf = unsafe {
+        buffer_with_data(
+            &ctx.device,
+            cells.as_ptr() as *const c_void,
+            std::mem::size_of_val(cells),
+        )
+    };
 
     // Palette buffer (256 × half4)
     let pal_data = build_palette_data();
-    let pal_buf = ctx.device.new_buffer_with_data(
-        pal_data.as_ptr() as *const c_void,
-        (pal_data.len() * 2) as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
+    let pal_buf = unsafe {
+        buffer_with_data(
+            &ctx.device,
+            pal_data.as_ptr() as *const c_void,
+            pal_data.len() * 2,
+        )
+    };
 
     // Uniform buffer
-    let uni_buf = ctx.device.new_buffer_with_data(
-        uniforms as *const _ as *const c_void,
-        size_of::<ShaderUniforms>() as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
+    let uni_buf = unsafe {
+        buffer_with_data(
+            &ctx.device,
+            uniforms as *const _ as *const c_void,
+            size_of::<ShaderUniforms>(),
+        )
+    };
 
-    let cmd_buf = ctx.queue.new_command_buffer();
-    let enc = cmd_buf.new_compute_command_encoder();
-    enc.set_compute_pipeline_state(&ctx.pipeline);
-    enc.set_texture(0, Some(&output));
-    enc.set_texture(1, Some(&atlas));
-    enc.set_buffer(0, Some(&cell_buf), 0);
-    enc.set_buffer(1, Some(&pal_buf), 0);
-    enc.set_buffer(2, Some(&uni_buf), 0);
-    enc.dispatch_threads(
-        MTLSize::new(out_w as u64, out_h as u64, 1),
-        MTLSize::new(16, 16, 1),
-    );
-    enc.end_encoding();
+    let cmd_buf = ctx.queue.commandBuffer().expect("command buffer");
+    let enc = cmd_buf
+        .computeCommandEncoder()
+        .expect("compute command encoder");
+    enc.setComputePipelineState(&ctx.pipeline);
+    unsafe {
+        enc.setTexture_atIndex(Some(&output), 0);
+        enc.setTexture_atIndex(Some(&atlas), 1);
+        enc.setBuffer_offset_atIndex(Some(&cell_buf), 0, 0);
+        enc.setBuffer_offset_atIndex(Some(&pal_buf), 0, 1);
+        enc.setBuffer_offset_atIndex(Some(&uni_buf), 0, 2);
+    }
+    enc.dispatchThreads_threadsPerThreadgroup(size(out_w, out_h), size(16, 16));
+    enc.endEncoding();
     cmd_buf.commit();
-    cmd_buf.wait_until_completed();
+    cmd_buf.waitUntilCompleted();
 
     // Read back pixels
     let bpr = out_w as u64 * 4;
     let mut pixels = vec![0u8; (out_h as usize) * (bpr as usize)];
-    output.get_bytes(
-        pixels.as_mut_ptr() as *mut c_void,
-        bpr,
-        MTLRegion::new_2d(0, 0, out_w as u64, out_h as u64),
-        0,
-    );
+    unsafe {
+        output.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+            NonNull::new(pixels.as_mut_ptr() as *mut c_void).unwrap(),
+            bpr as usize,
+            region(0, 0, out_w, out_h),
+            0,
+        );
+    }
     pixels
 }
 

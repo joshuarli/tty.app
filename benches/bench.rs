@@ -87,6 +87,32 @@ fn peak_bytes() -> usize {
     PEAK_BYTES.load(Relaxed)
 }
 
+fn process_max_rss_bytes() -> usize {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if result != 0 {
+        return 0;
+    }
+
+    let rss = unsafe { usage.assume_init().ru_maxrss as usize };
+    #[cfg(target_os = "macos")]
+    return rss;
+    #[cfg(not(target_os = "macos"))]
+    rss.saturating_mul(1024)
+}
+
+fn human_bytes(n: usize) -> String {
+    if n >= 1_073_741_824 {
+        format!("{:.1} GiB", n as f64 / 1_073_741_824.0)
+    } else if n >= 1_048_576 {
+        format!("{:.1} MiB", n as f64 / 1_048_576.0)
+    } else if n >= 1024 {
+        format!("{:.1} KiB", n as f64 / 1024.0)
+    } else {
+        format!("{n} B")
+    }
+}
+
 #[derive(Clone, Copy)]
 struct AllocStats {
     count: usize,
@@ -96,21 +122,12 @@ struct AllocStats {
 
 impl std::fmt::Display for AllocStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fn human(n: usize) -> String {
-            if n >= 1_048_576 {
-                format!("{:.1} MiB", n as f64 / 1_048_576.0)
-            } else if n >= 1024 {
-                format!("{:.1} KiB", n as f64 / 1024.0)
-            } else {
-                format!("{n} B")
-            }
-        }
         write!(
             f,
             "{} allocs, {} total, {} peak",
             self.count,
-            human(self.bytes),
-            human(self.peak_delta)
+            human_bytes(self.bytes),
+            human_bytes(self.peak_delta)
         )
     }
 }
@@ -2557,7 +2574,10 @@ fn bench_atlas_hash(c: &mut Criterion) {
     }
 }
 
-// ---------------------------------------------------------------------------
+fn bench_process_rss(_c: &mut Criterion) {
+    let rss = process_max_rss_bytes();
+    eprintln!("  [rss] process_max_rss: {}", human_bytes(rss));
+}
 
 criterion_group! {
     name = benches;
@@ -2576,5 +2596,6 @@ criterion_group! {
         bench_tui_redraw,
         bench_slow_paths,
         bench_atlas_hash,
+        bench_process_rss,
 }
 criterion_main!(benches);

@@ -1,4 +1,6 @@
-use metal::*;
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice, MTLTexture};
 
 use tty::renderer::Rasterize;
 use tty::renderer::atlas::Atlas;
@@ -32,8 +34,8 @@ impl Rasterize for MockRasterizer {
     }
 }
 
-fn device() -> Device {
-    Device::system_default().expect("Metal device required")
+fn device() -> Retained<ProtocolObject<dyn MTLDevice>> {
+    MTLCreateSystemDefaultDevice().expect("Metal device required")
 }
 
 #[test]
