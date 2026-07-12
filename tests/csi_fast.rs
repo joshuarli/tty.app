@@ -33,7 +33,6 @@ struct Recorder {
     reset_mode_private: Vec<bool>,
     scroll_region: Vec<(u16, u16)>,
     tab_clear: Vec<u16>,
-    set_tab_stop_count: usize,
     device_status: Vec<u16>,
     save_cursor_count: usize,
     restore_cursor_count: usize,
@@ -147,9 +146,6 @@ impl Perform for Recorder {
 
     fn tab_clear(&mut self, mode: u16) {
         self.tab_clear.push(mode);
-    }
-    fn set_tab_stop(&mut self) {
-        self.set_tab_stop_count += 1;
     }
     fn osc_dispatch(&mut self, params: &[&[u8]]) {
         self.osc_pararms

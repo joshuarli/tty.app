@@ -11,6 +11,7 @@ use metal::*;
 use objc2_app_kit::NSView;
 
 use crate::config;
+use crate::renderer_trait::Renderer;
 use crate::terminal::cell::Cell;
 use crate::terminal::grid::Grid;
 use crate::terminal::scrollback::Scrollback;
@@ -423,5 +424,49 @@ impl MetalRenderer {
 
     pub fn device(&self) -> &Device {
         &self.device
+    }
+}
+
+impl Renderer for MetalRenderer {
+    fn render_frame(
+        &mut self,
+        grid: &mut Grid,
+        scrollback: &Scrollback,
+        viewport_offset: usize,
+        cursor_visible: bool,
+    ) -> bool {
+        self.render_frame(grid, scrollback, viewport_offset, cursor_visible)
+    }
+
+    fn resize(&mut self, width: u32, height: u32, scale: f64) {
+        self.resize(width, height, scale);
+    }
+
+    fn cols(&self) -> u32 {
+        self.cols
+    }
+
+    fn rows(&self) -> u32 {
+        self.rows
+    }
+
+    fn cell_width(&self) -> u32 {
+        self.cell_width
+    }
+
+    fn cell_height(&self) -> u32 {
+        self.cell_height
+    }
+
+    fn scale_factor(&self) -> f64 {
+        self.scale_factor
+    }
+
+    fn notch_px(&self) -> u32 {
+        self.notch_px
+    }
+
+    fn needs_render(&self) -> bool {
+        self.needs_render
     }
 }

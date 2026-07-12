@@ -1,10 +1,13 @@
+mod app_render;
 mod clipboard;
 mod config;
 mod input;
 mod parser;
+mod perform_shared;
 mod performer;
 mod pty;
 mod renderer;
+mod renderer_trait;
 mod terminal;
 mod unicode;
 mod window;
@@ -24,6 +27,7 @@ use crate::pty::Pty;
 use crate::renderer::atlas::Atlas;
 use crate::renderer::font::FontRasterizer;
 use crate::renderer::metal::MetalRenderer;
+use crate::renderer_trait::Renderer;
 use crate::terminal::cell::CellFlags;
 use crate::terminal::grid::{Grid, TermMode};
 use crate::terminal::scrollback::Scrollback;
@@ -42,7 +46,7 @@ struct SharedState {
 }
 
 struct App {
-    renderer: MetalRenderer,
+    renderer: Box<dyn Renderer>,
     rasterizer: FontRasterizer,
     atlas: Atlas,
     shared: SharedState,
@@ -108,6 +112,7 @@ impl App {
         let mut atlas = Atlas::new(renderer.device(), cell_width, cell_height);
         atlas.preload_ascii(&rasterizer);
         renderer.atlas_texture = atlas.texture.clone();
+        let renderer: Box<dyn Renderer> = Box::new(renderer);
 
         let mut grid = Grid::new(cols as u16, rows as u16);
         grid.set_ascii_atlas(&atlas.ascii_table_raw());
@@ -263,32 +268,13 @@ impl App {
 
     /// Returns true if the frame was idle (no GPU work dispatched).
     fn render(&mut self) -> bool {
-        // Synchronized output (Mode 2026): defer rendering while the application
-        // is mid-update. sync_start is set by the parser when mode 2026 is enabled
-        // and cleared when disabled, so it precisely tracks each sync block.
-        // Timeout after 100ms to prevent a stuck application from freezing the display.
-        if let Some(start) = self.shared.grid.sync_start {
-            if start.elapsed().as_millis() < 100 {
-                return true; // deferred — idle for now
-            }
-            // Timeout — render anyway and clear the flag
-            self.shared.grid.mode.remove(TermMode::SYNC_OUTPUT);
-            self.shared.grid.sync_start = None;
-        }
-
-        // Cursor visible when DECTCEM is set and viewing live (not scrollback)
-        self.cursor_visible =
-            self.shared.grid.mode.contains(TermMode::CURSOR_VISIBLE) && self.viewport_offset == 0;
-
-        // render_frame returns true when GPU work was dispatched, false when idle.
-        // A deferred render (GPU buffer busy) is not idle — we want to retry promptly.
-        let dispatched = self.renderer.render_frame(
+        app_render::render_frame(
+            &mut *self.renderer,
             &mut self.shared.grid,
             &self.shared.scrollback,
             self.viewport_offset,
-            self.cursor_visible,
-        );
-        !dispatched && !self.renderer.needs_render
+            &mut self.cursor_visible,
+        )
     }
 
     fn copy_selection(&self) {
@@ -370,16 +356,16 @@ impl App {
     /// Convert pixel position to (col, row) cell coordinates.
     /// Coordinates are in physical pixels.
     fn pixel_to_cell(&self, x: f64, y: f64) -> (u16, u16) {
-        let scale = self.renderer.scale_factor;
+        let scale = self.renderer.scale_factor();
         let padding = config::PADDING as f64 * scale;
-        let padding_top = (self.renderer.notch_px as f64).max(padding);
+        let padding_top = (self.renderer.notch_px() as f64).max(padding);
         let px = x - padding;
         let py = y - padding_top;
         if px < 0.0 || py < 0.0 {
             return (0, 0);
         }
-        let col = (px / self.renderer.cell_width as f64) as u16;
-        let row = (py / self.renderer.cell_height as f64) as u16;
+        let col = (px / self.renderer.cell_width() as f64) as u16;
+        let row = (py / self.renderer.cell_height() as f64) as u16;
         let col = col.min(self.shared.grid.cols.saturating_sub(1));
         let row = row.min(self.shared.grid.rows.saturating_sub(1));
         (col, row)
@@ -451,14 +437,14 @@ impl App {
                     return;
                 }
                 self.renderer.resize(*w, *h, *scale);
-                let cols = self.renderer.cols as u16;
-                let rows = self.renderer.rows as u16;
+                let cols = self.renderer.cols() as u16;
+                let rows = self.renderer.rows() as u16;
                 self.shared.grid.resize(cols, rows);
                 self.pty.resize(
                     cols,
                     rows,
-                    self.renderer.cell_width as u16,
-                    self.renderer.cell_height as u16,
+                    self.renderer.cell_width() as u16,
+                    self.renderer.cell_height() as u16,
                 );
             }
 
@@ -643,7 +629,8 @@ impl App {
                 // Accumulate scroll delta — actual PTY events are flushed once
                 // per frame (in flush_scroll) so that rapid trackpad events are
                 // coalesced into a single batched write.
-                let cell_height_pts = self.renderer.cell_height as f64 / self.renderer.scale_factor;
+                let cell_height_pts =
+                    self.renderer.cell_height() as f64 / self.renderer.scale_factor();
                 if *precise {
                     self.scroll_accumulator += *delta_y;
                 } else {
@@ -657,7 +644,7 @@ impl App {
     /// Called once per frame after all events are processed, so that rapid
     /// trackpad events are coalesced into a single PTY write.
     fn flush_scroll(&mut self) {
-        let cell_height_pts = self.renderer.cell_height as f64 / self.renderer.scale_factor;
+        let cell_height_pts = self.renderer.cell_height() as f64 / self.renderer.scale_factor();
         let lines = (self.scroll_accumulator / cell_height_pts) as i32;
         if lines == 0 {
             return;

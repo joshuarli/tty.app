@@ -4,7 +4,8 @@ use std::collections::BinaryHeap;
 use metal::*;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
-use crate::renderer::font::{FontRasterizer, RasterizedGlyph};
+use crate::renderer::Rasterize;
+use crate::renderer::font::RasterizedGlyph;
 
 const ATLAS_SIZE: u32 = 2048;
 
@@ -74,7 +75,7 @@ impl Atlas {
     }
 
     /// Pre-rasterize ASCII range and pin those slots.
-    pub fn preload_ascii(&mut self, rasterizer: &FontRasterizer) {
+    pub fn preload_ascii<R: Rasterize>(&mut self, rasterizer: &R) {
         for cp in 0x20u32..=0x7E {
             let key = GlyphKey {
                 codepoint: cp,
@@ -104,11 +105,11 @@ impl Atlas {
     }
 
     /// Look up or rasterize a glyph, returning its atlas position.
-    pub fn get_or_insert(
+    pub fn get_or_insert<R: Rasterize>(
         &mut self,
         codepoint: u32,
         wide: bool,
-        rasterizer: &FontRasterizer,
+        rasterizer: &R,
     ) -> AtlasPos {
         let key = GlyphKey { codepoint, wide };
 

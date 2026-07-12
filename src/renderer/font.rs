@@ -1,4 +1,5 @@
 use crate::config;
+use crate::renderer::Rasterize;
 use core_graphics::base::kCGImageAlphaNoneSkipLast;
 use core_graphics::color_space::CGColorSpace;
 use core_graphics::context::CGContext;
@@ -261,5 +262,15 @@ impl FontRasterizer {
             width: render_width,
             height: m.cell_height,
         })
+    }
+}
+
+impl Rasterize for FontRasterizer {
+    fn rasterize(&self, codepoint: u32) -> Option<RasterizedGlyph> {
+        self.rasterize(codepoint)
+    }
+
+    fn rasterize_wide(&self, codepoint: u32) -> Option<RasterizedGlyph> {
+        self.rasterize_wide(codepoint)
     }
 }

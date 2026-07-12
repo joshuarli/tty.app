@@ -78,9 +78,14 @@ pub trait Perform {
     /// Set scroll region
     fn set_scroll_region(&mut self, top: u16, bottom: u16);
 
-    /// Tab clear / set
+    /// Set a tab stop at the current cursor column.
+    ///
+    /// Retained as a default method for compatibility with existing Perform
+    /// implementations. The built-in performer handles HTS through esc_dispatch.
+    fn set_tab_stop(&mut self) {}
+
+    /// Tab clear
     fn tab_clear(&mut self, mode: u16);
-    fn set_tab_stop(&mut self);
 
     /// OSC (Operating System Command)
     fn osc_dispatch(&mut self, params: &[&[u8]]);

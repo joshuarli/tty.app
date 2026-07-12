@@ -407,13 +407,6 @@ impl<'a> Perform for TestPerformer<'a> {
         }
     }
 
-    fn set_tab_stop(&mut self) {
-        let col = self.grid.cursor_col as usize;
-        if col < self.grid.tab_stops.len() {
-            self.grid.tab_stops.set(col, true);
-        }
-    }
-
     fn osc_dispatch(&mut self, params: &[&[u8]]) {
         if params.is_empty() {
             return;
@@ -463,7 +456,12 @@ impl<'a> Perform for TestPerformer<'a> {
                     self.grid.cursor_row += 1;
                 }
             }
-            ([], b'H') => self.set_tab_stop(),
+            ([], b'H') => {
+                let col = self.grid.cursor_col as usize;
+                if col < self.grid.tab_stops.len() {
+                    self.grid.tab_stops.set(col, true);
+                }
+            }
             ([], b'M') => {
                 if self.grid.cursor_row == self.grid.scroll_top {
                     self.grid.scroll_down(1);

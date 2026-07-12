@@ -247,7 +247,6 @@ impl<'a> Perform for TestPerformer<'a> {
     }
 
     fn tab_clear(&mut self, _mode: u16) {}
-    fn set_tab_stop(&mut self) {}
     fn osc_dispatch(&mut self, _params: &[&[u8]]) {}
     fn esc_dispatch(&mut self, _intermediates: &[u8], _byte: u8) {}
     fn csi_dispatch(&mut self, _params: &[u16], _intermediates: &[u8], _ignore: bool, _byte: u8) {}
