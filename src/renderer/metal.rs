@@ -14,7 +14,7 @@ use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use crate::config;
 use crate::renderer::core::MetalCore;
 use crate::renderer_trait::Renderer;
-use crate::terminal::cell::{Cell, CellFlags};
+use crate::terminal::cell::Cell;
 use crate::terminal::grid::Grid;
 use crate::terminal::scrollback::Scrollback;
 
@@ -38,18 +38,8 @@ pub struct Uniforms {
     pub damage_origin_y: u32,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct ScrollCopyUniforms {
-    source_y: u32,
-    destination_y: u32,
-    width: u32,
-    height: u32,
-}
-
 const CELL_SIZE: usize = mem::size_of::<Cell>();
 const _: () = assert!(CELL_SIZE == 8, "Cell must be 8 bytes for GPU layout");
-const TILED_SKIP_FLAG: u16 = 0x8000;
 
 /// Number of cell buffers for pipelining (CPU uploads to one while GPU reads the other).
 const NUM_BUFFERS: usize = 2;
@@ -65,14 +55,8 @@ pub struct MetalRenderer {
     // Per-buffer dirty row tracking: each dirty row must be copied to BOTH buffers
     pending: [BitVec; NUM_BUFFERS],
 
-    // Retained active-cell resources. Each slot is paired with a cell
-    // buffer so the CPU can prepare the next frame while the GPU reads the
-    // previous slot.
-    retained_surface: Retained<ProtocolObject<dyn MTLTexture>>,
-    active_cell_buffers: [Retained<ProtocolObject<dyn MTLBuffer>>; NUM_BUFFERS],
-    retained_uniform_buffers: [Retained<ProtocolObject<dyn MTLBuffer>>; NUM_BUFFERS],
-    copy_uniform_buffers: [Retained<ProtocolObject<dyn MTLBuffer>>; NUM_BUFFERS],
-    retained_surface_initialized: bool,
+    // Uniform buffer
+    uniform_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
 
     // Atlas texture
     pub atlas_texture: Retained<ProtocolObject<dyn MTLTexture>>,
@@ -154,49 +138,13 @@ impl MetalRenderer {
             Arc::new(AtomicBool::new(true)),
         ];
 
-        let active_buffer_size = cols as usize * rows as usize * mem::size_of::<u32>();
-        let active_cell_buffers = [
-            device
-                .newBufferWithLength_options(
-                    active_buffer_size,
-                    MTLResourceOptions::StorageModeShared,
-                )
-                .expect("failed to create active cell buffer"),
-            device
-                .newBufferWithLength_options(
-                    active_buffer_size,
-                    MTLResourceOptions::StorageModeShared,
-                )
-                .expect("failed to create active cell buffer"),
-        ];
-        let retained_uniform_buffers = [
-            device
-                .newBufferWithLength_options(
-                    mem::size_of::<Uniforms>(),
-                    MTLResourceOptions::StorageModeShared,
-                )
-                .expect("failed to create retained uniform buffer"),
-            device
-                .newBufferWithLength_options(
-                    mem::size_of::<Uniforms>(),
-                    MTLResourceOptions::StorageModeShared,
-                )
-                .expect("failed to create retained uniform buffer"),
-        ];
-        let copy_uniform_buffers = [
-            device
-                .newBufferWithLength_options(
-                    mem::size_of::<ScrollCopyUniforms>(),
-                    MTLResourceOptions::StorageModeShared,
-                )
-                .expect("failed to create copy uniform buffer"),
-            device
-                .newBufferWithLength_options(
-                    mem::size_of::<ScrollCopyUniforms>(),
-                    MTLResourceOptions::StorageModeShared,
-                )
-                .expect("failed to create copy uniform buffer"),
-        ];
+        // Uniform buffer
+        let uniform_buffer = device
+            .newBufferWithLength_options(
+                mem::size_of::<Uniforms>(),
+                MTLResourceOptions::StorageModeShared,
+            )
+            .expect("failed to create uniform buffer");
 
         // Atlas texture (2048x2048 R8Unorm)
         let atlas_desc = unsafe {
@@ -213,20 +161,6 @@ impl MetalRenderer {
             .newTextureWithDescriptor(&atlas_desc)
             .expect("failed to create atlas texture");
 
-        let surface_desc = unsafe {
-            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
-                MTLPixelFormat::BGRA8Unorm,
-                width as usize,
-                height as usize,
-                false,
-            )
-        };
-        surface_desc.setStorageMode(MTLStorageMode::Private);
-        surface_desc.setUsage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
-        let retained_surface = device
-            .newTextureWithDescriptor(&surface_desc)
-            .expect("failed to create retained surface texture");
-
         MetalRenderer {
             core,
             layer,
@@ -234,11 +168,7 @@ impl MetalRenderer {
             current_buffer: 0,
             buffer_ready,
             pending: [bitvec![1; rows as usize], bitvec![1; rows as usize]],
-            retained_surface,
-            active_cell_buffers,
-            retained_uniform_buffers,
-            copy_uniform_buffers,
-            retained_surface_initialized: false,
+            uniform_buffer,
             atlas_texture,
             cols,
             rows,
@@ -263,11 +193,12 @@ impl MetalRenderer {
         viewport_offset: usize,
         cursor_visible: bool,
     ) -> bool {
-        // Semantic scroll retention is not enabled yet; consume hints rather than
-        // letting them survive into a later frame with no matching surface update.
+        // The current production path does not retain a framebuffer, so consume
+        // semantic scroll hints rather than letting them survive into a later frame.
         let _ = grid.take_scroll_hint();
 
         // Merge grid dirty rows into both per-buffer pending bitsets
+        let cur = self.current_buffer;
         let mut had_new_dirty = false;
         for (i, bit) in grid.dirty.iter().enumerate() {
             if *bit {
@@ -281,11 +212,6 @@ impl MetalRenderer {
         // Cursor is a uniform overlay — detect position/visibility changes
         let cursor_row = grid.cursor_row as u32;
         let cursor_col = grid.cursor_col as u32;
-        let previous_cursor = (
-            self.prev_cursor_row,
-            self.prev_cursor_col,
-            self.prev_cursor_visible,
-        );
         let cursor_changed = cursor_row != self.prev_cursor_row
             || cursor_col != self.prev_cursor_col
             || cursor_visible != self.prev_cursor_visible;
@@ -301,142 +227,64 @@ impl MetalRenderer {
             return false;
         }
 
-        self.render_retained_frame(
-            grid,
-            scrollback,
-            viewport_offset,
-            cursor_visible,
-            previous_cursor,
-        )
-    }
-
-    fn render_retained_frame(
-        &mut self,
-        grid: &Grid,
-        scrollback: &Scrollback,
-        viewport_offset: usize,
-        cursor_visible: bool,
-        previous_cursor: (u32, u32, bool),
-    ) -> bool {
-        let cur = self.current_buffer;
+        // If the GPU is still reading this buffer, skip the frame and retry next
+        // iteration. This keeps the event loop non-blocking so PTY data continues
+        // to be drained while the GPU catches up.
         if !self.buffer_ready[cur].load(Ordering::Acquire) {
             self.needs_render = true;
             return false;
         }
 
+        // Upload dirty rows — Cell IS the GPU format, so this is a raw memcpy per row.
+        let cols = self.cols.min(grid.cols as u32) as usize;
+        let row_bytes = cols * CELL_SIZE;
+        let dst_stride = self.cols as usize * CELL_SIZE;
+        let dst_base = self.cell_buffers[cur].contents().as_ptr() as *mut u8;
+        for (row, pending) in self.pending[cur].iter().enumerate() {
+            if *pending {
+                // Source row from scrollback or grid based on viewport offset
+                let src: &[Cell] = if viewport_offset > 0 && row < viewport_offset {
+                    // This visible row comes from scrollback history
+                    let sb_idx = viewport_offset - 1 - row;
+                    match scrollback.row(sb_idx) {
+                        Some(r) => r,
+                        None => continue,
+                    }
+                } else {
+                    grid.row_slice((row - viewport_offset) as u16)
+                };
+                let copy_bytes = (src.len().min(cols)) * CELL_SIZE;
+                // SAFETY: dst_base points to a Metal shared buffer sized for
+                // self.cols * self.rows * CELL_SIZE bytes. row < self.rows and
+                // cols <= self.cols, so the offset is in bounds.
+                // src points to a contiguous slice of Cell values.
+                unsafe {
+                    let dst = dst_base.add(row * dst_stride);
+                    std::ptr::copy_nonoverlapping(src.as_ptr() as *const u8, dst, copy_bytes);
+                    // Clear remainder if scrollback row is shorter than current cols
+                    if copy_bytes < row_bytes {
+                        std::ptr::write_bytes(dst.add(copy_bytes), 0, row_bytes - copy_bytes);
+                    }
+                }
+            }
+        }
+        self.pending[cur].fill(false);
+
         autoreleasepool(|_| {
             let drawable = match self.layer.nextDrawable() {
                 Some(d) => d,
                 None => {
+                    // No drawable available — retry next frame
                     self.needs_render = true;
                     return false;
                 }
             };
 
-            let cols = self.cols as usize;
-            let rows = self.rows as usize;
             let texture = drawable.texture();
-            let retained_surface = &self.retained_surface;
-            let active_cell_buffers = &self.active_cell_buffers;
-            let retained_uniform_buffers = &self.retained_uniform_buffers;
-            let copy_uniform_buffers = &self.copy_uniform_buffers;
-            let dst_base = self.cell_buffers[cur].contents().as_ptr() as *mut Cell;
-            let resident = unsafe { std::slice::from_raw_parts_mut(dst_base, rows * cols) };
-            for cell in resident.iter_mut() {
-                cell.flags = CellFlags::from_bits_retain(cell.flags.bits() | TILED_SKIP_FLAG);
-            }
 
-            for (row, pending) in self.pending[cur].iter().enumerate() {
-                if !*pending {
-                    continue;
-                }
-
-                let source: Option<&[Cell]> = if viewport_offset > 0 && row < viewport_offset {
-                    let sb_idx = viewport_offset - 1 - row;
-                    scrollback.row(sb_idx)
-                } else if row >= viewport_offset {
-                    Some(grid.row_slice((row - viewport_offset) as u16))
-                } else {
-                    None
-                };
-                let Some(source) = source else {
-                    continue;
-                };
-
-                let source_len = source.len().min(cols);
-                let destination = &mut resident[row * cols..(row + 1) * cols];
-                let mut left = source_len;
-                let mut right = 0usize;
-                for col in 0..source_len {
-                    let old = &destination[col];
-                    let flags = old.flags.bits() & !TILED_SKIP_FLAG;
-                    let changed = source[col].codepoint != old.codepoint
-                        || source[col].flags.bits() != flags
-                        || source[col].fg_index != old.fg_index
-                        || source[col].bg_index != old.bg_index
-                        || source[col].atlas_x != old.atlas_x
-                        || source[col].atlas_y != old.atlas_y;
-                    if changed {
-                        left = left.min(col);
-                        right = right.max(col + 1);
-                        destination[col].flags =
-                            CellFlags::from_bits_retain(flags & !TILED_SKIP_FLAG);
-                    }
-                }
-
-                if source_len < cols {
-                    for cell in &mut destination[source_len..] {
-                        cell.flags =
-                            CellFlags::from_bits_retain(cell.flags.bits() & !TILED_SKIP_FLAG);
-                    }
-                    left = left.min(source_len);
-                    right = cols;
-                }
-
-                if left < right {
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            source[left..right].as_ptr(),
-                            destination.as_mut_ptr().add(left),
-                            right - left,
-                        );
-                    }
-                }
-            }
-
-            if !self.retained_surface_initialized {
-                for cell in resident.iter_mut() {
-                    cell.flags = CellFlags::from_bits_retain(cell.flags.bits() & !TILED_SKIP_FLAG);
-                }
-            }
-
-            for (row, col, _) in [
-                previous_cursor,
-                (
-                    grid.cursor_row as u32,
-                    grid.cursor_col as u32,
-                    cursor_visible,
-                ),
-            ] {
-                if (row as usize) < rows && (col as usize) < cols {
-                    let cell = &mut resident[row as usize * cols + col as usize];
-                    cell.flags = CellFlags::from_bits_retain(cell.flags.bits() & !TILED_SKIP_FLAG);
-                }
-            }
-
-            let active_base = active_cell_buffers[cur].contents().as_ptr() as *mut u32;
-            let mut active_count = 0usize;
-            for (index, cell) in resident.iter().enumerate() {
-                if cell.flags.bits() & TILED_SKIP_FLAG == 0 {
-                    unsafe {
-                        active_base.add(active_count).write(index as u32);
-                    }
-                    active_count += 1;
-                }
-            }
-
+            // Update uniforms
             let padding = (config::PADDING as f64 * self.scale_factor) as u32;
-            let uniform = Uniforms {
+            let uniforms = Uniforms {
                 cols: self.cols,
                 rows: self.rows,
                 cell_width: self.cell_width,
@@ -447,107 +295,60 @@ impl MetalRenderer {
                 padding_top: self.notch_px.max(padding),
                 cursor_row: grid.cursor_row as u32,
                 cursor_col: grid.cursor_col as u32,
-                cursor_visible: u32::from(cursor_visible),
+                cursor_visible: if cursor_visible { 1 } else { 0 },
                 frame_bg: config::DEFAULT_BG,
                 damage_origin_x: 0,
                 damage_origin_y: 0,
             };
+            // SAFETY: uniform_buffer was allocated with size_of::<Uniforms>() bytes
+            // of shared storage. contents() returns a valid pointer to that region.
+            // No GPU command buffer is reading this buffer yet (commit happens below).
             unsafe {
-                (retained_uniform_buffers[cur].contents().as_ptr() as *mut Uniforms).write(uniform);
-                (copy_uniform_buffers[cur].contents().as_ptr() as *mut ScrollCopyUniforms).write(
-                    ScrollCopyUniforms {
-                        source_y: 0,
-                        destination_y: 0,
-                        width: texture.width() as u32,
-                        height: texture.height() as u32,
-                    },
-                );
+                let ptr = self.uniform_buffer.contents().as_ptr() as *mut Uniforms;
+                *ptr = uniforms;
             }
 
             let command_buffer = self
                 .core
                 .command_queue()
                 .commandBuffer()
-                .expect("failed to create retained command buffer");
-
-            if !self.retained_surface_initialized {
-                let encoder = command_buffer
-                    .computeCommandEncoder()
-                    .expect("failed to create retained initialization encoder");
-                encoder.setComputePipelineState(self.core.tiled_pipeline());
-                unsafe {
-                    encoder.setTexture_atIndex(Some(retained_surface), 0);
-                    encoder.setTexture_atIndex(Some(&self.atlas_texture), 1);
-                    encoder.setBuffer_offset_atIndex(Some(&self.cell_buffers[cur]), 0, 0);
-                    encoder.setBuffer_offset_atIndex(Some(self.core.palette_buffer()), 0, 1);
-                    encoder.setBuffer_offset_atIndex(Some(&retained_uniform_buffers[cur]), 0, 2);
-                }
-                encoder.dispatchThreadgroups_threadsPerThreadgroup(
-                    MTLSize {
-                        width: self.cols as usize,
-                        height: self.rows as usize,
-                        depth: 1,
-                    },
-                    MTLSize {
-                        width: self.cell_width as usize,
-                        height: self.cell_height as usize,
-                        depth: 1,
-                    },
-                );
-                encoder.endEncoding();
-            } else if active_count > 0 {
-                let encoder = command_buffer
-                    .computeCommandEncoder()
-                    .expect("failed to create retained active-cell encoder");
-                encoder.setComputePipelineState(self.core.tiled_list_pipeline());
-                unsafe {
-                    encoder.setTexture_atIndex(Some(retained_surface), 0);
-                    encoder.setTexture_atIndex(Some(&self.atlas_texture), 1);
-                    encoder.setBuffer_offset_atIndex(Some(&self.cell_buffers[cur]), 0, 0);
-                    encoder.setBuffer_offset_atIndex(Some(self.core.palette_buffer()), 0, 1);
-                    encoder.setBuffer_offset_atIndex(Some(&retained_uniform_buffers[cur]), 0, 2);
-                    encoder.setBuffer_offset_atIndex(Some(&active_cell_buffers[cur]), 0, 3);
-                }
-                encoder.dispatchThreadgroups_threadsPerThreadgroup(
-                    MTLSize {
-                        width: active_count,
-                        height: 1,
-                        depth: 1,
-                    },
-                    MTLSize {
-                        width: self.cell_width as usize,
-                        height: self.cell_height as usize,
-                        depth: 1,
-                    },
-                );
-                encoder.endEncoding();
-            }
-
-            let copy_encoder = command_buffer
+                .expect("failed to create command buffer");
+            let encoder = command_buffer
                 .computeCommandEncoder()
-                .expect("failed to create retained surface copy encoder");
-            copy_encoder.setComputePipelineState(self.core.scroll_pipeline());
+                .expect("failed to create compute command encoder");
+
+            encoder.setComputePipelineState(self.core.tiled_pipeline());
             unsafe {
-                copy_encoder.setTexture_atIndex(Some(retained_surface), 0);
-                copy_encoder.setTexture_atIndex(Some(&texture), 1);
-                copy_encoder.setBuffer_offset_atIndex(Some(&copy_uniform_buffers[cur]), 0, 0);
+                encoder.setTexture_atIndex(Some(&texture), 0);
+                encoder.setTexture_atIndex(Some(&self.atlas_texture), 1);
+                encoder.setBuffer_offset_atIndex(
+                    Some(&self.cell_buffers[self.current_buffer]),
+                    0,
+                    0,
+                );
+                encoder.setBuffer_offset_atIndex(Some(self.core.palette_buffer()), 0, 1);
+                encoder.setBuffer_offset_atIndex(Some(&self.uniform_buffer), 0, 2);
             }
-            copy_encoder.dispatchThreads_threadsPerThreadgroup(
+
+            encoder.dispatchThreadgroups_threadsPerThreadgroup(
                 MTLSize {
-                    width: texture.width(),
-                    height: texture.height(),
+                    width: self.cols as usize,
+                    height: self.rows as usize,
                     depth: 1,
                 },
                 MTLSize {
-                    width: 16,
-                    height: 16,
+                    width: self.cell_width as usize,
+                    height: self.cell_height as usize,
                     depth: 1,
                 },
             );
-            copy_encoder.endEncoding();
+            encoder.endEncoding();
 
-            self.buffer_ready[cur].store(false, Ordering::Release);
-            let ready_flag = self.buffer_ready[cur].clone();
+            // Mark buffer as in-flight before commit
+            self.buffer_ready[self.current_buffer].store(false, Ordering::Release);
+
+            // Signal buffer availability when GPU finishes
+            let ready_flag = self.buffer_ready[self.current_buffer].clone();
             let handler = RcBlock::new(move |_cb| {
                 ready_flag.store(true, Ordering::Release);
             });
@@ -559,10 +360,14 @@ impl MetalRenderer {
             command_buffer.waitUntilScheduled();
             drawable.present();
 
-            self.pending[cur].fill(false);
-            self.retained_surface_initialized = true;
+            // Swap to the other buffer for next frame.
+            // No proactive sync render needed — the other buffer's pending rows
+            // accumulate and get uploaded the next time it's used for a real render
+            // (new dirty rows or cursor change). This lazy convergence avoids
+            // back-to-back renders that exhaust Metal's 3-drawable pool.
             self.current_buffer = (self.current_buffer + 1) % NUM_BUFFERS;
             self.needs_render = false;
+
             true
         })
     }
@@ -608,39 +413,6 @@ impl MetalRenderer {
                 )
                 .expect("failed to create cell buffer"),
         ];
-        let active_buffer_size = self.cols as usize * self.rows as usize * mem::size_of::<u32>();
-        self.active_cell_buffers = [
-            self.core
-                .device()
-                .newBufferWithLength_options(
-                    active_buffer_size,
-                    MTLResourceOptions::StorageModeShared,
-                )
-                .expect("failed to create active cell buffer"),
-            self.core
-                .device()
-                .newBufferWithLength_options(
-                    active_buffer_size,
-                    MTLResourceOptions::StorageModeShared,
-                )
-                .expect("failed to create active cell buffer"),
-        ];
-        let surface_desc = unsafe {
-            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
-                MTLPixelFormat::BGRA8Unorm,
-                width as usize,
-                height as usize,
-                false,
-            )
-        };
-        surface_desc.setStorageMode(MTLStorageMode::Private);
-        surface_desc.setUsage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
-        self.retained_surface = self
-            .core
-            .device()
-            .newTextureWithDescriptor(&surface_desc)
-            .expect("failed to create retained surface texture");
-        self.retained_surface_initialized = false;
         // Mark all rows pending in both buffers after resize
         self.pending = [
             bitvec![1; self.rows as usize],

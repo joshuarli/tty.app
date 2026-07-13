@@ -12,12 +12,13 @@ damage-proportional GPU work for sparse updates; row indirection is less
 compelling because the existing grid ring already makes a full-screen scroll
 an O(cols) operation and dirty-row upload is already cheap.
 
-### Overall retained-renderer result
+### Retained active-cell artifact result
 
-The original Phase 1 full-frame baseline and the integrated retained active-cell
-path were measured on the same Apple M1 target at 148×44 and 2880×1800. The
-cross-run comparison is directional because GPU scheduling varies, but it gives
-the overall scale of the gain:
+The retained active-cell implementation is preserved on the
+`retained-active-cell-artifact` branch for reference. The original Phase 1
+full-frame baseline and the retained path were measured on the same Apple M1
+target at 148×44 and 2880×1800. The cross-run comparison is directional because
+GPU scheduling varies, but it gives the overall scale of the gain:
 
 ```text
                          original       retained       change
@@ -35,11 +36,10 @@ the rest of the theoretical saving. In the latest same-run comparison, sparse
 wall time was about 6% slower than the full tiled reference, so the result is
 not a universal win.
 
-The cell-tiled organization is worth keeping. The retained active-cell layer is
-a qualified tradeoff: keep it while dense redraws or GPU energy are important,
-but do not add further retention machinery without longer production traces and
-energy measurements. Semantic scroll retention remains rejected after its
-measured regression.
+The cell-tiled organization is the production choice. The retained active-cell
+layer is not integrated into `master`: its GPU work reduction does not produce a
+stable end-to-end win after CPU comparison, compaction, and surface-copy costs.
+Semantic scroll retention remains rejected after its measured regression.
 
 ## Phase 0: Freeze the contract
 
@@ -499,20 +499,22 @@ retained-surface copies: 734,722,560 bytes
 Decision: abandon semantic scroll retention for now. It is roughly 60% slower
 on GPU and 125% slower wall-clock on this 2880×1800 workload. Keep the
 implementation on the experiment branch for reference, but leave the
-production direction on the simpler active-cell/tiled paths.
+production direction on the simpler full cell-tiled path.
 
-## Phase 6: Integrate retained active-cell rendering
+## Phase 6: Keep full cell-tiled rendering as production
 
 The headless full tiled-compute gate passes. The retained masked prototype does
-not yet meet the 50–70% reduction target, so generic damage and scroll-aware
-retained rendering remain benchmark infrastructure only. The retained
-active-cell path is now the production default.
+not yet meet the 50–70% reduction target, so generic damage, scroll-aware
+retention, and active-cell retention remain benchmark/artifact infrastructure
+only. `MetalRenderer` on `master` uses the full cell-tiled dispatch
+unconditionally.
 
-The retained path keeps the current double-buffering and GPU-in-flight
-behavior, handles drawable misses through the existing retry path, and copies
-its persistent surface into each drawable. It allocates the persistent surface
-unconditionally, double-buffers active lists and uniforms, reinitializes the
-surface on resize, and preserves pending rows across drawable misses.
+The production path keeps the simpler double-buffering and GPU-in-flight
+behavior: dirty rows are copied into the current shared cell buffer and one
+cell-tiled dispatch shades the complete terminal grid. The retained active-cell
+implementation is kept on the `retained-active-cell-artifact` branch for future
+reference, without making its surface, active lists, or retry lifecycle part of
+the production renderer.
 
 A same-run headless sample after integration measured the retained path against
 the full-frame baseline as follows:
@@ -524,9 +526,9 @@ tmux_less_sparse: 10.143 ms → 10.082 ms GPU, 12.317 ms → 13.085 ms wall
 
 The result remains workload-sensitive. The retained path improves the dense
 two-pane replay by about 26% GPU and 12% wall time in this sample, while sparse
-is within GPU noise and slightly slower wall-clock. It is integrated because
-the onscreen lifecycle and pixel-equivalence validation passed; longer traces
-are still needed to establish a stable benefit across workloads.
+is within GPU noise and slightly slower wall-clock. Pixel-equivalence validation
+passed, but the end-to-end result is not stable enough to justify the additional
+production complexity.
 
 Follow-up measurement:
 
@@ -542,17 +544,18 @@ headless correctness suite
 tiled-compute benchmark
 ```
 
-The headless full-frame and tiled paths remain comparison references for future
-measurements. Repeat GPU and energy measurements on longer production traces
-before extending the architecture.
+The headless full-frame and tiled paths remain comparison references, and the
+retained implementation remains available on its artifact branch. Repeat GPU
+and energy measurements on longer production traces before revisiting it.
 
 ## Phase 7: Decide whether to extend the architecture
 
 Only after the Phase 4 through Phase 6 experiments establish a real bottleneck:
 
 - If CPU upload remains significant, make scrollback GPU-resident or paged.
-- If GPU compute remains significant for sparse updates, improve retained cell
-  compaction or GPU-resident damage masks.
+- If GPU compute remains significant for sparse updates, revisit the retained
+  artifact branch or improve the full cell-tiled shader without adding a new
+  production surface lifecycle.
 - If input latency suffers under sustained PTY output, consider an SPSC parser thread.
 - If fidelity becomes the priority, add a style table so truecolor can be supported without widening `Cell`.
 
