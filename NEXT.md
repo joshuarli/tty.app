@@ -452,6 +452,40 @@ scroll-aware retained path are the next ways to test whether the larger target
 is real. If repeated measurements stay below the gate, retain the simpler
 full-frame tiled renderer.
 
+## Phase 5.6: Combine semantic scroll retention with active-cell rendering
+
+The retained active-cell replay now consumes `ScrollHint` events. For a valid
+hint it shifts the resident cell rows in lockstep with the retained GPU
+surface, copies preserved pixels with the existing `scroll_copy` kernel, and
+dispatches only exposed cells, changed cells, and cursor cells. Full-screen
+scrolls render directly into the copy destination before swapping surfaces, so
+they do not require a mirror pass; partial regions retain the synchronization
+fallback. When no hint is available, the replay uses the existing active-cell
+path unchanged.
+
+The combined path matched the full renderer's frame hashes and final pixels
+for both recorded traces and the repeated synthetic scroll replay. The
+recorded traces still produced no semantic hints, so their active-cell work
+was unchanged:
+
+```text
+tmux_less_both:   0 hints, 22,899 active cells, 16,533,078 dispatched pixels
+tmux_less_sparse: 0 hints, 16,731 active cells, 12,079,782 dispatched pixels
+```
+
+The synthetic replay was framed at one-line-sized chunks to exercise repeated
+scrolling: 82 frames, 38 hints, and 41 total scroll lines. In a same-run sample
+the active-cell baseline took 5.298 ms GPU and 35.787 ms wall; the
+scroll-retained path took 8.450 ms GPU and 80.527 ms wall, with 734,722,560
+retained-surface copy bytes. The copy traffic outweighed the saved cell
+shading, increasing GPU time by about 60% and wall time by about 125%.
+
+Decision: keep semantic scroll retention as validated benchmark
+infrastructure, but do not integrate it into the renderer. The current
+2880×1800 workload does not meet the performance gate; a future attempt needs
+cheaper surface movement or a workload where the copied region is materially
+smaller than the avoided active-cell shading.
+
 ## Phase 6: Integrate tiled compute only if the headless gates win
 
 The headless full tiled-compute gate passes. The retained masked prototype does
