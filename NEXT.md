@@ -452,6 +452,26 @@ scroll-aware retained path are the next ways to test whether the larger target
 is real. If repeated measurements stay below the gate, retain the simpler
 full-frame tiled renderer.
 
+### Semantic scroll retention result
+
+The semantic-scroll follow-up was implemented and validated on a separate
+experiment branch. It consumed `ScrollHint` events, shifted the resident cell
+rows with the retained GPU surface, and redrew only exposed, changed, and
+cursor cells. Recorded tmux/less traces produced zero hints, so they showed no
+change. A repeated synthetic scroll replay produced 38 hints over 41 lines,
+but retained-surface copy traffic outweighed the saved cell shading:
+
+```text
+active-cell baseline: 5.298 ms GPU, 35.787 ms wall
+scroll retention:     8.450 ms GPU, 80.527 ms wall
+retained-surface copies: 734,722,560 bytes
+```
+
+Decision: abandon semantic scroll retention for now. It is roughly 60% slower
+on GPU and 125% slower wall-clock on this 2880×1800 workload. Keep the
+implementation on the experiment branch for reference, but leave the
+production direction on the simpler active-cell/tiled paths.
+
 ## Phase 6: Integrate tiled compute only if the headless gates win
 
 The headless full tiled-compute gate passes. The retained masked prototype does
