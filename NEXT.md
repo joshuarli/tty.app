@@ -358,7 +358,7 @@ Gate:
   harms responsiveness, stop and retain the simpler current loop.
 
 This phase is independent of the GPU rendering experiments. It should be
-completed even if the instanced renderer does not pass its performance gate.
+completed independently of the earlier presentation-pipeline experiments.
 
 Implementation status, 2026-07-12: the fixed idle timeout has been replaced by
 Core Foundation run-loop sources for PTY readiness. AppKit and PTY activity now
@@ -368,101 +368,74 @@ grid dirty so the next focused iteration repaints the current frame. Runtime
 wakeup and energy measurements remain to be collected; no production I/O thread
 was added.
 
-## Phase 5: Prototype instanced cell rendering
+## Phase 5: Prototype cell-tiled compute rendering
 
-The next architectural experiment should attack the dominant cost directly:
-the current compute kernel launches one thread per output pixel and repeats
-cell-coordinate math, palette selection, decoration branches, and atlas lookup
-for every pixel. Damage and scroll retention do not remove enough work to
-justify their surface-copy overhead.
+Earlier retained-damage and presentation experiments did not pass their
+performance gates. This prototype keeps the compute renderer but changes its
+work organization: one Metal threadgroup owns one terminal cell, loads the 8-byte
+Cell and resolves its palette/style state once into threadgroup memory, then
+shades that cell's pixels. The existing full-frame compute kernel remains the
+reference implementation.
 
-Build a headless Metal prototype that renders the screen as instanced cell
-quads:
+The tiled kernel shades the cell interior only. The headless fixture initializes
+the static frame background once; a production integration must preserve that
+background across drawable acquisition, resize, and first-frame initialization.
+No retained framebuffer or additional per-frame allocation was introduced.
 
-- One instance per visible terminal cell.
-- Vertex data maps each instance to its cell rectangle.
-- The fragment shader samples the glyph atlas and resolves palette and cell
-  attributes.
-- Preserve procedural box drawing, arrows, decorations, cursor, wide cells,
-  inverse, hidden, and selection behavior.
-- Start with a full-frame render; do not add retained-surface damage as part of
-  this experiment.
-- Reuse the existing `Cell` ABI and atlas wherever possible.
+The canonical replay validation matched the reference pixel-for-pixel after
+every frame. The focused headless visual test also covers the tiled path for
+padding, box drawing, arrows, bold, inverse, hidden, selection, decorations,
+wide cells, and cursor inversion; recorded replays cover atlas glyph sampling.
 
-Measure on the canonical 148×44, 2880×1800 geometry using the tmux/less
-two-pane and sparse traces, plus deterministic one-cell, one-row, full-redraw,
-cursor, and scroll workloads. Record GPU time, wall time, command encoding,
-CPU upload, allocations, GPU memory, and energy when a stable Metal counter is
-available.
-
-Gate:
-
-- Exact pixel equivalence against the current compute renderer for every
-  workload and supported visual feature.
-- At least a 2× GPU-time reduction on a representative workload, or an equally
-  clear energy reduction.
-- Full redraw wall time does not regress by more than 10%.
-- No additional full-size framebuffer or steady-state per-frame allocations.
-- Headless and production Metal pipeline creation remain deterministic.
-
-If this gate fails, keep the current compute renderer and stop pursuing GPU
-damage architecture for this workload. If it passes, validate the instanced
-pipeline onscreen before considering any retained-surface optimization.
-
-Phase 5 headless prototype result, recorded on 2026-07-12 with the same Apple
-M1, 148×44 logical geometry, and 2880×1800 physical drawable as the earlier
-baselines:
+Representative warm headless measurements on the Apple M1 at 148×44 and
+2880×1800 were:
 
 ```text
-metal_instanced tmux_less_both:
-  13 frames, 84,656 cell instances, 663,040 uploaded bytes
-  encode: 0.140 ms, GPU: 15.688 ms, wall: 19.665 ms
-  steady-state Rust allocations: 0
+metal_tiled tmux_less_both:
+  13 frames, 61,121,632 tiled pixels
+  GPU: 11.786 ms, wall: 14.861 ms
 
-metal_instanced tmux_less_sparse:
-  8 frames, 52,096 cell instances, 408,480 uploaded bytes
-  encode: 0.086 ms, GPU: 9.848 ms, wall: 12.198 ms
-  steady-state Rust allocations: 0
+metal_tiled tmux_less_sparse:
+  8 frames, 37,613,312 tiled pixels
+  GPU: 9.154 ms, wall: 11.067 ms
 ```
 
-The instanced path uses one four-vertex triangle strip per cell, the existing
-8-byte Cell ABI, the existing atlas, and one render pass into the same-size
-BGRA8 output texture. It adds no framebuffer and no per-frame allocation. The
-recorded replays matched the compute renderer pixel-for-pixel after every
-frame. A dedicated headless feature test also covers padding, atlas glyphs,
-wide cells, box drawing, arrows, bold, inverse, hidden, selection,
-underline, strikethrough, and cursor inversion.
+The corresponding same-run full-frame compute sample was 17.430 ms GPU and
+22.055 ms wall for the two-pane replay, and 11.101 ms GPU and 13.275 ms wall
+for the sparse replay. Repeated GPU timings vary with the device scheduler,
+but the result is materially better than the earlier GPU experiments: roughly
+30% GPU reduction for the two-pane replay and 15–20% for the sparse replay, with zero
+steady-state Rust allocations. The tiled dispatch covers about 9% fewer pixels
+because it omits static padding; the larger gain comes from eliminating
+repeated per-pixel cell/style work.
 
-Relative to the same-run full-frame compute baseline, GPU time improved by
-about 5% for the two-pane replay and 3% for the sparse replay. Command
-encoding was slightly more expensive, and the wall-time change was within
-noise. This fails the 2× GPU-time or equally clear energy-reduction gate.
+Decision: this is the first active-rendering prototype that merits a guarded
+production integration experiment. Do not replace the production kernel yet.
+Phase 6 should integrate the tiled compute path behind a debug/reference switch,
+then validate drawable clearing, resize, double-buffering, synchronized output,
+scrollback, selection, and cursor behavior onscreen. Keep the full-frame kernel
+as the fallback until those gates and repeated GPU/energy measurements pass.
 
-Decision: retain the instanced pipeline as headless benchmark and correctness
-infrastructure, but do not integrate it into `MetalRenderer`. The production
-renderer remains the compute path. Phase 6 is therefore not justified by the
-current workload; the next architectural work should wait for a workload or
-measurement that demonstrates a larger stable GPU or energy bottleneck.
+## Phase 6: Integrate tiled compute only if Phase 5 wins
 
-## Phase 6: Integrate production presentation only if Phase 5 wins
+Currently deferred until the Phase 5 tiled-compute gate passes. Generic
+damage and scroll-aware retained rendering remain benchmark infrastructure
+only.
 
-Currently deferred until the Phase 5 instanced-rendering gate passes. Generic
-damage and scroll-aware retained rendering remain benchmark infrastructure only.
+Once the headless tiled core passes:
 
-Once the headless core passes:
-
-- Replace the direct drawable compute path with the winning instanced pipeline.
+- Add the tiled compute pipeline to `MetalRenderer` behind a debug/reference switch.
 - Preserve the current double-buffering and GPU-in-flight behavior.
 - Handle drawable misses without losing the current frame.
 - Validate scrollback viewport rendering, selection, synchronized output, and resize.
-- Keep a debug switch to compare legacy and instanced renderers during development.
+- Keep the full-frame compute path available for pixel-by-pixel comparison.
 
 Gate:
 
 ```text
 cargo test --all-targets
 headless correctness suite
-instanced-cell benchmark
+tiled-compute benchmark
 ```
 
 No production switch until all pass and the Phase 5 performance gates are met.
@@ -483,7 +456,7 @@ The key acceptance criterion is not “the benchmark is faster.” It is:
 > CPU upload, GPU shading, and memory traffic must scale with changed terminal content rather than total screen area, while matching the reference renderer pixel-for-pixel.
 
 For the current measured workload, this is an optimization opportunity rather
-than a demonstrated necessity. Phase 4 is the next experiment; it should be
-completed independently, while Phase 5 should be abandoned if it cannot
-produce a large, exact, low-memory win over the current full-frame compute
-renderer.
+than a demonstrated necessity. Phase 4 remains independent and should still
+receive runtime energy measurements. Phase 5 is the first active-rendering
+prototype with enough measured benefit to justify a guarded onscreen
+integration experiment.

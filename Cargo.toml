@@ -10,7 +10,7 @@ block2 = "0.6"
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes", "CFDate", "CFFileDescriptor", "CFRunLoop"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSArray", "NSData", "NSObjCRuntime", "NSRunLoop", "NSGeometry"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSView", "NSResponder", "NSPasteboard", "NSApplication", "NSEvent", "NSGraphics", "NSScreen", "NSWindow", "NSRunningApplication", "objc2-core-foundation"] }
-objc2-metal = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "MTLAllocation", "MTLBlitCommandEncoder", "MTLBuffer", "MTLCommandBuffer", "MTLCommandEncoder", "MTLCommandQueue", "MTLComputeCommandEncoder", "MTLComputePipeline", "MTLDevice", "MTLDrawable", "MTLLibrary", "MTLPipeline", "MTLPixelFormat", "MTLRenderCommandEncoder", "MTLRenderPass", "MTLRenderPipeline", "MTLResource", "MTLTexture", "MTLTypes"] }
+objc2-metal = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "MTLAllocation", "MTLBlitCommandEncoder", "MTLBuffer", "MTLCommandBuffer", "MTLCommandEncoder", "MTLCommandQueue", "MTLComputeCommandEncoder", "MTLComputePipeline", "MTLDevice", "MTLDrawable", "MTLLibrary", "MTLPipeline", "MTLPixelFormat", "MTLResource", "MTLTexture", "MTLTypes"] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "CALayer", "CAMetalLayer", "objc2-metal"] }
 bytemuck = { version = "1", features = ["derive"] }
 bitflags = "2"

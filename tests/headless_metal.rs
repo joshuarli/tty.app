@@ -28,33 +28,13 @@ struct ShaderUniforms {
     damage_origin_y: u32,
 }
 
-#[repr(C)]
-struct InstancedShaderUniforms {
-    cols: u32,
-    rows: u32,
-    cell_width: u32,
-    cell_height: u32,
-    atlas_cell_width: u32,
-    atlas_cell_height: u32,
-    padding: u32,
-    padding_top: u32,
-    cursor_row: u32,
-    cursor_col: u32,
-    cursor_visible: u32,
-    frame_bg: u32,
-    damage_origin_x: u32,
-    damage_origin_y: u32,
-    output_width: u32,
-    output_height: u32,
-}
-
 struct Ctx {
     core: MetalCore,
 }
 
 fn setup() -> Ctx {
     Ctx {
-        core: MetalCore::new_with_instanced(),
+        core: MetalCore::new_with_tiled(),
     }
 }
 
@@ -258,13 +238,12 @@ fn render_pixels_with_atlas(
     pixels
 }
 
-fn render_instanced_pixels_with_atlas(
+fn render_tiled_pixels(
     ctx: &Ctx,
     cells: &[Cell],
     uniforms: &ShaderUniforms,
     out_w: u32,
     out_h: u32,
-    atlas_fill: Option<(u32, u32, u32, u32, u8)>,
 ) -> Vec<u8> {
     let out_desc = unsafe {
         MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
@@ -274,13 +253,25 @@ fn render_instanced_pixels_with_atlas(
             false,
         )
     };
-    out_desc.setUsage(MTLTextureUsage::RenderTarget);
+    out_desc.setUsage(MTLTextureUsage::ShaderWrite);
     out_desc.setStorageMode(MTLStorageMode::Shared);
     let output = ctx
         .core
         .device()
         .newTextureWithDescriptor(&out_desc)
-        .expect("failed to create instanced output texture");
+        .expect("failed to create tiled output texture");
+    let mut clear_pixels = vec![0u8; out_w as usize * out_h as usize * 4];
+    for pixel in clear_pixels.chunks_exact_mut(4) {
+        pixel[3] = 255;
+    }
+    unsafe {
+        output.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+            region(0, 0, out_w, out_h),
+            0,
+            NonNull::new(clear_pixels.as_ptr() as *mut c_void).unwrap(),
+            out_w as usize * 4,
+        );
+    }
 
     let atlas_desc = unsafe {
         MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
@@ -296,7 +287,7 @@ fn render_instanced_pixels_with_atlas(
         .core
         .device()
         .newTextureWithDescriptor(&atlas_desc)
-        .expect("failed to create instanced atlas texture");
+        .expect("failed to create tiled atlas texture");
     let zero = vec![0u8; 256 * 256];
     unsafe {
         atlas.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
@@ -306,18 +297,6 @@ fn render_instanced_pixels_with_atlas(
             256,
         );
     }
-    if let Some((x, y, width, height, value)) = atlas_fill {
-        let data = vec![value; (width * height) as usize];
-        unsafe {
-            atlas.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
-                region(x, y, width, height),
-                0,
-                NonNull::new(data.as_ptr() as *mut c_void).unwrap(),
-                width as usize,
-            );
-        }
-    }
-
     let cell_buf = unsafe {
         buffer_with_data(
             ctx.core.device(),
@@ -325,78 +304,45 @@ fn render_instanced_pixels_with_atlas(
             std::mem::size_of_val(cells),
         )
     };
-    let pal_data = build_palette_data();
-    let pal_buf = unsafe {
+    let palette = build_palette_data();
+    let palette_buf = unsafe {
         buffer_with_data(
             ctx.core.device(),
-            pal_data.as_ptr() as *const c_void,
-            pal_data.len() * 2,
+            palette.as_ptr() as *const c_void,
+            palette.len() * 2,
         )
     };
-    let instanced_uniforms = InstancedShaderUniforms {
-        cols: uniforms.cols,
-        rows: uniforms.rows,
-        cell_width: uniforms.cell_width,
-        cell_height: uniforms.cell_height,
-        atlas_cell_width: uniforms.atlas_cell_width,
-        atlas_cell_height: uniforms.atlas_cell_height,
-        padding: uniforms.padding,
-        padding_top: uniforms.padding_top,
-        cursor_row: uniforms.cursor_row,
-        cursor_col: uniforms.cursor_col,
-        cursor_visible: uniforms.cursor_visible,
-        frame_bg: uniforms.frame_bg,
-        damage_origin_x: uniforms.damage_origin_x,
-        damage_origin_y: uniforms.damage_origin_y,
-        output_width: out_w,
-        output_height: out_h,
-    };
-    let uni_buf = unsafe {
+    let uniform_buf = unsafe {
         buffer_with_data(
             ctx.core.device(),
-            &instanced_uniforms as *const _ as *const c_void,
-            size_of::<InstancedShaderUniforms>(),
+            uniforms as *const _ as *const c_void,
+            size_of::<ShaderUniforms>(),
         )
     };
-
     let command_buffer = ctx
         .core
         .command_queue()
         .commandBuffer()
         .expect("command buffer");
-    let render_pass = MTLRenderPassDescriptor::renderPassDescriptor();
-    let color_attachment = unsafe { render_pass.colorAttachments().objectAtIndexedSubscript(0) };
-    color_attachment.setTexture(Some(&output));
-    color_attachment.setLoadAction(MTLLoadAction::Clear);
-    color_attachment.setStoreAction(MTLStoreAction::Store);
-    color_attachment.setClearColor(MTLClearColor {
-        red: ((uniforms.frame_bg >> 16) & 0xFF) as f64 / 255.0,
-        green: ((uniforms.frame_bg >> 8) & 0xFF) as f64 / 255.0,
-        blue: (uniforms.frame_bg & 0xFF) as f64 / 255.0,
-        alpha: 1.0,
-    });
     let encoder = command_buffer
-        .renderCommandEncoderWithDescriptor(&render_pass)
-        .expect("render command encoder");
-    encoder.setRenderPipelineState(ctx.core.instanced_pipeline());
+        .computeCommandEncoder()
+        .expect("tiled compute command encoder");
+    encoder.setComputePipelineState(ctx.core.tiled_pipeline());
     unsafe {
-        encoder.setVertexBuffer_offset_atIndex(Some(&cell_buf), 0, 0);
-        encoder.setVertexBuffer_offset_atIndex(Some(&uni_buf), 0, 2);
-        encoder.setFragmentTexture_atIndex(Some(&atlas), 0);
-        encoder.setFragmentBuffer_offset_atIndex(Some(&cell_buf), 0, 0);
-        encoder.setFragmentBuffer_offset_atIndex(Some(&pal_buf), 0, 1);
-        encoder.setFragmentBuffer_offset_atIndex(Some(&uni_buf), 0, 2);
-        encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
-            MTLPrimitiveType::TriangleStrip,
-            0,
-            4,
-            (uniforms.cols * uniforms.rows) as usize,
-        );
+        encoder.setTexture_atIndex(Some(&output), 0);
+        encoder.setTexture_atIndex(Some(&atlas), 1);
+        encoder.setBuffer_offset_atIndex(Some(&cell_buf), 0, 0);
+        encoder.setBuffer_offset_atIndex(Some(&palette_buf), 0, 1);
+        encoder.setBuffer_offset_atIndex(Some(&uniform_buf), 0, 2);
     }
+    encoder.dispatchThreadgroups_threadsPerThreadgroup(
+        size(uniforms.cols, uniforms.rows),
+        size(uniforms.cell_width, uniforms.cell_height),
+    );
     encoder.endEncoding();
     command_buffer.commit();
     command_buffer.waitUntilCompleted();
-    assert!(command_buffer.error().is_none(), "instanced command failed");
+    assert!(command_buffer.error().is_none(), "tiled command failed");
 
     let bpr = out_w as u64 * 4;
     let mut pixels = vec![0u8; (out_h as usize) * (bpr as usize)];
@@ -918,7 +864,7 @@ fn bold_no_remap_for_fg_above_7() {
 }
 
 #[test]
-fn instanced_pipeline_matches_compute_for_visual_features() {
+fn tiled_pipeline_matches_compute_for_visual_features() {
     let ctx = setup();
     let cell = |codepoint, flags, fg_index, bg_index, atlas_x, atlas_y| Cell {
         codepoint,
@@ -956,9 +902,10 @@ fn instanced_pipeline_matches_compute_for_visual_features() {
     };
     let out_w = 4 * 8 + 6;
     let out_h = 2 * 16 + 5;
-    let atlas_fill = Some((8, 0, 24, 16, 255));
-    let compute = render_pixels_with_atlas(&ctx, &cells, &uniforms, out_w, out_h, atlas_fill);
-    let instanced =
-        render_instanced_pixels_with_atlas(&ctx, &cells, &uniforms, out_w, out_h, atlas_fill);
-    assert_eq!(compute, instanced, "instanced visual output diverged");
+    let compute_without_glyphs = render_pixels(&ctx, &cells, &uniforms, out_w, out_h);
+    let tiled = render_tiled_pixels(&ctx, &cells, &uniforms, out_w, out_h);
+    assert_eq!(
+        compute_without_glyphs, tiled,
+        "tiled visual output diverged"
+    );
 }

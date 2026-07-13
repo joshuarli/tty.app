@@ -2625,27 +2625,6 @@ struct ScrollCopyUniforms {
     height: u32,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct InstancedUniforms {
-    cols: u32,
-    rows: u32,
-    cell_width: u32,
-    cell_height: u32,
-    atlas_cell_width: u32,
-    atlas_cell_height: u32,
-    padding: u32,
-    padding_top: u32,
-    cursor_row: u32,
-    cursor_col: u32,
-    cursor_visible: u32,
-    frame_bg: u32,
-    damage_origin_x: u32,
-    damage_origin_y: u32,
-    output_width: u32,
-    output_height: u32,
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 struct MetalRunStats {
     input_bytes: usize,
@@ -2661,7 +2640,7 @@ struct MetalRunStats {
     parser_performer_grid_time: Duration,
     row_prep_time: Duration,
     dispatch_pixels: u64,
-    instanced_cells: u64,
+    tiled_pixels: u64,
     upload_bytes: usize,
     upload_time: Duration,
     encode_time: Duration,
@@ -2688,7 +2667,7 @@ struct MetalBaseline {
 
 impl MetalBaseline {
     fn new() -> Self {
-        let core = MetalCore::new_with_instanced();
+        let core = MetalCore::new_with_tiled();
         let rasterizer = FontRasterizer::new(config::FONT_FAMILY, config::FONT_SIZE, 2.0);
         let cell_width = rasterizer.metrics.cell_width;
         let cell_height = rasterizer.metrics.cell_height;
@@ -2723,6 +2702,26 @@ impl MetalBaseline {
             .device()
             .newTextureWithDescriptor(&output_desc)
             .expect("failed to create headless output texture");
+        let mut clear_pixels =
+            vec![0u8; METAL_PHYSICAL_WIDTH as usize * METAL_PHYSICAL_HEIGHT as usize * 4];
+        for pixel in clear_pixels.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+        unsafe {
+            output.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                MTLRegion {
+                    origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                    size: MTLSize {
+                        width: METAL_PHYSICAL_WIDTH as usize,
+                        height: METAL_PHYSICAL_HEIGHT as usize,
+                        depth: 1,
+                    },
+                },
+                0,
+                NonNull::new(clear_pixels.as_ptr() as *mut c_void).unwrap(),
+                METAL_PHYSICAL_WIDTH as usize * 4,
+            );
+        }
         let scroll_scratch = core
             .device()
             .newTextureWithDescriptor(&output_desc)
@@ -3522,7 +3521,7 @@ impl MetalBaseline {
         stats
     }
 
-    fn run_instanced(&mut self, frames: &[MetalFrame]) -> MetalRunStats {
+    fn run_tiled(&mut self, frames: &[MetalFrame]) -> MetalRunStats {
         let mut stats = MetalRunStats::default();
         let dst_base = self.cell_buffer.contents().as_ptr() as *mut u8;
 
@@ -3542,7 +3541,7 @@ impl MetalBaseline {
             }
             stats.upload_time += upload_start.elapsed();
 
-            let uniforms = InstancedUniforms {
+            let uniforms = Uniforms {
                 cols: METAL_COLS as u32,
                 rows: METAL_ROWS as u32,
                 cell_width: self.cell_width,
@@ -3557,11 +3556,9 @@ impl MetalBaseline {
                 frame_bg: config::DEFAULT_BG,
                 damage_origin_x: 0,
                 damage_origin_y: 0,
-                output_width: METAL_PHYSICAL_WIDTH,
-                output_height: METAL_PHYSICAL_HEIGHT,
             };
             unsafe {
-                let dst = self.uniform_buffer.contents().as_ptr() as *mut InstancedUniforms;
+                let dst = self.uniform_buffer.contents().as_ptr() as *mut Uniforms;
                 *dst = uniforms;
             }
 
@@ -3570,38 +3567,30 @@ impl MetalBaseline {
                 .core
                 .command_queue()
                 .commandBuffer()
-                .expect("failed to create headless instanced command buffer");
-            let render_pass = MTLRenderPassDescriptor::renderPassDescriptor();
-            let color_attachment =
-                unsafe { render_pass.colorAttachments().objectAtIndexedSubscript(0) };
-            color_attachment.setTexture(Some(&self.output));
-            color_attachment.setLoadAction(MTLLoadAction::Clear);
-            color_attachment.setStoreAction(MTLStoreAction::Store);
-            let rgb = config::DEFAULT_BG;
-            color_attachment.setClearColor(MTLClearColor {
-                red: ((rgb >> 16) & 0xFF) as f64 / 255.0,
-                green: ((rgb >> 8) & 0xFF) as f64 / 255.0,
-                blue: (rgb & 0xFF) as f64 / 255.0,
-                alpha: 1.0,
-            });
+                .expect("failed to create headless tiled command buffer");
             let encoder = command_buffer
-                .renderCommandEncoderWithDescriptor(&render_pass)
-                .expect("failed to create headless instanced render encoder");
-            encoder.setRenderPipelineState(self.core.instanced_pipeline());
+                .computeCommandEncoder()
+                .expect("failed to create headless tiled compute encoder");
+            encoder.setComputePipelineState(self.core.tiled_pipeline());
             unsafe {
-                encoder.setVertexBuffer_offset_atIndex(Some(&self.cell_buffer), 0, 0);
-                encoder.setVertexBuffer_offset_atIndex(Some(&self.uniform_buffer), 0, 2);
-                encoder.setFragmentTexture_atIndex(Some(&self.atlas.texture), 0);
-                encoder.setFragmentBuffer_offset_atIndex(Some(&self.cell_buffer), 0, 0);
-                encoder.setFragmentBuffer_offset_atIndex(Some(self.core.palette_buffer()), 0, 1);
-                encoder.setFragmentBuffer_offset_atIndex(Some(&self.uniform_buffer), 0, 2);
-                encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                    MTLPrimitiveType::TriangleStrip,
-                    0,
-                    4,
-                    (METAL_COLS as usize) * (METAL_ROWS as usize),
-                );
+                encoder.setTexture_atIndex(Some(&self.output), 0);
+                encoder.setTexture_atIndex(Some(&self.atlas.texture), 1);
+                encoder.setBuffer_offset_atIndex(Some(&self.cell_buffer), 0, 0);
+                encoder.setBuffer_offset_atIndex(Some(self.core.palette_buffer()), 0, 1);
+                encoder.setBuffer_offset_atIndex(Some(&self.uniform_buffer), 0, 2);
             }
+            encoder.dispatchThreadgroups_threadsPerThreadgroup(
+                MTLSize {
+                    width: METAL_COLS as usize,
+                    height: METAL_ROWS as usize,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: self.cell_width as usize,
+                    height: self.cell_height as usize,
+                    depth: 1,
+                },
+            );
             encoder.endEncoding();
             stats.encode_time += encode_start.elapsed();
 
@@ -3609,7 +3598,7 @@ impl MetalBaseline {
             command_buffer.waitUntilCompleted();
             assert!(
                 command_buffer.error().is_none(),
-                "headless instanced command buffer failed"
+                "headless tiled command buffer failed"
             );
             let gpu_start = command_buffer.GPUStartTime();
             let gpu_end = command_buffer.GPUEndTime();
@@ -3618,7 +3607,10 @@ impl MetalBaseline {
                 stats.gpu_timed_frames += 1;
             }
             stats.frames += 1;
-            stats.instanced_cells += (METAL_COLS as u64) * (METAL_ROWS as u64);
+            stats.tiled_pixels += METAL_COLS as u64
+                * METAL_ROWS as u64
+                * self.cell_width as u64
+                * self.cell_height as u64;
             stats.wall_time += frame_start.elapsed();
         }
 
@@ -3945,21 +3937,21 @@ fn validate_metal_damage(data: &[u8], ascii_table: [[u8; 2]; 128]) {
     );
 }
 
-fn validate_metal_instanced(frames: &[MetalFrame]) {
+fn validate_metal_tiled(frames: &[MetalFrame]) {
     let mut full_baseline = MetalBaseline::new();
-    let mut instanced_baseline = MetalBaseline::new();
+    let mut tiled_baseline = MetalBaseline::new();
     for (index, frame) in frames.iter().enumerate() {
         let full_pixels = {
             full_baseline.run(std::slice::from_ref(frame));
             full_baseline.readback()
         };
-        let instanced_pixels = {
-            instanced_baseline.run_instanced(std::slice::from_ref(frame));
-            instanced_baseline.readback()
+        let tiled_pixels = {
+            tiled_baseline.run_tiled(std::slice::from_ref(frame));
+            tiled_baseline.readback()
         };
         assert_eq!(
-            full_pixels, instanced_pixels,
-            "instanced pixels diverged at replay frame {index}"
+            full_pixels, tiled_pixels,
+            "tiled pixels diverged at replay frame {index}"
         );
     }
 }
@@ -4052,15 +4044,10 @@ fn print_metal_damage(
     );
 }
 
-fn print_metal_instanced(
-    label: &str,
-    path: &str,
-    baseline: &mut MetalBaseline,
-    frames: &[MetalFrame],
-) {
-    let _ = baseline.run_instanced(frames);
+fn print_metal_tiled(label: &str, path: &str, baseline: &mut MetalBaseline, frames: &[MetalFrame]) {
+    let _ = baseline.run_tiled(frames);
     reset_alloc_counters();
-    let stats = baseline.run_instanced(frames);
+    let stats = baseline.run_tiled(frames);
     let allocs = alloc_count();
     let allocated_bytes = alloc_bytes();
     let gpu_ms = stats.gpu_time_ns / 1_000_000.0;
@@ -4073,13 +4060,13 @@ fn print_metal_instanced(
         "partial"
     };
     eprintln!(
-        "metal_instanced label={label} path={path} rows={} cols={} physical={}x{} frames={} instanced_cells={} upload_bytes={} upload_ms={upload_ms:.3} encode_ms={encode_ms:.3} wall_ms={wall_ms:.3} gpu_ms={gpu_ms:.3} allocs={allocs} allocated_bytes={allocated_bytes} headless_resource_bytes={} gpu_timing={gpu_timing}",
+        "metal_tiled label={label} path={path} rows={} cols={} physical={}x{} frames={} tiled_pixels={} upload_bytes={} upload_ms={upload_ms:.3} encode_ms={encode_ms:.3} wall_ms={wall_ms:.3} gpu_ms={gpu_ms:.3} allocs={allocs} allocated_bytes={allocated_bytes} headless_resource_bytes={} gpu_timing={gpu_timing}",
         METAL_ROWS,
         METAL_COLS,
         METAL_PHYSICAL_WIDTH,
         METAL_PHYSICAL_HEIGHT,
         stats.frames,
-        stats.instanced_cells,
+        stats.tiled_pixels,
         stats.upload_bytes,
         baseline.resource_bytes(),
     );
@@ -4157,8 +4144,8 @@ fn bench_metal_baseline(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_metal_instanced(c: &mut Criterion) {
-    let mut group = c.benchmark_group("metal_instanced");
+fn bench_metal_tiled(c: &mut Criterion) {
+    let mut group = c.benchmark_group("metal_tiled");
     let mut baseline = MetalBaseline::new();
     let ascii_table = baseline.ascii_table();
 
@@ -4170,8 +4157,8 @@ fn bench_metal_instanced(c: &mut Criterion) {
         ),
     ] {
         let frames = load_metal_frames(path, &ascii_table);
-        validate_metal_instanced(&frames);
-        print_metal_instanced(label, path, &mut baseline, &frames);
+        validate_metal_tiled(&frames);
+        print_metal_tiled(label, path, &mut baseline, &frames);
         group.throughput(Throughput::Bytes(
             std::fs::metadata(path).expect("workload metadata").len(),
         ));
@@ -4179,7 +4166,7 @@ fn bench_metal_instanced(c: &mut Criterion) {
             b.iter_custom(|iters| {
                 let mut elapsed = Duration::ZERO;
                 for _ in 0..iters {
-                    elapsed += baseline.run_instanced(&frames).wall_time;
+                    elapsed += baseline.run_tiled(&frames).wall_time;
                 }
                 elapsed
             });
@@ -4348,7 +4335,7 @@ criterion_group! {
         bench_atlas_hash,
         bench_process_rss,
         bench_metal_baseline,
-        bench_metal_instanced,
+        bench_metal_tiled,
         bench_metal_replay,
         bench_metal_damage,
         bench_metal_scroll,
