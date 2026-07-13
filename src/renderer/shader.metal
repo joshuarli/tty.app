@@ -37,6 +37,7 @@ constant ushort FLAG_INVERSE    = 0x0010;
 constant ushort FLAG_SELECTED   = 0x0040;
 constant ushort FLAG_BOLD       = 0x0080;
 constant ushort FLAG_HIDDEN     = 0x0400;
+constant ushort FLAG_TILED_SKIP = 0x8000;
 
 // ── Box drawing lookup ──────────────────────────────────────────────
 // Each entry encodes edge connectivity for U+2500..U+257F
@@ -348,10 +349,21 @@ kernel void render_tiled(
     constant Uniforms& uni [[buffer(2)]],
     uint2 threadgroup_id [[threadgroup_position_in_grid]],
     uint2 thread_id [[thread_position_in_threadgroup]]) {
-    uint col = threadgroup_id.x;
-    uint row = threadgroup_id.y;
+    bool full_frame = uni.damage_origin_x == 0 && uni.damage_origin_y == 0;
+    uint origin_col = full_frame
+        ? 0
+        : (uni.damage_origin_x - uni.padding) / uni.cell_width;
+    uint origin_row = full_frame
+        ? 0
+        : (uni.damage_origin_y - uni.padding_top) / uni.cell_height;
+    uint col = threadgroup_id.x + origin_col;
+    uint row = threadgroup_id.y + origin_row;
     uint px = thread_id.x;
     uint py = thread_id.y;
+
+    if (cells[row * uni.cols + col].flags & FLAG_TILED_SKIP) {
+        return;
+    }
 
     threadgroup ushort shared_codepoint;
     threadgroup ushort shared_flags;
@@ -414,7 +426,7 @@ kernel void render_tiled(
     // Paint the border from the same cell threadgroups so the tiled path owns
     // every output pixel without a retained framebuffer or a second clear pass.
     half4 frame_bg = unpack_rgb(uni.frame_bg);
-    if (col == 0 && px == 0) {
+    if (full_frame && col == 0 && px == 0) {
         for (uint x = 0; x < uni.padding; ++x) {
             output.write(frame_bg, uint2(x, gid_y));
         }
@@ -434,7 +446,7 @@ kernel void render_tiled(
             }
         }
     }
-    if (col + 1 == uni.cols && px == 0) {
+    if (full_frame && col + 1 == uni.cols && px == 0) {
         for (uint x = uni.padding + uni.cols * uni.cell_width; x < output.get_width(); ++x) {
             output.write(frame_bg, uint2(x, gid_y));
         }
@@ -456,12 +468,12 @@ kernel void render_tiled(
             }
         }
     }
-    if (row == 0 && py == 0) {
+    if (full_frame && row == 0 && py == 0) {
         for (uint y = 0; y < uni.padding_top; ++y) {
             output.write(frame_bg, uint2(gid_x, y));
         }
     }
-    if (row + 1 == uni.rows && py == 0) {
+    if (full_frame && row + 1 == uni.rows && py == 0) {
         for (uint y = uni.padding_top + uni.rows * uni.cell_height; y < output.get_height(); ++y) {
             output.write(frame_bg, uint2(gid_x, y));
         }
@@ -506,6 +518,114 @@ kernel void render_tiled(
         if (py == strike_y) {
             color = fg;
         }
+    }
+    if (row == uni.cursor_row && col == uni.cursor_col && uni.cursor_visible != 0) {
+        color = half4(1.0h - color.r, 1.0h - color.g, 1.0h - color.b, 1.0h);
+    }
+    output.write(color, uint2(gid_x, gid_y));
+}
+
+kernel void render_tiled_list(
+    texture2d<half, access::write> output [[texture(0)]],
+    texture2d<half, access::read> atlas [[texture(1)]],
+    device const CellData* cells [[buffer(0)]],
+    device const half4* palette [[buffer(1)]],
+    constant Uniforms& uni [[buffer(2)]],
+    device const uint* active_cells [[buffer(3)]],
+    uint2 threadgroup_id [[threadgroup_position_in_grid]],
+    uint2 thread_id [[thread_position_in_threadgroup]]) {
+    uint cell_index = active_cells[threadgroup_id.x];
+    uint col = cell_index % uni.cols;
+    uint row = cell_index / uni.cols;
+    uint px = thread_id.x;
+    uint py = thread_id.y;
+
+    threadgroup ushort shared_codepoint;
+    threadgroup ushort shared_flags;
+    threadgroup uchar shared_atlas_x;
+    threadgroup uchar shared_atlas_y;
+    threadgroup half4 shared_fg;
+    threadgroup half4 shared_bg;
+
+    if (thread_id.x == 0 && thread_id.y == 0) {
+        CellData cell = cells[cell_index];
+        shared_codepoint = cell.codepoint;
+        shared_flags = cell.flags;
+        shared_atlas_x = cell.atlas_x;
+        shared_atlas_y = cell.atlas_y;
+
+        if (cell.flags & FLAG_WIDE_CONT) {
+            half4 fg = palette[cell.fg_index];
+            half4 bg = palette[cell.bg_index];
+            if (cell.flags & FLAG_INVERSE) { half4 tmp = fg; fg = bg; bg = tmp; }
+            if (cell.flags & FLAG_HIDDEN) fg = bg;
+            shared_fg = fg;
+            shared_bg = bg;
+        } else {
+            uchar fg_idx = cell.fg_index;
+            if ((cell.flags & FLAG_BOLD) && fg_idx < 8) {
+                fg_idx += 8;
+            }
+            half4 fg = palette[fg_idx];
+            half4 bg = palette[cell.bg_index];
+            if (cell.flags & FLAG_HIDDEN) fg = bg;
+            if (cell.flags & FLAG_INVERSE) {
+                half4 tmp = fg;
+                fg = bg;
+                bg = tmp;
+            }
+            if (cell.flags & FLAG_SELECTED) {
+                half4 tmp = fg;
+                fg = bg;
+                bg = tmp;
+            }
+            shared_fg = fg;
+            shared_bg = bg;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    ushort flags = shared_flags;
+    uint gid_x = uni.padding + col * uni.cell_width + px;
+    uint gid_y = uni.padding_top + row * uni.cell_height + py;
+    half4 fg = shared_fg;
+    half4 bg = shared_bg;
+
+    if (flags & FLAG_WIDE_CONT) {
+        px += uni.cell_width;
+        uint atlas_px = uint(shared_atlas_x) * uni.atlas_cell_width + px;
+        uint atlas_py = uint(shared_atlas_y) * uni.atlas_cell_height + py;
+        half alpha = atlas.read(uint2(atlas_px, atlas_py)).r;
+        output.write(mix(bg, fg, alpha), uint2(gid_x, gid_y));
+        return;
+    }
+
+    half4 color = bg;
+    uint cp = uint(shared_codepoint);
+    if (cp >= 0x2500 && cp <= 0x257F) {
+        if (draw_box_line(cp, px, py, uni.cell_width, uni.cell_height)) {
+            color = fg;
+        }
+    } else if (cp >= 0x2190 && cp <= 0x2195) {
+        if (draw_arrow(cp, px, py, uni.cell_width, uni.cell_height)) {
+            color = fg;
+        }
+    } else if (shared_atlas_x != 0 || shared_atlas_y != 0) {
+        uint glyph_w = (flags & FLAG_WIDE) ? uni.atlas_cell_width * 2 : uni.atlas_cell_width;
+        if (px < glyph_w && py < uni.atlas_cell_height) {
+            uint atlas_px = uint(shared_atlas_x) * uni.atlas_cell_width + px;
+            uint atlas_py = uint(shared_atlas_y) * uni.atlas_cell_height + py;
+            half alpha = atlas.read(uint2(atlas_px, atlas_py)).r;
+            color = mix(bg, fg, alpha);
+        }
+    }
+    if (flags & FLAG_UNDERLINE) {
+        uint underline_y = uni.cell_height - 2;
+        if (py == underline_y) color = fg;
+    }
+    if (flags & FLAG_STRIKE) {
+        uint strike_y = uni.cell_height / 2;
+        if (py == strike_y) color = fg;
     }
     if (row == uni.cursor_row && col == uni.cursor_col && uni.cursor_visible != 0) {
         color = half4(1.0h - color.r, 1.0h - color.g, 1.0h - color.b, 1.0h);

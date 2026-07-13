@@ -17,6 +17,8 @@ pub struct MetalCore {
     #[allow(dead_code)]
     pub(crate) tiled_pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     #[allow(dead_code)]
+    pub(crate) tiled_list_pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
+    #[allow(dead_code)]
     pub(crate) scroll_pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     pub(crate) palette_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
 }
@@ -73,6 +75,18 @@ impl MetalCore {
         } else {
             None
         };
+        let tiled_list_pipeline = if with_tiled {
+            let tiled_list_function = library
+                .newFunctionWithName(&NSString::from_str("render_tiled_list"))
+                .expect("shader function 'render_tiled_list' not found");
+            Some(
+                device
+                    .newComputePipelineStateWithFunction_error(&tiled_list_function)
+                    .expect("failed to create tiled-list compute pipeline"),
+            )
+        } else {
+            None
+        };
 
         let palette_data = Self::build_palette_buffer();
         let palette_buffer = unsafe {
@@ -90,6 +104,7 @@ impl MetalCore {
             command_queue,
             pipeline,
             tiled_pipeline,
+            tiled_list_pipeline,
             scroll_pipeline,
             palette_buffer,
         }
@@ -112,6 +127,13 @@ impl MetalCore {
         self.tiled_pipeline
             .as_ref()
             .expect("tiled pipeline was not requested")
+    }
+
+    #[allow(dead_code)]
+    pub fn tiled_list_pipeline(&self) -> &ProtocolObject<dyn MTLComputePipelineState> {
+        self.tiled_list_pipeline
+            .as_ref()
+            .expect("tiled-list pipeline was not requested")
     }
 
     #[allow(dead_code)]

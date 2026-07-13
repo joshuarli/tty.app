@@ -2599,6 +2599,7 @@ const METAL_PHYSICAL_WIDTH: u32 = 2880;
 const METAL_PHYSICAL_HEIGHT: u32 = 1800;
 const METAL_REPLAY_CHUNK: usize = 32 * 1024;
 const MAX_DAMAGE_REGIONS: usize = METAL_ROWS as usize + 1;
+const TILED_SKIP_FLAG: u16 = 0x8000;
 
 struct MetalFrame {
     cells: Vec<Cell>,
@@ -2614,6 +2615,14 @@ struct DamageRegion {
     origin_y: u32,
     width: u32,
     height: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TiledDamageRegion {
+    top: usize,
+    bottom: usize,
+    left: usize,
+    right: usize,
 }
 
 #[repr(C)]
@@ -2641,6 +2650,7 @@ struct MetalRunStats {
     row_prep_time: Duration,
     dispatch_pixels: u64,
     tiled_pixels: u64,
+    active_cells: u64,
     upload_bytes: usize,
     upload_time: Duration,
     encode_time: Duration,
@@ -2657,6 +2667,7 @@ struct MetalBaseline {
     scroll_scratch: Retained<ProtocolObject<dyn MTLTexture>>,
     scroll_scratch_valid: bool,
     cell_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+    active_cell_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
     uniform_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
     scroll_uniform_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
     cell_width: u32,
@@ -2735,6 +2746,13 @@ impl MetalBaseline {
                 MTLResourceOptions::StorageModeShared,
             )
             .expect("failed to create headless cell buffer");
+        let active_cell_buffer = core
+            .device()
+            .newBufferWithLength_options(
+                METAL_COLS as usize * METAL_ROWS as usize * mem::size_of::<u32>(),
+                MTLResourceOptions::StorageModeShared,
+            )
+            .expect("failed to create active cell buffer");
         let uniform_buffer = core
             .device()
             .newBufferWithLength_options(
@@ -2758,6 +2776,7 @@ impl MetalBaseline {
             scroll_scratch,
             scroll_scratch_valid: false,
             cell_buffer,
+            active_cell_buffer,
             uniform_buffer,
             scroll_uniform_buffer,
             cell_width,
@@ -3616,6 +3635,217 @@ impl MetalBaseline {
 
         stats
     }
+
+    fn run_grid_frame_tiled_damage(
+        &mut self,
+        grid: &Grid,
+        previous_cursor: Option<(u16, u16, bool)>,
+        force_full: bool,
+        stats: &mut MetalRunStats,
+    ) {
+        let mut dirty_rows = [false; METAL_ROWS as usize];
+        let mut row_left = [METAL_COLS as usize; METAL_ROWS as usize];
+        let mut row_right = [0usize; METAL_ROWS as usize];
+        let dst_base = self.cell_buffer.contents().as_ptr() as *mut Cell;
+        let upload_start = Instant::now();
+
+        if force_full {
+            dirty_rows.fill(true);
+            row_left.fill(0);
+            row_right.fill(METAL_COLS as usize);
+            for row in 0..METAL_ROWS as usize {
+                let src = grid.row_slice(row as u16);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        src.as_ptr(),
+                        dst_base.add(row * METAL_COLS as usize),
+                        METAL_COLS as usize,
+                    );
+                }
+                stats.upload_bytes += self.row_bytes;
+            }
+        } else {
+            for cell in unsafe {
+                std::slice::from_raw_parts_mut(dst_base, METAL_ROWS as usize * METAL_COLS as usize)
+            } {
+                cell.flags = CellFlags::from_bits_retain(cell.flags.bits() | TILED_SKIP_FLAG);
+            }
+            for (row, dirty) in grid.dirty.iter().enumerate() {
+                if !*dirty {
+                    continue;
+                }
+                let src = grid.row_slice(row as u16);
+                let dst = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        dst_base.add(row * METAL_COLS as usize),
+                        METAL_COLS as usize,
+                    )
+                };
+                for col in 0..METAL_COLS as usize {
+                    if src[col].codepoint != dst[col].codepoint
+                        || src[col].flags.bits() != dst[col].flags.bits() & !TILED_SKIP_FLAG
+                        || src[col].fg_index != dst[col].fg_index
+                        || src[col].bg_index != dst[col].bg_index
+                        || src[col].atlas_x != dst[col].atlas_x
+                        || src[col].atlas_y != dst[col].atlas_y
+                    {
+                        dirty_rows[row] = true;
+                        row_left[row] = row_left[row].min(col);
+                        row_right[row] = row_right[row].max(col + 1);
+                    }
+                }
+                if dirty_rows[row] {
+                    let start = row_left[row];
+                    let end = row_right[row];
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            src[start..end].as_ptr(),
+                            dst_base.add(row * METAL_COLS as usize + start),
+                            end - start,
+                        );
+                    }
+                    stats.upload_bytes += (end - start) * mem::size_of::<Cell>();
+                }
+            }
+        }
+        if let Some((row, col, _)) = previous_cursor {
+            let cell =
+                unsafe { &mut *dst_base.add(row as usize * METAL_COLS as usize + col as usize) };
+            cell.flags = CellFlags::from_bits_retain(cell.flags.bits() & !TILED_SKIP_FLAG);
+        }
+        let cell = unsafe {
+            &mut *dst_base
+                .add(grid.cursor_row as usize * METAL_COLS as usize + grid.cursor_col as usize)
+        };
+        cell.flags = CellFlags::from_bits_retain(cell.flags.bits() & !TILED_SKIP_FLAG);
+        stats.upload_time += upload_start.elapsed();
+
+        let active_base = self.active_cell_buffer.contents().as_ptr() as *mut u32;
+        let active_cells = unsafe {
+            std::slice::from_raw_parts(dst_base, METAL_ROWS as usize * METAL_COLS as usize)
+        };
+        let mut active_count = 0usize;
+        for (index, cell) in active_cells.iter().enumerate() {
+            if cell.flags.bits() & TILED_SKIP_FLAG == 0 {
+                unsafe {
+                    active_base.add(active_count).write(index as u32);
+                }
+                active_count += 1;
+            }
+        }
+        if active_count == 0 {
+            return;
+        }
+
+        let regions = [TiledDamageRegion {
+            top: 0,
+            bottom: METAL_ROWS as usize,
+            left: 0,
+            right: METAL_COLS as usize,
+        }];
+        let region_count = 1;
+        stats.active_cells += active_count as u64;
+        if !force_full {
+            stats.dispatch_pixels +=
+                active_count as u64 * self.cell_width as u64 * self.cell_height as u64;
+        };
+
+        let encode_start = Instant::now();
+        let command_buffer = self
+            .core
+            .command_queue()
+            .commandBuffer()
+            .expect("failed to create tiled damage command buffer");
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .expect("failed to create tiled damage encoder");
+        if force_full {
+            encoder.setComputePipelineState(self.core.tiled_pipeline());
+        } else {
+            encoder.setComputePipelineState(self.core.tiled_list_pipeline());
+        }
+        unsafe {
+            encoder.setTexture_atIndex(Some(&self.output), 0);
+            encoder.setTexture_atIndex(Some(&self.atlas.texture), 1);
+            encoder.setBuffer_offset_atIndex(Some(&self.cell_buffer), 0, 0);
+            encoder.setBuffer_offset_atIndex(Some(self.core.palette_buffer()), 0, 1);
+            if !force_full {
+                encoder.setBuffer_offset_atIndex(Some(&self.active_cell_buffer), 0, 3);
+            }
+        }
+
+        let uniform = self.uniform_buffer.contents().as_ptr() as *mut Uniforms;
+        for (index, region) in regions[..region_count].iter().enumerate() {
+            unsafe {
+                uniform.add(index).write(Uniforms {
+                    cols: METAL_COLS as u32,
+                    rows: METAL_ROWS as u32,
+                    cell_width: self.cell_width,
+                    cell_height: self.cell_height,
+                    atlas_cell_width: self.cell_width,
+                    atlas_cell_height: self.cell_height,
+                    padding: self.padding,
+                    padding_top: self.padding,
+                    cursor_row: grid.cursor_row as u32,
+                    cursor_col: grid.cursor_col as u32,
+                    cursor_visible: u32::from(grid.mode.contains(TermMode::CURSOR_VISIBLE)),
+                    frame_bg: config::DEFAULT_BG,
+                    damage_origin_x: 0,
+                    damage_origin_y: 0,
+                });
+            }
+            unsafe {
+                encoder.setBuffer_offset_atIndex(
+                    Some(&self.uniform_buffer),
+                    index * mem::size_of::<Uniforms>(),
+                    2,
+                );
+            }
+            encoder.dispatchThreadgroups_threadsPerThreadgroup(
+                if force_full {
+                    MTLSize {
+                        width: region.right - region.left,
+                        height: region.bottom - region.top,
+                        depth: 1,
+                    }
+                } else {
+                    MTLSize {
+                        width: active_count,
+                        height: 1,
+                        depth: 1,
+                    }
+                },
+                MTLSize {
+                    width: self.cell_width as usize,
+                    height: self.cell_height as usize,
+                    depth: 1,
+                },
+            );
+            if force_full {
+                stats.dispatch_pixels += (region.right - region.left) as u64
+                    * (region.bottom - region.top) as u64
+                    * self.cell_width as u64
+                    * self.cell_height as u64;
+            }
+        }
+        encoder.endEncoding();
+        stats.encode_time += encode_start.elapsed();
+
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+        assert!(
+            command_buffer.error().is_none(),
+            "tiled damage command buffer failed"
+        );
+        let gpu_start = command_buffer.GPUStartTime();
+        let gpu_end = command_buffer.GPUEndTime();
+        if gpu_end > gpu_start && gpu_start > 0.0 {
+            stats.gpu_time_ns += (gpu_end - gpu_start) * 1_000_000_000.0;
+            stats.gpu_timed_frames += 1;
+        }
+        stats.frames += 1;
+        stats.damage_regions += region_count;
+    }
 }
 
 fn load_metal_frames(path: &str, ascii_table: &[[u8; 2]; 128]) -> Vec<MetalFrame> {
@@ -3675,6 +3905,7 @@ enum ReplayRenderMode {
     Full,
     Damage,
     Scroll,
+    TiledDamage,
 }
 
 impl MetalReplay {
@@ -3723,6 +3954,15 @@ impl MetalReplay {
             baseline,
             data,
             ReplayRenderMode::Scroll,
+            None::<fn(usize, &MetalBaseline)>,
+        )
+    }
+
+    fn run_tiled_damage(&mut self, baseline: &mut MetalBaseline, data: &[u8]) -> MetalRunStats {
+        self.run_mode(
+            baseline,
+            data,
+            ReplayRenderMode::TiledDamage,
             None::<fn(usize, &MetalBaseline)>,
         )
     }
@@ -3808,6 +4048,15 @@ impl MetalReplay {
                             );
                             rendered = true;
                         }
+                    }
+                    ReplayRenderMode::TiledDamage => {
+                        baseline.run_grid_frame_tiled_damage(
+                            &self.grid,
+                            previous_cursor,
+                            first_frame,
+                            &mut stats,
+                        );
+                        rendered = true;
                     }
                 }
                 if rendered && let Some(ref mut observer) = observer {
@@ -3936,6 +4185,42 @@ fn validate_metal_damage(data: &[u8], ascii_table: [[u8; 2]; 128]) {
     );
 }
 
+fn validate_metal_tiled_damage(data: &[u8], ascii_table: [[u8; 2]; 128]) {
+    let mut full_baseline = MetalBaseline::new();
+    let mut retained_baseline = MetalBaseline::new();
+    let mut full_replay = MetalReplay::new(ascii_table);
+    let mut retained_replay = MetalReplay::new(ascii_table);
+    let mut full_hashes = Vec::new();
+    let mut retained_hashes = Vec::new();
+
+    full_replay.run_mode(
+        &mut full_baseline,
+        data,
+        ReplayRenderMode::Full,
+        Some(|_, baseline: &MetalBaseline| {
+            full_hashes.push(pixel_hash(&baseline.readback()));
+        }),
+    );
+    retained_replay.run_mode(
+        &mut retained_baseline,
+        data,
+        ReplayRenderMode::TiledDamage,
+        Some(|_, baseline: &MetalBaseline| {
+            retained_hashes.push(pixel_hash(&baseline.readback()));
+        }),
+    );
+
+    assert_eq!(
+        full_hashes, retained_hashes,
+        "tiled retained replay pixels diverged"
+    );
+    assert_eq!(
+        full_baseline.readback(),
+        retained_baseline.readback(),
+        "tiled retained replay final pixels diverged"
+    );
+}
+
 fn validate_metal_tiled(frames: &[MetalFrame]) {
     let mut full_baseline = MetalBaseline::new();
     let mut tiled_baseline = MetalBaseline::new();
@@ -4037,6 +4322,43 @@ fn print_metal_damage(
         stats.replay_chunks,
         stats.frames,
         stats.damage_regions,
+        stats.input_bytes,
+        stats.dispatch_pixels,
+        stats.upload_bytes,
+    );
+}
+
+fn print_metal_tiled_damage(
+    label: &str,
+    path: &str,
+    baseline: &mut MetalBaseline,
+    replay: &mut MetalReplay,
+    data: &[u8],
+) {
+    let _ = replay.run_tiled_damage(baseline, data);
+    reset_alloc_counters();
+    let stats = replay.run_tiled_damage(baseline, data);
+    let allocs = alloc_count();
+    let allocated_bytes = alloc_bytes();
+    let gpu_ms = stats.gpu_time_ns / 1_000_000.0;
+    let wall_ms = stats.wall_time.as_secs_f64() * 1000.0;
+    let upload_ms = stats.upload_time.as_secs_f64() * 1000.0;
+    let encode_ms = stats.encode_time.as_secs_f64() * 1000.0;
+    let gpu_timing = if stats.gpu_timed_frames == stats.frames {
+        "valid"
+    } else {
+        "partial"
+    };
+    eprintln!(
+        "metal_tiled_damage label={label} path={path} rows={} cols={} physical={}x{} chunks={} frames={} damage_regions={} active_cells={} input_bytes={} dispatch_pixels={} upload_bytes={} upload_ms={upload_ms:.3} encode_ms={encode_ms:.3} wall_ms={wall_ms:.3} gpu_ms={gpu_ms:.3} allocs={allocs} allocated_bytes={allocated_bytes} gpu_timing={gpu_timing}",
+        METAL_ROWS,
+        METAL_COLS,
+        METAL_PHYSICAL_WIDTH,
+        METAL_PHYSICAL_HEIGHT,
+        stats.replay_chunks,
+        stats.frames,
+        stats.damage_regions,
+        stats.active_cells,
         stats.input_bytes,
         stats.dispatch_pixels,
         stats.upload_bytes,
@@ -4166,6 +4488,42 @@ fn bench_metal_tiled(c: &mut Criterion) {
                 let mut elapsed = Duration::ZERO;
                 for _ in 0..iters {
                     elapsed += baseline.run_tiled(&frames).wall_time;
+                }
+                elapsed
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_metal_tiled_damage(c: &mut Criterion) {
+    let mut group = c.benchmark_group("metal_tiled_damage");
+    let mut baseline = MetalBaseline::new();
+    let ascii_table = baseline.ascii_table();
+    let mut replay = MetalReplay::new(ascii_table);
+
+    for (label, path) in [
+        ("tmux_less_both", "target/tmux-less-44x148-both.typescript"),
+        (
+            "tmux_less_sparse",
+            "target/tmux-less-44x148-sparse.typescript",
+        ),
+    ] {
+        let data = std::fs::read(path).unwrap_or_else(|error| {
+            panic!(
+                "failed to read {path}: {error}; run scripts/record-tmux-less.sh both and sparse"
+            )
+        });
+        if label == "tmux_less_both" {
+            validate_metal_tiled_damage(&data, ascii_table);
+        }
+        print_metal_tiled_damage(label, path, &mut baseline, &mut replay, &data);
+        group.throughput(Throughput::Bytes(data.len() as u64));
+        group.bench_function(BenchmarkId::new(label, "44x148"), |b| {
+            b.iter_custom(|iters| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iters {
+                    elapsed += replay.run_tiled_damage(&mut baseline, &data).wall_time;
                 }
                 elapsed
             });
@@ -4335,6 +4693,7 @@ criterion_group! {
         bench_process_rss,
         bench_metal_baseline,
         bench_metal_tiled,
+        bench_metal_tiled_damage,
         bench_metal_replay,
         bench_metal_damage,
         bench_metal_scroll,

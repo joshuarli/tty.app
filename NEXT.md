@@ -415,11 +415,49 @@ production integration experiment. Keep the full-frame kernel as the fallback
 until the remaining drawable, resize, double-buffering, synchronized output,
 scrollback, selection, cursor, and manual visual gates pass.
 
-## Phase 6: Integrate tiled compute only if Phase 5 wins
+## Phase 5.5: Prototype retained masked tiled rendering
 
-The headless tiled-compute gate passes. Generic damage and scroll-aware retained
-rendering remain benchmark infrastructure only. The production switch is still
-guarded and defaults to the full-frame compute path.
+The full tiled path still shades every cell on every frame. This prototype
+retains the output surface, compares dirty rows against the resident GPU cell
+state, and builds a compact list of cells whose content or cursor overlay must
+be redrawn. One Metal dispatch processes that active-cell list; unchanged cells
+are neither uploaded nor shaded. The first frame is still a complete tiled
+render, and the retained surface is not yet connected to `MetalRenderer`.
+
+The replay matched the full-frame reference pixel-for-pixel after every frame
+for both tmux/less traces. On the Apple M1 at 148×44 and 2880×1800, the latest
+same-run sample was:
+
+```text
+metal_tiled_damage tmux_less_both:
+  13 frames, 22,899 active cells of 84,656 total
+  183,120 uploaded bytes, 16,533,078 active-cell pixels
+  GPU: 10.689 ms versus 18.285 ms full-frame
+
+metal_tiled_damage tmux_less_sparse:
+  8 frames, 16,731 active cells of 52,096 total
+  133,800 uploaded bytes, 12,079,782 active-cell pixels
+  GPU: 8.141 ms versus 11.219 ms full-frame
+```
+
+The result is promising but below the hoped-for 50–70% reduction on this
+short workload: roughly 42% for the two-pane trace and 27% for sparse in this
+sample. GPU timestamps vary materially between runs. CPU-side cell comparison
+and compaction are also additional work, although the retained prototype uses
+no per-frame heap allocation in its warmed benchmark path.
+
+Decision: keep the compact-list retained path as headless benchmark
+infrastructure, but do not integrate it onscreen yet. A longer replay and a
+scroll-aware retained path are the next ways to test whether the larger target
+is real. If repeated measurements stay below the gate, retain the simpler
+full-frame tiled renderer.
+
+## Phase 6: Integrate tiled compute only if the headless gates win
+
+The headless full tiled-compute gate passes. The retained masked prototype does
+not yet meet the 50–70% reduction target, so generic damage and scroll-aware
+retained rendering remain benchmark infrastructure only. The production switch
+is still guarded and defaults to the full-frame compute path.
 
 The guarded integration is selected with `TTY_TILED_RENDER=1` when launching
 the app. It preserves the current double-buffering and GPU-in-flight behavior,
@@ -450,7 +488,8 @@ current renderer as the production path.
 Only after the Phase 4 through Phase 6 experiments establish a real bottleneck:
 
 - If CPU upload remains significant, make scrollback GPU-resident or paged.
-- If GPU compute remains significant for sparse updates, improve damage-region batching.
+- If GPU compute remains significant for sparse updates, improve retained cell
+  compaction or GPU-resident damage masks.
 - If input latency suffers under sustained PTY output, consider an SPSC parser thread.
 - If fidelity becomes the priority, add a style table so truecolor can be supported without widening `Cell`.
 
