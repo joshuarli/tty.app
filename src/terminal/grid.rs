@@ -36,6 +36,15 @@ pub struct SavedCursor {
     pub charset_g1: u8,
 }
 
+/// A pending logical scroll that a retained renderer may apply to its surface.
+/// Positive lines move content toward the top; negative lines move it down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScrollHint {
+    pub top: u16,
+    pub bottom: u16,
+    pub lines: i16,
+}
+
 pub struct Grid {
     pub cells: Vec<Cell>,
     /// Parallel char store for non-BMP codepoints. Only consulted when
@@ -49,6 +58,8 @@ pub struct Grid {
     pub cols: u16,
     pub rows: u16,
     pub dirty: BitVec,
+    pub scroll_dirty: BitVec,
+    pub scroll_hint: Option<ScrollHint>,
 
     /// Ring buffer offset: physical row for logical row 0.
     /// Enables O(n*cols) full-screen scroll instead of O(rows*cols) memmove.
@@ -124,6 +135,8 @@ impl Grid {
             cols,
             rows,
             dirty,
+            scroll_dirty: bitvec![0; rows as usize],
+            scroll_hint: None,
             ring_offset: 0,
             cursor_row: 0,
             cursor_col: 0,
@@ -147,6 +160,45 @@ impl Grid {
             alt_ring_offset: 0,
             main_cursor: SavedCursor::default(),
         }
+    }
+
+    /// Reset terminal state for a replay while retaining cell and row storage.
+    #[allow(dead_code)]
+    pub fn reset(&mut self) {
+        self.cells.fill(Cell::default());
+        self.chars.fill(' ');
+        self.has_non_bmp = false;
+        self.dirty.fill(true);
+        self.scroll_dirty.fill(false);
+        self.scroll_hint = None;
+        self.ring_offset = 0;
+
+        self.cursor_row = 0;
+        self.cursor_col = 0;
+        self.cursor_pending_wrap = false;
+        self.attr = Cell {
+            codepoint: b' ' as u16,
+            ..Cell::default()
+        };
+        self.mode = TermMode::AUTO_WRAP | TermMode::CURSOR_VISIBLE | TermMode::BRACKETED_PASTE;
+        self.scroll_top = 0;
+        self.scroll_bottom = self.rows.saturating_sub(1);
+        self.charset_g0 = 0;
+        self.charset_g1 = 0;
+        self.active_charset = 0;
+        self.tab_stops.fill(false);
+        for i in (8..self.cols as usize).step_by(8) {
+            self.tab_stops.set(i, true);
+        }
+        self.saved_cursor = SavedCursor::default();
+        self.last_char = ' ';
+        self.last_atlas = [0, 0];
+        self.sync_start = None;
+
+        self.alt_cells.clear();
+        self.alt_chars.clear();
+        self.alt_ring_offset = 0;
+        self.main_cursor = SavedCursor::default();
     }
 
     /// Set the ASCII atlas lookup table (called once after atlas preload).
@@ -197,15 +249,53 @@ impl Grid {
     pub fn mark_dirty(&mut self, row: u16) {
         if (row as usize) < self.dirty.len() {
             self.dirty.set(row as usize, true);
+            self.scroll_dirty.set(row as usize, false);
+        }
+    }
+
+    #[inline]
+    fn mark_scroll_dirty(&mut self, row: u16) {
+        if (row as usize) < self.dirty.len() {
+            self.dirty.set(row as usize, true);
+            self.scroll_dirty.set(row as usize, true);
         }
     }
 
     pub fn mark_all_dirty(&mut self) {
         self.dirty.fill(true);
+        self.scroll_dirty.fill(false);
+        self.scroll_hint = None;
     }
 
     pub fn clear_dirty(&mut self) {
         self.dirty.fill(false);
+        self.scroll_dirty.fill(false);
+    }
+
+    /// Take the accumulated scroll hint, if it is still safe to apply.
+    pub fn take_scroll_hint(&mut self) -> Option<ScrollHint> {
+        self.scroll_hint.take()
+    }
+
+    fn record_scroll_hint(&mut self, top: u16, bottom: u16, lines: i16) {
+        if lines == 0 {
+            return;
+        }
+        self.scroll_hint = match self.scroll_hint {
+            None => Some(ScrollHint { top, bottom, lines }),
+            Some(previous)
+                if previous.top == top
+                    && previous.bottom == bottom
+                    && previous.lines.signum() == lines.signum() =>
+            {
+                Some(ScrollHint {
+                    top,
+                    bottom,
+                    lines: previous.lines.saturating_add(lines),
+                })
+            }
+            Some(_) => None,
+        };
     }
 
     #[inline]
@@ -239,6 +329,7 @@ impl Grid {
     /// If scrollback is provided and scroll_top == 0, evicted rows are pushed directly.
     pub fn scroll_up_into(&mut self, n: u16, scrollback: Option<&mut Scrollback>) {
         let n = n.min(self.scroll_bottom - self.scroll_top + 1);
+        self.record_scroll_hint(self.scroll_top, self.scroll_bottom, n as i16);
         let cols = self.cols as usize;
 
         // Push evicted rows directly into scrollback (no intermediate Vec)
@@ -291,7 +382,7 @@ impl Grid {
 
         // Mark affected rows dirty
         for row in self.scroll_top..=self.scroll_bottom {
-            self.mark_dirty(row);
+            self.mark_scroll_dirty(row);
         }
     }
 
@@ -304,6 +395,7 @@ impl Grid {
     /// New lines at the top are cleared.
     pub fn scroll_down(&mut self, n: u16) {
         let n = n.min(self.scroll_bottom - self.scroll_top + 1);
+        self.record_scroll_hint(self.scroll_top, self.scroll_bottom, -(n as i16));
         let cols = self.cols as usize;
 
         if self.scroll_top == 0 && self.scroll_bottom == self.rows - 1 {
@@ -338,7 +430,7 @@ impl Grid {
         }
 
         for row in self.scroll_top..=self.scroll_bottom {
-            self.mark_dirty(row);
+            self.mark_scroll_dirty(row);
         }
     }
 

@@ -24,6 +24,8 @@ struct Uniforms {
     uint cursor_col;
     uint cursor_visible;
     uint frame_bg;       // 0x00RRGGBB default background
+    uint damage_origin_x;
+    uint damage_origin_y;
 };
 
 // Cell flag bits
@@ -215,8 +217,9 @@ kernel void render(
     device const CellData*          cells      [[buffer(0)]],
     device const half4*             palette    [[buffer(1)]],
     constant Uniforms&              uni        [[buffer(2)]],
-    uint2 gid [[thread_position_in_grid]]
+    uint2 local_gid [[thread_position_in_grid]]
 ) {
+    uint2 gid = local_gid + uint2(uni.damage_origin_x, uni.damage_origin_y);
     uint out_w = output.get_width();
     uint out_h = output.get_height();
     if (gid.x >= out_w || gid.y >= out_h) return;
@@ -335,4 +338,25 @@ kernel void render(
     }
 
     output.write(color, gid);
+}
+
+struct ScrollCopyUniforms {
+    uint source_y;
+    uint destination_y;
+    uint width;
+    uint height;
+};
+
+kernel void scroll_copy(
+    texture2d<half, access::read> source [[texture(0)]],
+    texture2d<half, access::write> destination [[texture(1)]],
+    constant ScrollCopyUniforms& uni [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= uni.width || gid.y >= uni.height) return;
+
+    destination.write(
+        source.read(uint2(gid.x, uni.source_y + gid.y)),
+        uint2(gid.x, uni.destination_y + gid.y)
+    );
 }

@@ -19,6 +19,11 @@ impl Utf8Assembler {
         }
     }
 
+    #[allow(dead_code)]
+    pub fn reset(&mut self) {
+        self.len = 0;
+    }
+
     /// Returns true if there are buffered bytes awaiting completion.
     pub fn has_pending(&self) -> bool {
         self.len > 0

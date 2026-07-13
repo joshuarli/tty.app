@@ -32,6 +32,13 @@ impl Parser {
         }
     }
 
+    /// Reset parser state while retaining buffers allocated by prior input.
+    #[allow(dead_code)]
+    pub fn reset(&mut self) {
+        self.state_machine.reset();
+        self.utf8.reset();
+    }
+
     /// Parse a chunk of bytes, calling methods on the performer.
     pub fn parse<P: Perform>(&mut self, data: &[u8], performer: &mut P) {
         let len = data.len();

@@ -1,6 +1,4 @@
-use std::ffi::c_void;
 use std::mem;
-use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -10,11 +8,11 @@ use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
 use objc2_app_kit::NSView;
 use objc2_core_foundation::CGSize;
-use objc2_foundation::NSString;
 use objc2_metal::*;
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
 use crate::config;
+use crate::renderer::core::MetalCore;
 use crate::renderer_trait::Renderer;
 use crate::terminal::cell::Cell;
 use crate::terminal::grid::Grid;
@@ -36,6 +34,8 @@ pub struct Uniforms {
     pub cursor_col: u32,
     pub cursor_visible: u32,
     pub frame_bg: u32,
+    pub damage_origin_x: u32,
+    pub damage_origin_y: u32,
 }
 
 const CELL_SIZE: usize = mem::size_of::<Cell>();
@@ -45,9 +45,7 @@ const _: () = assert!(CELL_SIZE == 8, "Cell must be 8 bytes for GPU layout");
 const NUM_BUFFERS: usize = 2;
 
 pub struct MetalRenderer {
-    device: Retained<ProtocolObject<dyn MTLDevice>>,
-    command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
-    pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    core: MetalCore,
     layer: Retained<CAMetalLayer>,
 
     // Double-buffered cell data — CPU writes to one while GPU reads the other
@@ -56,9 +54,6 @@ pub struct MetalRenderer {
     buffer_ready: [Arc<AtomicBool>; NUM_BUFFERS],
     // Per-buffer dirty row tracking: each dirty row must be copied to BOTH buffers
     pending: [BitVec; NUM_BUFFERS],
-
-    // Palette buffer (256 × half4)
-    palette_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
 
     // Uniform buffer
     uniform_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
@@ -96,14 +91,12 @@ impl MetalRenderer {
         cell_height: u32,
         notch_px: u32,
     ) -> Self {
-        let device = MTLCreateSystemDefaultDevice().expect("no Metal device found");
-        let command_queue = device
-            .newCommandQueue()
-            .expect("failed to create Metal command queue");
+        let core = MetalCore::new();
+        let device = core.device();
 
         // Set up CAMetalLayer
         let layer = CAMetalLayer::new();
-        layer.setDevice(Some(&device));
+        layer.setDevice(Some(device));
         layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
         layer.setPresentsWithTransaction(true);
         layer.setDisplaySyncEnabled(true);
@@ -124,24 +117,7 @@ impl MetalRenderer {
 
         layer.setDrawableSize(CGSize::new(width as f64, height as f64));
 
-        // Compile shader from source at runtime
-        let shader_source = include_str!("shader.metal");
-        let compile_options = MTLCompileOptions::new();
-        compile_options.setMathMode(MTLMathMode::Fast);
-        let library = device
-            .newLibraryWithSource_options_error(
-                &NSString::from_str(shader_source),
-                Some(&compile_options),
-            )
-            .expect("failed to compile Metal shader");
-        let function = library
-            .newFunctionWithName(&NSString::from_str("render"))
-            .expect("shader function 'render' not found");
-        let pipeline = device
-            .newComputePipelineStateWithFunction_error(&function)
-            .expect("failed to create compute pipeline");
-
-        // Double-buffered cell data (Cell is the GPU format — no conversion needed)
+        // Double-buffered cell data (Cell matches the compute buffer ABI)
         let buffer_size = (cols as usize * rows as usize * CELL_SIZE) as u64;
         let cell_buffers = [
             device
@@ -161,18 +137,6 @@ impl MetalRenderer {
             Arc::new(AtomicBool::new(true)),
             Arc::new(AtomicBool::new(true)),
         ];
-
-        // Palette buffer (256 × half4 = 256 × 4 × 2 bytes)
-        let palette_data = Self::build_palette_buffer();
-        let palette_buffer = unsafe {
-            device
-                .newBufferWithBytes_length_options(
-                    NonNull::new(palette_data.as_ptr() as *mut c_void).unwrap(),
-                    (256 * 4 * mem::size_of::<u16>()) as usize,
-                    MTLResourceOptions::StorageModeShared,
-                )
-                .expect("failed to create palette buffer")
-        };
 
         // Uniform buffer
         let uniform_buffer = device
@@ -198,15 +162,12 @@ impl MetalRenderer {
             .expect("failed to create atlas texture");
 
         MetalRenderer {
-            device,
-            command_queue,
-            pipeline,
+            core,
             layer,
             cell_buffers,
             current_buffer: 0,
             buffer_ready,
             pending: [bitvec![1; rows as usize], bitvec![1; rows as usize]],
-            palette_buffer,
             uniform_buffer,
             atlas_texture,
             cols,
@@ -222,35 +183,6 @@ impl MetalRenderer {
         }
     }
 
-    /// Convert f32 to IEEE 754 half-precision (f16) stored as u16.
-    fn f32_to_f16(val: f32) -> u16 {
-        let bits = val.to_bits();
-        let sign = (bits >> 16) & 0x8000;
-        let exp = ((bits >> 23) & 0xFF) as i32 - 127 + 15;
-        let frac = bits & 0x007F_FFFF;
-        if exp <= 0 {
-            0 // flush subnormals to zero — palette values are [0,1]
-        } else if exp >= 31 {
-            (sign | 0x7C00) as u16 // infinity
-        } else {
-            (sign | ((exp as u32) << 10) | (frac >> 13)) as u16
-        }
-    }
-
-    fn build_palette_buffer() -> Vec<u16> {
-        let mut data = Vec::with_capacity(256 * 4);
-        for &rgb in config::PALETTE.iter() {
-            let r = ((rgb >> 16) & 0xFF) as f32 / 255.0;
-            let g = ((rgb >> 8) & 0xFF) as f32 / 255.0;
-            let b = (rgb & 0xFF) as f32 / 255.0;
-            data.push(Self::f32_to_f16(r));
-            data.push(Self::f32_to_f16(g));
-            data.push(Self::f32_to_f16(b));
-            data.push(Self::f32_to_f16(1.0));
-        }
-        data
-    }
-
     /// Render a frame. Only dispatches GPU work if content changed.
     /// Returns true if GPU work was dispatched, false if the frame was idle.
     /// Cell data is memcpy'd directly — Cell IS the GPU format.
@@ -261,6 +193,10 @@ impl MetalRenderer {
         viewport_offset: usize,
         cursor_visible: bool,
     ) -> bool {
+        // The current production path does not retain a framebuffer, so consume
+        // semantic scroll hints rather than letting them survive into a later frame.
+        let _ = grid.take_scroll_hint();
+
         // Merge grid dirty rows into both per-buffer pending bitsets
         let cur = self.current_buffer;
         let mut had_new_dirty = false;
@@ -361,6 +297,8 @@ impl MetalRenderer {
                 cursor_col: grid.cursor_col as u32,
                 cursor_visible: if cursor_visible { 1 } else { 0 },
                 frame_bg: config::DEFAULT_BG,
+                damage_origin_x: 0,
+                damage_origin_y: 0,
             };
             // SAFETY: uniform_buffer was allocated with size_of::<Uniforms>() bytes
             // of shared storage. contents() returns a valid pointer to that region.
@@ -371,14 +309,15 @@ impl MetalRenderer {
             }
 
             let command_buffer = self
-                .command_queue
+                .core
+                .command_queue()
                 .commandBuffer()
                 .expect("failed to create command buffer");
             let encoder = command_buffer
                 .computeCommandEncoder()
                 .expect("failed to create compute command encoder");
 
-            encoder.setComputePipelineState(&self.pipeline);
+            encoder.setComputePipelineState(self.core.pipeline());
             unsafe {
                 encoder.setTexture_atIndex(Some(&texture), 0);
                 encoder.setTexture_atIndex(Some(&self.atlas_texture), 1);
@@ -387,7 +326,7 @@ impl MetalRenderer {
                     0,
                     0,
                 );
-                encoder.setBuffer_offset_atIndex(Some(&self.palette_buffer), 0, 1);
+                encoder.setBuffer_offset_atIndex(Some(self.core.palette_buffer()), 0, 1);
                 encoder.setBuffer_offset_atIndex(Some(&self.uniform_buffer), 0, 2);
             }
 
@@ -461,14 +400,16 @@ impl MetalRenderer {
         // Reallocate both cell buffers
         let buffer_size = (self.cols as usize * self.rows as usize * CELL_SIZE) as u64;
         self.cell_buffers = [
-            self.device
-                .newBufferWithLength_options(
+        self.core
+            .device()
+            .newBufferWithLength_options(
                     buffer_size as usize,
                     MTLResourceOptions::StorageModeShared,
                 )
                 .expect("failed to create cell buffer"),
-            self.device
-                .newBufferWithLength_options(
+        self.core
+            .device()
+            .newBufferWithLength_options(
                     buffer_size as usize,
                     MTLResourceOptions::StorageModeShared,
                 )
@@ -483,7 +424,7 @@ impl MetalRenderer {
     }
 
     pub fn device(&self) -> &ProtocolObject<dyn MTLDevice> {
-        &self.device
+        self.core.device()
     }
 }
 

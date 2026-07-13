@@ -1,4 +1,5 @@
 pub mod atlas;
+pub mod core;
 pub mod font;
 pub mod metal;
 

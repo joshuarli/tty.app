@@ -41,6 +41,21 @@ impl StateMachine {
         }
     }
 
+    /// Return to the ground state without releasing OSC/DCS buffers.
+    #[allow(dead_code)]
+    pub fn reset(&mut self) {
+        self.state = GROUND;
+        self.intermediates = [0; MAX_INTERMEDIATES];
+        self.intermediate_count = 0;
+        self.params = [0; MAX_PARAMS];
+        self.param_count = 0;
+        self.current_param = 0;
+        self.osc_data.clear();
+        self.dcs_data.clear();
+        self.dcs_final = 0;
+        self.ignoring = false;
+    }
+
     #[inline]
     pub fn is_ground(&self) -> bool {
         self.state == GROUND

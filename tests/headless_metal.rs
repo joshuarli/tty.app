@@ -4,10 +4,10 @@ use std::ptr::NonNull;
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_foundation::NSString;
 use objc2_metal::*;
 
 use tty::config;
+use tty::renderer::core::MetalCore;
 use tty::terminal::cell::{Cell, CellFlags};
 
 #[repr(C)]
@@ -24,35 +24,17 @@ struct ShaderUniforms {
     cursor_col: u32,
     cursor_visible: u32,
     frame_bg: u32,
+    damage_origin_x: u32,
+    damage_origin_y: u32,
 }
 
 struct Ctx {
-    device: Retained<ProtocolObject<dyn MTLDevice>>,
-    queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
-    pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    core: MetalCore,
 }
 
 fn setup() -> Ctx {
-    let device = MTLCreateSystemDefaultDevice().expect("no Metal device found");
-    let queue = device
-        .newCommandQueue()
-        .expect("failed to create command queue");
-    let src = include_str!("../src/renderer/shader.metal");
-    let opts = MTLCompileOptions::new();
-    opts.setMathMode(MTLMathMode::Fast);
-    let lib = device
-        .newLibraryWithSource_options_error(&NSString::from_str(src), Some(&opts))
-        .expect("shader compilation failed");
-    let func = lib
-        .newFunctionWithName(&NSString::from_str("render"))
-        .expect("shader entry point 'render' not found");
-    let pipeline = device
-        .newComputePipelineStateWithFunction_error(&func)
-        .expect("compute pipeline creation failed");
     Ctx {
-        device,
-        queue,
-        pipeline,
+        core: MetalCore::new(),
     }
 }
 
@@ -151,7 +133,8 @@ fn render_pixels_with_atlas(
     out_desc.setUsage(MTLTextureUsage::ShaderWrite);
     out_desc.setStorageMode(MTLStorageMode::Shared);
     let output = ctx
-        .device
+        .core
+        .device()
         .newTextureWithDescriptor(&out_desc)
         .expect("failed to create output texture");
 
@@ -167,7 +150,8 @@ fn render_pixels_with_atlas(
     atlas_desc.setUsage(MTLTextureUsage::ShaderRead);
     atlas_desc.setStorageMode(MTLStorageMode::Shared);
     let atlas = ctx
-        .device
+        .core
+        .device()
         .newTextureWithDescriptor(&atlas_desc)
         .expect("failed to create atlas texture");
     let zero = vec![0u8; 256 * 256];
@@ -194,7 +178,7 @@ fn render_pixels_with_atlas(
     // Cell data buffer (Cell IS the GPU format)
     let cell_buf = unsafe {
         buffer_with_data(
-            &ctx.device,
+            ctx.core.device(),
             cells.as_ptr() as *const c_void,
             std::mem::size_of_val(cells),
         )
@@ -204,7 +188,7 @@ fn render_pixels_with_atlas(
     let pal_data = build_palette_data();
     let pal_buf = unsafe {
         buffer_with_data(
-            &ctx.device,
+            ctx.core.device(),
             pal_data.as_ptr() as *const c_void,
             pal_data.len() * 2,
         )
@@ -213,17 +197,21 @@ fn render_pixels_with_atlas(
     // Uniform buffer
     let uni_buf = unsafe {
         buffer_with_data(
-            &ctx.device,
+            ctx.core.device(),
             uniforms as *const _ as *const c_void,
             size_of::<ShaderUniforms>(),
         )
     };
 
-    let cmd_buf = ctx.queue.commandBuffer().expect("command buffer");
+    let cmd_buf = ctx
+        .core
+        .command_queue()
+        .commandBuffer()
+        .expect("command buffer");
     let enc = cmd_buf
         .computeCommandEncoder()
         .expect("compute command encoder");
-    enc.setComputePipelineState(&ctx.pipeline);
+    enc.setComputePipelineState(ctx.core.pipeline());
     unsafe {
         enc.setTexture_atIndex(Some(&output), 0);
         enc.setTexture_atIndex(Some(&atlas), 1);
@@ -292,6 +280,8 @@ fn single_cell_test(
         cursor_col,
         cursor_visible,
         frame_bg: 0,
+        damage_origin_x: 0,
+        damage_origin_y: 0,
     };
     let pixels = render_pixels(&ctx, &[cell], &uniforms, out_w, out_h);
     (pixels, out_w, out_h)
@@ -373,6 +363,8 @@ fn atlas_glyph_contributes_foreground_pixels() {
         cursor_col: 0,
         cursor_visible: 0,
         frame_bg: 0,
+        damage_origin_x: 0,
+        damage_origin_y: 0,
     };
     let pixels =
         render_pixels_with_atlas(&ctx, &[cell], &uniforms, 8, 16, Some((8, 0, 8, 16, 255)));
@@ -648,6 +640,8 @@ fn padding_is_background() {
         cursor_col: 0,
         cursor_visible: 0,
         frame_bg: 0, // black
+        damage_origin_x: 0,
+        damage_origin_y: 0,
     };
     let pixels = render_pixels(&ctx, &[cell], &uniforms, out_w, out_h);
     let expected_bg: (u8, u8, u8, u8) = (0, 0, 0, 255); // frame_bg = black
@@ -713,6 +707,8 @@ fn multiple_cells_have_correct_bg() {
         cursor_col: 0,
         cursor_visible: 0,
         frame_bg: 0,
+        damage_origin_x: 0,
+        damage_origin_y: 0,
     };
     let pixels = render_pixels(&ctx, &cells, &uniforms, out_w, out_h);
 

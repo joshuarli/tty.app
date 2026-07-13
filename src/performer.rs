@@ -11,12 +11,31 @@ use crate::terminal::scrollback::Scrollback;
 use crate::unicode::{is_wide, is_zero_width};
 
 /// The performer that bridges parser actions to grid mutations.
-pub(crate) struct TermPerformer<'a> {
+pub struct TermPerformer<'a> {
     pub(crate) grid: &'a mut Grid,
     pub(crate) scrollback: &'a mut Scrollback,
     pub(crate) atlas: &'a mut Atlas,
     pub(crate) rasterizer: &'a FontRasterizer,
     pub(crate) response_buf: &'a mut Vec<u8>,
+}
+
+impl<'a> TermPerformer<'a> {
+    #[allow(dead_code)]
+    pub fn new(
+        grid: &'a mut Grid,
+        scrollback: &'a mut Scrollback,
+        atlas: &'a mut Atlas,
+        rasterizer: &'a FontRasterizer,
+        response_buf: &'a mut Vec<u8>,
+    ) -> Self {
+        Self {
+            grid,
+            scrollback,
+            atlas,
+            rasterizer,
+            response_buf,
+        }
+    }
 }
 
 impl<'a> Perform for TermPerformer<'a> {

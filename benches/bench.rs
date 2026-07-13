@@ -4,16 +4,29 @@
 //! Run: `cargo bench`
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::ffi::c_void;
 use std::hint::black_box;
+use std::mem;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2_metal::*;
 
+use tty::config;
 use tty::parser::Parser;
 use tty::parser::perform::Perform;
 use tty::parser::simd::SimdScanner;
+use tty::performer::TermPerformer;
+use tty::renderer::atlas::Atlas;
+use tty::renderer::core::MetalCore;
+use tty::renderer::font::FontRasterizer;
+use tty::renderer::metal::Uniforms;
 use tty::terminal::cell::{Cell, CellFlags};
-use tty::terminal::grid::{Grid, TermMode};
+use tty::terminal::grid::{Grid, ScrollHint, TermMode};
 use tty::terminal::scrollback::Scrollback;
 
 // ---------------------------------------------------------------------------
@@ -2580,6 +2593,1531 @@ fn bench_process_rss(_c: &mut Criterion) {
     eprintln!("  [rss] process_max_rss: {}", human_bytes(rss));
 }
 
+const METAL_COLS: u16 = 148;
+const METAL_ROWS: u16 = 44;
+const METAL_PHYSICAL_WIDTH: u32 = 2880;
+const METAL_PHYSICAL_HEIGHT: u32 = 1800;
+const METAL_REPLAY_CHUNK: usize = 32 * 1024;
+const MAX_DAMAGE_REGIONS: usize = METAL_ROWS as usize + 1;
+
+struct MetalFrame {
+    cells: Vec<Cell>,
+    dirty_rows: Vec<usize>,
+    cursor_row: u32,
+    cursor_col: u32,
+    cursor_visible: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct DamageRegion {
+    origin_x: u32,
+    origin_y: u32,
+    width: u32,
+    height: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScrollCopyUniforms {
+    source_y: u32,
+    destination_y: u32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct MetalRunStats {
+    input_bytes: usize,
+    replay_chunks: usize,
+    frames: usize,
+    damage_regions: usize,
+    scroll_events: usize,
+    scroll_lines: usize,
+    scroll_copy_bytes: u64,
+    scroll_hints: usize,
+    scroll_hint_top: u16,
+    scroll_hint_bottom: u16,
+    parser_performer_grid_time: Duration,
+    row_prep_time: Duration,
+    dispatch_pixels: u64,
+    upload_bytes: usize,
+    upload_time: Duration,
+    encode_time: Duration,
+    wall_time: Duration,
+    gpu_time_ns: f64,
+    gpu_timed_frames: usize,
+}
+
+struct MetalBaseline {
+    core: MetalCore,
+    atlas: Atlas,
+    rasterizer: FontRasterizer,
+    output: Retained<ProtocolObject<dyn MTLTexture>>,
+    scroll_scratch: Retained<ProtocolObject<dyn MTLTexture>>,
+    scroll_scratch_valid: bool,
+    cell_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+    uniform_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+    scroll_uniform_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+    cell_width: u32,
+    cell_height: u32,
+    padding: u32,
+    row_bytes: usize,
+}
+
+impl MetalBaseline {
+    fn new() -> Self {
+        let core = MetalCore::new();
+        let rasterizer = FontRasterizer::new(config::FONT_FAMILY, config::FONT_SIZE, 2.0);
+        let cell_width = rasterizer.metrics.cell_width;
+        let cell_height = rasterizer.metrics.cell_height;
+        let mut atlas = Atlas::new(core.device(), cell_width, cell_height);
+        atlas.preload_ascii(&rasterizer);
+
+        let padding = (config::PADDING as f64 * 2.0) as u32;
+        assert!(
+            padding + METAL_COLS as u32 * cell_width <= METAL_PHYSICAL_WIDTH,
+            "canonical fullscreen width does not fit the configured grid"
+        );
+        assert!(
+            padding * 2 + METAL_ROWS as u32 * cell_height <= METAL_PHYSICAL_HEIGHT,
+            "canonical fullscreen height does not fit the configured grid"
+        );
+
+        let output_desc = unsafe {
+            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                MTLPixelFormat::BGRA8Unorm,
+                METAL_PHYSICAL_WIDTH as usize,
+                METAL_PHYSICAL_HEIGHT as usize,
+                false,
+            )
+        };
+        output_desc.setStorageMode(MTLStorageMode::Shared);
+        output_desc.setUsage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
+        let output = core
+            .device()
+            .newTextureWithDescriptor(&output_desc)
+            .expect("failed to create headless output texture");
+        let scroll_scratch = core
+            .device()
+            .newTextureWithDescriptor(&output_desc)
+            .expect("failed to create headless scroll scratch texture");
+
+        let row_bytes = METAL_COLS as usize * mem::size_of::<Cell>();
+        let cell_buffer = core
+            .device()
+            .newBufferWithLength_options(
+                row_bytes * METAL_ROWS as usize,
+                MTLResourceOptions::StorageModeShared,
+            )
+            .expect("failed to create headless cell buffer");
+        let uniform_buffer = core
+            .device()
+            .newBufferWithLength_options(
+                mem::size_of::<Uniforms>() * MAX_DAMAGE_REGIONS,
+                MTLResourceOptions::StorageModeShared,
+            )
+            .expect("failed to create headless uniform buffer");
+        let scroll_uniform_buffer = core
+            .device()
+            .newBufferWithLength_options(
+                mem::size_of::<ScrollCopyUniforms>(),
+                MTLResourceOptions::StorageModeShared,
+            )
+            .expect("failed to create headless scroll uniform buffer");
+
+        Self {
+            core,
+            atlas,
+            rasterizer,
+            output,
+            scroll_scratch,
+            scroll_scratch_valid: false,
+            cell_buffer,
+            uniform_buffer,
+            scroll_uniform_buffer,
+            cell_width,
+            cell_height,
+            padding,
+            row_bytes,
+        }
+    }
+
+    fn ascii_table(&self) -> [[u8; 2]; 128] {
+        self.atlas.ascii_table_raw()
+    }
+
+    fn resource_bytes(&self) -> usize {
+        METAL_PHYSICAL_WIDTH as usize * METAL_PHYSICAL_HEIGHT as usize * 4 * 2
+            + 2048 * 2048
+            + METAL_ROWS as usize * self.row_bytes
+            + mem::size_of::<Uniforms>() * MAX_DAMAGE_REGIONS
+            + mem::size_of::<ScrollCopyUniforms>()
+            + 256 * 4 * mem::size_of::<u16>()
+    }
+
+    fn readback(&self) -> Vec<u8> {
+        self.readback_texture(&self.output)
+    }
+
+    fn readback_texture(&self, texture: &ProtocolObject<dyn MTLTexture>) -> Vec<u8> {
+        let mut pixels =
+            vec![0u8; METAL_PHYSICAL_WIDTH as usize * METAL_PHYSICAL_HEIGHT as usize * 4];
+        unsafe {
+            texture.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+                NonNull::new(pixels.as_mut_ptr() as *mut c_void).unwrap(),
+                METAL_PHYSICAL_WIDTH as usize * 4,
+                MTLRegion {
+                    origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                    size: MTLSize {
+                        width: METAL_PHYSICAL_WIDTH as usize,
+                        height: METAL_PHYSICAL_HEIGHT as usize,
+                        depth: 1,
+                    },
+                },
+                0,
+            );
+        }
+        pixels
+    }
+
+    fn run_grid_frame(&mut self, grid: &Grid, stats: &mut MetalRunStats) {
+        let mut dirty_rows = [0usize; METAL_ROWS as usize];
+        let row_prep_start = Instant::now();
+        let mut dirty_count = 0;
+        for (row, dirty) in grid.dirty.iter().enumerate() {
+            if *dirty {
+                dirty_rows[dirty_count] = row;
+                dirty_count += 1;
+            }
+        }
+        stats.row_prep_time += row_prep_start.elapsed();
+
+        let upload_start = Instant::now();
+        let dst_base = self.cell_buffer.contents().as_ptr() as *mut u8;
+        for &row in &dirty_rows[..dirty_count] {
+            let src = grid.row_slice(row as u16);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    src.as_ptr() as *const u8,
+                    dst_base.add(row * self.row_bytes),
+                    self.row_bytes,
+                );
+            }
+            stats.upload_bytes += self.row_bytes;
+        }
+        stats.upload_time += upload_start.elapsed();
+
+        let uniforms = Uniforms {
+            cols: METAL_COLS as u32,
+            rows: METAL_ROWS as u32,
+            cell_width: self.cell_width,
+            cell_height: self.cell_height,
+            atlas_cell_width: self.cell_width,
+            atlas_cell_height: self.cell_height,
+            padding: self.padding,
+            padding_top: self.padding,
+            cursor_row: grid.cursor_row as u32,
+            cursor_col: grid.cursor_col as u32,
+            cursor_visible: u32::from(grid.mode.contains(TermMode::CURSOR_VISIBLE)),
+            frame_bg: config::DEFAULT_BG,
+            damage_origin_x: 0,
+            damage_origin_y: 0,
+        };
+        unsafe {
+            let dst = self.uniform_buffer.contents().as_ptr() as *mut Uniforms;
+            *dst = uniforms;
+        }
+
+        let encode_start = Instant::now();
+        if !self.scroll_scratch_valid {
+            let sync_buffer = self
+                .core
+                .command_queue()
+                .commandBuffer()
+                .expect("failed to create headless scroll sync command buffer");
+            unsafe {
+                (self.scroll_uniform_buffer.contents().as_ptr() as *mut ScrollCopyUniforms).write(
+                    ScrollCopyUniforms {
+                        source_y: 0,
+                        destination_y: 0,
+                        width: METAL_PHYSICAL_WIDTH,
+                        height: METAL_PHYSICAL_HEIGHT,
+                    },
+                );
+            }
+            let sync_encoder = sync_buffer
+                .computeCommandEncoder()
+                .expect("failed to create headless scroll sync encoder");
+            sync_encoder.setComputePipelineState(self.core.scroll_pipeline());
+            unsafe {
+                sync_encoder.setTexture_atIndex(Some(&self.output), 0);
+                sync_encoder.setTexture_atIndex(Some(&self.scroll_scratch), 1);
+                sync_encoder.setBuffer_offset_atIndex(Some(&self.scroll_uniform_buffer), 0, 0);
+            }
+            sync_encoder.dispatchThreads_threadsPerThreadgroup(
+                MTLSize {
+                    width: METAL_PHYSICAL_WIDTH as usize,
+                    height: METAL_PHYSICAL_HEIGHT as usize,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 16,
+                    height: 16,
+                    depth: 1,
+                },
+            );
+            sync_encoder.endEncoding();
+            sync_buffer.commit();
+            sync_buffer.waitUntilCompleted();
+            assert!(
+                sync_buffer.error().is_none(),
+                "headless scroll sync command buffer failed"
+            );
+            stats.scroll_copy_bytes +=
+                METAL_PHYSICAL_WIDTH as u64 * METAL_PHYSICAL_HEIGHT as u64 * 4;
+        }
+        let command_buffer = self
+            .core
+            .command_queue()
+            .commandBuffer()
+            .expect("failed to create headless command buffer");
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .expect("failed to create headless compute encoder");
+        encoder.setComputePipelineState(self.core.pipeline());
+        unsafe {
+            encoder.setTexture_atIndex(Some(&self.output), 0);
+            encoder.setTexture_atIndex(Some(&self.atlas.texture), 1);
+            encoder.setBuffer_offset_atIndex(Some(&self.cell_buffer), 0, 0);
+            encoder.setBuffer_offset_atIndex(Some(self.core.palette_buffer()), 0, 1);
+            encoder.setBuffer_offset_atIndex(Some(&self.uniform_buffer), 0, 2);
+        }
+        encoder.dispatchThreads_threadsPerThreadgroup(
+            MTLSize {
+                width: METAL_PHYSICAL_WIDTH as usize,
+                height: METAL_PHYSICAL_HEIGHT as usize,
+                depth: 1,
+            },
+            MTLSize {
+                width: 16,
+                height: 16,
+                depth: 1,
+            },
+        );
+        encoder.endEncoding();
+        stats.encode_time += encode_start.elapsed();
+
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+        assert!(
+            command_buffer.error().is_none(),
+            "headless scroll command buffer failed"
+        );
+        let gpu_start = command_buffer.GPUStartTime();
+        let gpu_end = command_buffer.GPUEndTime();
+        if gpu_end > gpu_start && gpu_start > 0.0 {
+            stats.gpu_time_ns += (gpu_end - gpu_start) * 1_000_000_000.0;
+            stats.gpu_timed_frames += 1;
+        }
+        stats.frames += 1;
+        stats.dispatch_pixels += METAL_PHYSICAL_WIDTH as u64 * METAL_PHYSICAL_HEIGHT as u64;
+        self.scroll_scratch_valid = false;
+    }
+
+    fn run_grid_frame_scroll(
+        &mut self,
+        grid: &Grid,
+        hint: ScrollHint,
+        previous_cursor: Option<(u16, u16, bool)>,
+        stats: &mut MetalRunStats,
+    ) -> bool {
+        if hint.top > hint.bottom || hint.bottom >= METAL_ROWS || hint.lines == 0 {
+            return false;
+        }
+
+        let lines = hint.lines.unsigned_abs() as u32;
+        let region_rows = hint.bottom as u32 - hint.top as u32 + 1;
+        if lines >= region_rows {
+            return false;
+        }
+
+        if !self.scroll_scratch_valid {
+            let sync_buffer = self
+                .core
+                .command_queue()
+                .commandBuffer()
+                .expect("failed to create headless scroll sync command buffer");
+            unsafe {
+                (self.scroll_uniform_buffer.contents().as_ptr() as *mut ScrollCopyUniforms).write(
+                    ScrollCopyUniforms {
+                        source_y: 0,
+                        destination_y: 0,
+                        width: METAL_PHYSICAL_WIDTH,
+                        height: METAL_PHYSICAL_HEIGHT,
+                    },
+                );
+            }
+            let sync_encoder = sync_buffer
+                .computeCommandEncoder()
+                .expect("failed to create headless scroll sync encoder");
+            sync_encoder.setComputePipelineState(self.core.scroll_pipeline());
+            unsafe {
+                sync_encoder.setTexture_atIndex(Some(&self.output), 0);
+                sync_encoder.setTexture_atIndex(Some(&self.scroll_scratch), 1);
+                sync_encoder.setBuffer_offset_atIndex(Some(&self.scroll_uniform_buffer), 0, 0);
+            }
+            sync_encoder.dispatchThreads_threadsPerThreadgroup(
+                MTLSize {
+                    width: METAL_PHYSICAL_WIDTH as usize,
+                    height: METAL_PHYSICAL_HEIGHT as usize,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 16,
+                    height: 16,
+                    depth: 1,
+                },
+            );
+            sync_encoder.endEncoding();
+            sync_buffer.commit();
+            sync_buffer.waitUntilCompleted();
+            assert!(
+                sync_buffer.error().is_none(),
+                "headless scroll sync command buffer failed"
+            );
+            stats.scroll_copy_bytes +=
+                METAL_PHYSICAL_WIDTH as u64 * METAL_PHYSICAL_HEIGHT as u64 * 4;
+        }
+
+        let scroll_pixels = lines * self.cell_height;
+        let content_height = region_rows * self.cell_height;
+        let copy_height = content_height - scroll_pixels;
+        let region_y = self.padding + hint.top as u32 * self.cell_height;
+        let source_y = if hint.lines > 0 {
+            region_y + scroll_pixels
+        } else {
+            region_y
+        };
+        let destination_y = if hint.lines > 0 {
+            region_y
+        } else {
+            region_y + scroll_pixels
+        };
+
+        let mut dirty_rows = [0usize; METAL_ROWS as usize];
+        let mut damaged_rows = [false; METAL_ROWS as usize];
+        let mut upload_rows = [false; METAL_ROWS as usize];
+        let expose_start = if hint.lines > 0 {
+            // Keep one row at the retained/damaged boundary. A coalesced
+            // newline can update that boundary row after the logical scroll.
+            hint.bottom as usize + 1 - lines as usize - 1
+        } else {
+            hint.top as usize
+        };
+        let expose_end = if hint.lines > 0 {
+            hint.bottom as usize + 1
+        } else {
+            hint.top as usize + lines as usize
+        };
+        for row in expose_start..expose_end {
+            damaged_rows[row] = true;
+            upload_rows[row] = true;
+        }
+        if let Some((row, _, _)) = previous_cursor {
+            damaged_rows[row as usize] = true;
+            upload_rows[row as usize] = true;
+        }
+        damaged_rows[grid.cursor_row as usize] = true;
+        upload_rows[grid.cursor_row as usize] = true;
+
+        let row_prep_start = Instant::now();
+        let mut dirty_count = 0;
+        for (row, dirty) in grid.dirty.iter().enumerate() {
+            if *dirty {
+                dirty_rows[dirty_count] = row;
+                dirty_count += 1;
+                if !grid.scroll_dirty[row] {
+                    damaged_rows[row] = true;
+                    upload_rows[row] = true;
+                }
+            }
+        }
+        stats.row_prep_time += row_prep_start.elapsed();
+
+        let upload_start = Instant::now();
+        let dst_base = self.cell_buffer.contents().as_ptr() as *mut u8;
+        for &row in &dirty_rows[..dirty_count] {
+            if !upload_rows[row] {
+                continue;
+            }
+            let src = grid.row_slice(row as u16);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    src.as_ptr() as *const u8,
+                    dst_base.add(row * self.row_bytes),
+                    self.row_bytes,
+                );
+            }
+            stats.upload_bytes += self.row_bytes;
+        }
+        stats.upload_time += upload_start.elapsed();
+
+        let mut regions = [DamageRegion::default(); MAX_DAMAGE_REGIONS];
+        let mut region_count = 0;
+        let mut row = 0;
+        while row < METAL_ROWS as usize {
+            if !damaged_rows[row] {
+                row += 1;
+                continue;
+            }
+            let start = row;
+            row += 1;
+            while row < METAL_ROWS as usize && damaged_rows[row] {
+                row += 1;
+            }
+            regions[region_count] = DamageRegion {
+                origin_x: 0,
+                origin_y: self.padding + start as u32 * self.cell_height,
+                width: METAL_PHYSICAL_WIDTH,
+                height: (row - start) as u32 * self.cell_height,
+            };
+            region_count += 1;
+        }
+
+        let uniform_base = self.uniform_buffer.contents().as_ptr() as *mut Uniforms;
+        for (index, region) in regions[..region_count].iter().enumerate() {
+            unsafe {
+                uniform_base.add(index).write(Uniforms {
+                    cols: METAL_COLS as u32,
+                    rows: METAL_ROWS as u32,
+                    cell_width: self.cell_width,
+                    cell_height: self.cell_height,
+                    atlas_cell_width: self.cell_width,
+                    atlas_cell_height: self.cell_height,
+                    padding: self.padding,
+                    padding_top: self.padding,
+                    cursor_row: grid.cursor_row as u32,
+                    cursor_col: grid.cursor_col as u32,
+                    cursor_visible: u32::from(grid.mode.contains(TermMode::CURSOR_VISIBLE)),
+                    frame_bg: config::DEFAULT_BG,
+                    damage_origin_x: region.origin_x,
+                    damage_origin_y: region.origin_y,
+                });
+            }
+        }
+        let encode_start = Instant::now();
+        let shift_buffer = self
+            .core
+            .command_queue()
+            .commandBuffer()
+            .expect("failed to create headless command buffer");
+        unsafe {
+            (self.scroll_uniform_buffer.contents().as_ptr() as *mut ScrollCopyUniforms).write(
+                ScrollCopyUniforms {
+                    source_y,
+                    destination_y,
+                    width: METAL_PHYSICAL_WIDTH,
+                    height: copy_height,
+                },
+            );
+        }
+        let shift_encoder = shift_buffer
+            .computeCommandEncoder()
+            .expect("failed to create headless scroll shift encoder");
+        shift_encoder.setComputePipelineState(self.core.scroll_pipeline());
+        unsafe {
+            shift_encoder.setTexture_atIndex(Some(&self.output), 0);
+            shift_encoder.setTexture_atIndex(Some(&self.scroll_scratch), 1);
+            shift_encoder.setBuffer_offset_atIndex(Some(&self.scroll_uniform_buffer), 0, 0);
+        }
+        shift_encoder.dispatchThreads_threadsPerThreadgroup(
+            MTLSize {
+                width: METAL_PHYSICAL_WIDTH as usize,
+                height: copy_height as usize,
+                depth: 1,
+            },
+            MTLSize {
+                width: 16,
+                height: 16,
+                depth: 1,
+            },
+        );
+        shift_encoder.endEncoding();
+        shift_buffer.commit();
+        shift_buffer.waitUntilCompleted();
+        assert!(
+            shift_buffer.error().is_none(),
+            "headless scroll shift command buffer failed"
+        );
+        stats.scroll_copy_bytes += METAL_PHYSICAL_WIDTH as u64 * copy_height as u64 * 4;
+        std::mem::swap(&mut self.output, &mut self.scroll_scratch);
+
+        let compute_buffer = self
+            .core
+            .command_queue()
+            .commandBuffer()
+            .expect("failed to create headless scroll compute command buffer");
+        let encoder = compute_buffer
+            .computeCommandEncoder()
+            .expect("failed to create headless compute encoder");
+        encoder.setComputePipelineState(self.core.pipeline());
+        unsafe {
+            encoder.setTexture_atIndex(Some(&self.output), 0);
+            encoder.setTexture_atIndex(Some(&self.atlas.texture), 1);
+            encoder.setBuffer_offset_atIndex(Some(&self.cell_buffer), 0, 0);
+            encoder.setBuffer_offset_atIndex(Some(self.core.palette_buffer()), 0, 1);
+        }
+        for (index, region) in regions[..region_count].iter().enumerate() {
+            unsafe {
+                encoder.setBuffer_offset_atIndex(
+                    Some(&self.uniform_buffer),
+                    index * mem::size_of::<Uniforms>(),
+                    2,
+                );
+            }
+            encoder.dispatchThreads_threadsPerThreadgroup(
+                MTLSize {
+                    width: region.width as usize,
+                    height: region.height as usize,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 16,
+                    height: 16,
+                    depth: 1,
+                },
+            );
+        }
+        encoder.endEncoding();
+        compute_buffer.commit();
+        compute_buffer.waitUntilCompleted();
+        assert!(
+            compute_buffer.error().is_none(),
+            "headless scroll compute command buffer failed"
+        );
+        let mirror_buffer = self
+            .core
+            .command_queue()
+            .commandBuffer()
+            .expect("failed to create headless scroll mirror command buffer");
+        unsafe {
+            (self.scroll_uniform_buffer.contents().as_ptr() as *mut ScrollCopyUniforms).write(
+                ScrollCopyUniforms {
+                    source_y: region_y,
+                    destination_y: region_y,
+                    width: METAL_PHYSICAL_WIDTH,
+                    height: content_height,
+                },
+            );
+        }
+        let mirror_encoder = mirror_buffer
+            .computeCommandEncoder()
+            .expect("failed to create headless scroll mirror encoder");
+        mirror_encoder.setComputePipelineState(self.core.scroll_pipeline());
+        unsafe {
+            mirror_encoder.setTexture_atIndex(Some(&self.output), 0);
+            mirror_encoder.setTexture_atIndex(Some(&self.scroll_scratch), 1);
+            mirror_encoder.setBuffer_offset_atIndex(Some(&self.scroll_uniform_buffer), 0, 0);
+        }
+        mirror_encoder.dispatchThreads_threadsPerThreadgroup(
+            MTLSize {
+                width: METAL_PHYSICAL_WIDTH as usize,
+                height: content_height as usize,
+                depth: 1,
+            },
+            MTLSize {
+                width: 16,
+                height: 16,
+                depth: 1,
+            },
+        );
+        mirror_encoder.endEncoding();
+        mirror_buffer.commit();
+        mirror_buffer.waitUntilCompleted();
+        assert!(
+            mirror_buffer.error().is_none(),
+            "headless scroll mirror command buffer failed"
+        );
+        stats.scroll_copy_bytes += METAL_PHYSICAL_WIDTH as u64 * content_height as u64 * 4;
+        stats.encode_time += encode_start.elapsed();
+
+        let gpu_start = compute_buffer.GPUStartTime();
+        let gpu_end = compute_buffer.GPUEndTime();
+        if gpu_end > gpu_start && gpu_start > 0.0 {
+            stats.gpu_time_ns += (gpu_end - gpu_start) * 1_000_000_000.0;
+            stats.gpu_timed_frames += 1;
+        }
+        stats.frames += 1;
+        stats.damage_regions += region_count;
+        stats.scroll_events += 1;
+        stats.scroll_lines += lines as usize;
+        self.scroll_scratch_valid = true;
+        for region in &regions[..region_count] {
+            stats.dispatch_pixels += region.width as u64 * region.height as u64;
+        }
+        true
+    }
+
+    fn run_grid_frame_damage(
+        &mut self,
+        grid: &Grid,
+        previous_cursor: Option<(u16, u16, bool)>,
+        force_full: bool,
+        stats: &mut MetalRunStats,
+    ) {
+        let mut dirty_rows = [0usize; METAL_ROWS as usize];
+        let mut damaged_rows = [false; METAL_ROWS as usize];
+        let row_prep_start = Instant::now();
+        let mut dirty_count = 0;
+        for (row, dirty) in grid.dirty.iter().enumerate() {
+            if *dirty {
+                dirty_rows[dirty_count] = row;
+                dirty_count += 1;
+                damaged_rows[row] = true;
+            }
+        }
+        if let Some((row, _, _)) = previous_cursor {
+            damaged_rows[row as usize] = true;
+        }
+        damaged_rows[grid.cursor_row as usize] = true;
+        stats.row_prep_time += row_prep_start.elapsed();
+
+        let upload_start = Instant::now();
+        let dst_base = self.cell_buffer.contents().as_ptr() as *mut u8;
+        for &row in &dirty_rows[..dirty_count] {
+            let src = grid.row_slice(row as u16);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    src.as_ptr() as *const u8,
+                    dst_base.add(row * self.row_bytes),
+                    self.row_bytes,
+                );
+            }
+            stats.upload_bytes += self.row_bytes;
+        }
+        stats.upload_time += upload_start.elapsed();
+
+        let mut regions = [DamageRegion::default(); MAX_DAMAGE_REGIONS];
+        let region_count = if force_full {
+            regions[0] = DamageRegion {
+                origin_x: 0,
+                origin_y: 0,
+                width: METAL_PHYSICAL_WIDTH,
+                height: METAL_PHYSICAL_HEIGHT,
+            };
+            1
+        } else {
+            let mut count = 0;
+            let mut row = 0;
+            while row < METAL_ROWS as usize {
+                if !damaged_rows[row] {
+                    row += 1;
+                    continue;
+                }
+                let start = row;
+                row += 1;
+                while row < METAL_ROWS as usize && damaged_rows[row] {
+                    row += 1;
+                }
+                regions[count] = DamageRegion {
+                    origin_x: 0,
+                    origin_y: self.padding + start as u32 * self.cell_height,
+                    width: METAL_PHYSICAL_WIDTH,
+                    height: (row - start) as u32 * self.cell_height,
+                };
+                count += 1;
+            }
+            count
+        };
+
+        let uniform_base = self.uniform_buffer.contents().as_ptr() as *mut Uniforms;
+        for (index, region) in regions[..region_count].iter().enumerate() {
+            unsafe {
+                uniform_base.add(index).write(Uniforms {
+                    cols: METAL_COLS as u32,
+                    rows: METAL_ROWS as u32,
+                    cell_width: self.cell_width,
+                    cell_height: self.cell_height,
+                    atlas_cell_width: self.cell_width,
+                    atlas_cell_height: self.cell_height,
+                    padding: self.padding,
+                    padding_top: self.padding,
+                    cursor_row: grid.cursor_row as u32,
+                    cursor_col: grid.cursor_col as u32,
+                    cursor_visible: u32::from(grid.mode.contains(TermMode::CURSOR_VISIBLE)),
+                    frame_bg: config::DEFAULT_BG,
+                    damage_origin_x: region.origin_x,
+                    damage_origin_y: region.origin_y,
+                });
+            }
+        }
+
+        let encode_start = Instant::now();
+        let command_buffer = self
+            .core
+            .command_queue()
+            .commandBuffer()
+            .expect("failed to create headless command buffer");
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .expect("failed to create headless compute encoder");
+        encoder.setComputePipelineState(self.core.pipeline());
+        unsafe {
+            encoder.setTexture_atIndex(Some(&self.output), 0);
+            encoder.setTexture_atIndex(Some(&self.atlas.texture), 1);
+            encoder.setBuffer_offset_atIndex(Some(&self.cell_buffer), 0, 0);
+            encoder.setBuffer_offset_atIndex(Some(self.core.palette_buffer()), 0, 1);
+        }
+        for (index, region) in regions[..region_count].iter().enumerate() {
+            unsafe {
+                encoder.setBuffer_offset_atIndex(
+                    Some(&self.uniform_buffer),
+                    index * mem::size_of::<Uniforms>(),
+                    2,
+                );
+            }
+            encoder.dispatchThreads_threadsPerThreadgroup(
+                MTLSize {
+                    width: region.width as usize,
+                    height: region.height as usize,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 16,
+                    height: 16,
+                    depth: 1,
+                },
+            );
+        }
+        encoder.endEncoding();
+        stats.encode_time += encode_start.elapsed();
+
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+        let gpu_start = command_buffer.GPUStartTime();
+        let gpu_end = command_buffer.GPUEndTime();
+        if gpu_end > gpu_start && gpu_start > 0.0 {
+            stats.gpu_time_ns += (gpu_end - gpu_start) * 1_000_000_000.0;
+            stats.gpu_timed_frames += 1;
+        }
+        stats.frames += 1;
+        stats.damage_regions += region_count;
+        for region in &regions[..region_count] {
+            stats.dispatch_pixels += region.width as u64 * region.height as u64;
+        }
+    }
+
+    fn run(&mut self, frames: &[MetalFrame]) -> MetalRunStats {
+        let mut stats = MetalRunStats::default();
+        let dst_base = self.cell_buffer.contents().as_ptr() as *mut u8;
+
+        for frame in frames {
+            let frame_start = Instant::now();
+            let upload_start = Instant::now();
+            for &row in &frame.dirty_rows {
+                let src = &frame.cells[row * METAL_COLS as usize..(row + 1) * METAL_COLS as usize];
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        src.as_ptr() as *const u8,
+                        dst_base.add(row * self.row_bytes),
+                        self.row_bytes,
+                    );
+                }
+                stats.upload_bytes += self.row_bytes;
+            }
+            stats.upload_time += upload_start.elapsed();
+
+            let uniforms = Uniforms {
+                cols: METAL_COLS as u32,
+                rows: METAL_ROWS as u32,
+                cell_width: self.cell_width,
+                cell_height: self.cell_height,
+                atlas_cell_width: self.cell_width,
+                atlas_cell_height: self.cell_height,
+                padding: self.padding,
+                padding_top: self.padding,
+                cursor_row: frame.cursor_row,
+                cursor_col: frame.cursor_col,
+                cursor_visible: u32::from(frame.cursor_visible),
+                frame_bg: config::DEFAULT_BG,
+                damage_origin_x: 0,
+                damage_origin_y: 0,
+            };
+            unsafe {
+                let dst = self.uniform_buffer.contents().as_ptr() as *mut Uniforms;
+                *dst = uniforms;
+            }
+
+            let encode_start = Instant::now();
+            let command_buffer = self
+                .core
+                .command_queue()
+                .commandBuffer()
+                .expect("failed to create headless command buffer");
+            let encoder = command_buffer
+                .computeCommandEncoder()
+                .expect("failed to create headless compute encoder");
+            encoder.setComputePipelineState(self.core.pipeline());
+            unsafe {
+                encoder.setTexture_atIndex(Some(&self.output), 0);
+                encoder.setTexture_atIndex(Some(&self.atlas.texture), 1);
+                encoder.setBuffer_offset_atIndex(Some(&self.cell_buffer), 0, 0);
+                encoder.setBuffer_offset_atIndex(Some(self.core.palette_buffer()), 0, 1);
+                encoder.setBuffer_offset_atIndex(Some(&self.uniform_buffer), 0, 2);
+            }
+            encoder.dispatchThreads_threadsPerThreadgroup(
+                MTLSize {
+                    width: METAL_PHYSICAL_WIDTH as usize,
+                    height: METAL_PHYSICAL_HEIGHT as usize,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 16,
+                    height: 16,
+                    depth: 1,
+                },
+            );
+            encoder.endEncoding();
+            stats.encode_time += encode_start.elapsed();
+
+            command_buffer.commit();
+            command_buffer.waitUntilCompleted();
+            let gpu_start = command_buffer.GPUStartTime();
+            let gpu_end = command_buffer.GPUEndTime();
+            if gpu_end > gpu_start && gpu_start > 0.0 {
+                stats.gpu_time_ns += (gpu_end - gpu_start) * 1_000_000_000.0;
+                stats.gpu_timed_frames += 1;
+            }
+            stats.frames += 1;
+            stats.dispatch_pixels += METAL_PHYSICAL_WIDTH as u64 * METAL_PHYSICAL_HEIGHT as u64;
+            stats.wall_time += frame_start.elapsed();
+        }
+
+        stats
+    }
+}
+
+fn load_metal_frames(path: &str, ascii_table: &[[u8; 2]; 128]) -> Vec<MetalFrame> {
+    let data = std::fs::read(path).unwrap_or_else(|error| {
+        panic!("failed to read {path}: {error}; run scripts/record-tmux-less.sh both and sparse")
+    });
+    let mut parser = Parser::new();
+    let mut grid = Grid::new(METAL_COLS, METAL_ROWS);
+    grid.set_ascii_atlas(ascii_table);
+    let mut scrollback = Scrollback::new(0);
+    let mut frames = Vec::new();
+
+    for chunk in data.chunks(METAL_REPLAY_CHUNK) {
+        {
+            let mut performer = BenchPerformer {
+                grid: &mut grid,
+                scrollback: &mut scrollback,
+            };
+            parser.parse(chunk, &mut performer);
+        }
+
+        let dirty_rows = grid
+            .dirty
+            .iter()
+            .enumerate()
+            .filter_map(|(row, dirty)| dirty.then_some(row))
+            .collect();
+        let mut cells = Vec::with_capacity(METAL_COLS as usize * METAL_ROWS as usize);
+        for row in 0..METAL_ROWS {
+            cells.extend_from_slice(grid.row_slice(row));
+        }
+        frames.push(MetalFrame {
+            cells,
+            dirty_rows,
+            cursor_row: grid.cursor_row as u32,
+            cursor_col: grid.cursor_col as u32,
+            cursor_visible: grid.mode.contains(TermMode::CURSOR_VISIBLE),
+        });
+        grid.clear_dirty();
+    }
+
+    assert!(!frames.is_empty(), "workload produced no replay frames");
+    frames
+}
+
+struct MetalReplay {
+    parser: Parser,
+    grid: Grid,
+    scrollback: Scrollback,
+    response_buf: Vec<u8>,
+    ascii_table: [[u8; 2]; 128],
+    previous_cursor: Option<(u16, u16, bool)>,
+}
+
+#[derive(Clone, Copy)]
+enum ReplayRenderMode {
+    Full,
+    Damage,
+    Scroll,
+}
+
+impl MetalReplay {
+    fn new(ascii_table: [[u8; 2]; 128]) -> Self {
+        let mut grid = Grid::new(METAL_COLS, METAL_ROWS);
+        grid.set_ascii_atlas(&ascii_table);
+        Self {
+            parser: Parser::new(),
+            grid,
+            scrollback: Scrollback::new(config::SCROLLBACK_LINES),
+            response_buf: Vec::new(),
+            ascii_table,
+            previous_cursor: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.parser.reset();
+        self.grid.reset();
+        self.grid.set_ascii_atlas(&self.ascii_table);
+        self.scrollback.clear();
+        self.response_buf.clear();
+        self.previous_cursor = None;
+    }
+
+    fn run(&mut self, baseline: &mut MetalBaseline, data: &[u8]) -> MetalRunStats {
+        self.run_mode(
+            baseline,
+            data,
+            ReplayRenderMode::Full,
+            None::<fn(usize, &MetalBaseline)>,
+        )
+    }
+
+    fn run_damage(&mut self, baseline: &mut MetalBaseline, data: &[u8]) -> MetalRunStats {
+        self.run_mode(
+            baseline,
+            data,
+            ReplayRenderMode::Damage,
+            None::<fn(usize, &MetalBaseline)>,
+        )
+    }
+
+    fn run_scroll(&mut self, baseline: &mut MetalBaseline, data: &[u8]) -> MetalRunStats {
+        self.run_mode(
+            baseline,
+            data,
+            ReplayRenderMode::Scroll,
+            None::<fn(usize, &MetalBaseline)>,
+        )
+    }
+
+    fn run_mode<F: FnMut(usize, &MetalBaseline)>(
+        &mut self,
+        baseline: &mut MetalBaseline,
+        data: &[u8],
+        mode: ReplayRenderMode,
+        mut observer: Option<F>,
+    ) -> MetalRunStats {
+        self.reset();
+        let mut stats = MetalRunStats {
+            input_bytes: data.len(),
+            ..MetalRunStats::default()
+        };
+        let wall_start = Instant::now();
+
+        for chunk in data.chunks(METAL_REPLAY_CHUNK) {
+            stats.replay_chunks += 1;
+            let parse_start = Instant::now();
+            {
+                let mut performer = TermPerformer::new(
+                    &mut self.grid,
+                    &mut self.scrollback,
+                    &mut baseline.atlas,
+                    &baseline.rasterizer,
+                    &mut self.response_buf,
+                );
+                self.parser.parse(chunk, &mut performer);
+            }
+            stats.parser_performer_grid_time += parse_start.elapsed();
+            self.response_buf.clear();
+
+            let cursor_visible = self.grid.mode.contains(TermMode::CURSOR_VISIBLE);
+            let cursor = (self.grid.cursor_row, self.grid.cursor_col, cursor_visible);
+            let previous_cursor = self.previous_cursor;
+            let first_frame = previous_cursor.is_none();
+            let cursor_changed = previous_cursor != Some(cursor);
+            self.previous_cursor = Some(cursor);
+            let scroll_hint = self.grid.take_scroll_hint();
+            if let Some(hint) = scroll_hint {
+                stats.scroll_hints += 1;
+                if stats.scroll_hints == 1 {
+                    stats.scroll_hint_top = hint.top;
+                    stats.scroll_hint_bottom = hint.bottom;
+                }
+            }
+            if self.grid.dirty.any() || cursor_changed {
+                let mut rendered = false;
+                match mode {
+                    ReplayRenderMode::Full => {
+                        baseline.run_grid_frame(&self.grid, &mut stats);
+                        rendered = true;
+                    }
+                    ReplayRenderMode::Damage => {
+                        baseline.run_grid_frame_damage(
+                            &self.grid,
+                            previous_cursor,
+                            first_frame,
+                            &mut stats,
+                        );
+                        rendered = true;
+                    }
+                    ReplayRenderMode::Scroll => {
+                        if first_frame {
+                            baseline.run_grid_frame(&self.grid, &mut stats);
+                            rendered = true;
+                        } else if let Some(hint) = scroll_hint {
+                            rendered = baseline.run_grid_frame_scroll(
+                                &self.grid,
+                                hint,
+                                previous_cursor,
+                                &mut stats,
+                            );
+                        }
+                        if !rendered {
+                            baseline.run_grid_frame_damage(
+                                &self.grid,
+                                previous_cursor,
+                                first_frame,
+                                &mut stats,
+                            );
+                            rendered = true;
+                        }
+                    }
+                }
+                if rendered {
+                    if let Some(ref mut observer) = observer {
+                        observer(stats.frames, baseline);
+                    }
+                }
+            }
+            self.grid.clear_dirty();
+        }
+
+        stats.wall_time = wall_start.elapsed();
+        stats
+    }
+}
+
+fn print_metal_baseline(
+    label: &str,
+    path: &str,
+    baseline: &mut MetalBaseline,
+    frames: &[MetalFrame],
+) {
+    let device = baseline.core.device().name().to_string();
+    let input_bytes = std::fs::metadata(path).expect("workload metadata").len();
+    let _ = baseline.run(frames);
+    reset_alloc_counters();
+    let stats = baseline.run(frames);
+    let allocs = alloc_count();
+    let allocated_bytes = alloc_bytes();
+    let gpu_ms = stats.gpu_time_ns / 1_000_000.0;
+    let wall_ms = stats.wall_time.as_secs_f64() * 1000.0;
+    let upload_ms = stats.upload_time.as_secs_f64() * 1000.0;
+    let encode_ms = stats.encode_time.as_secs_f64() * 1000.0;
+    let gpu_timing = if stats.gpu_timed_frames == stats.frames {
+        "valid"
+    } else {
+        "partial"
+    };
+    eprintln!(
+        "metal_baseline label={label} path={path} device={device:?} rows={} cols={} physical={}x{} frames={} input_bytes={} dispatch_pixels={} upload_bytes={} upload_ms={upload_ms:.3} encode_ms={encode_ms:.3} wall_ms={wall_ms:.3} gpu_ms={gpu_ms:.3} allocs={allocs} allocated_bytes={allocated_bytes} headless_resource_bytes={} gpu_timing={gpu_timing}",
+        METAL_ROWS,
+        METAL_COLS,
+        METAL_PHYSICAL_WIDTH,
+        METAL_PHYSICAL_HEIGHT,
+        stats.frames,
+        input_bytes,
+        stats.dispatch_pixels,
+        stats.upload_bytes,
+        baseline.resource_bytes(),
+    );
+}
+
+fn print_metal_replay(
+    label: &str,
+    path: &str,
+    baseline: &mut MetalBaseline,
+    replay: &mut MetalReplay,
+    data: &[u8],
+) {
+    let _ = replay.run(baseline, data);
+    reset_alloc_counters();
+    let stats = replay.run(baseline, data);
+    let allocs = alloc_count();
+    let allocated_bytes = alloc_bytes();
+    let gpu_ms = stats.gpu_time_ns / 1_000_000.0;
+    let wall_ms = stats.wall_time.as_secs_f64() * 1000.0;
+    let parser_ms = stats.parser_performer_grid_time.as_secs_f64() * 1000.0;
+    let row_prep_ms = stats.row_prep_time.as_secs_f64() * 1000.0;
+    let upload_ms = stats.upload_time.as_secs_f64() * 1000.0;
+    let encode_ms = stats.encode_time.as_secs_f64() * 1000.0;
+    let gpu_timing = if stats.gpu_timed_frames == stats.frames {
+        "valid"
+    } else {
+        "partial"
+    };
+    eprintln!(
+        "metal_replay label={label} path={path} rows={} cols={} physical={}x{} chunks={} frames={} input_bytes={} parser_performer_grid_ms={parser_ms:.3} row_prep_ms={row_prep_ms:.3} upload_bytes={} upload_ms={upload_ms:.3} encode_ms={encode_ms:.3} wall_ms={wall_ms:.3} gpu_ms={gpu_ms:.3} allocs={allocs} allocated_bytes={allocated_bytes} gpu_timing={gpu_timing}",
+        METAL_ROWS,
+        METAL_COLS,
+        METAL_PHYSICAL_WIDTH,
+        METAL_PHYSICAL_HEIGHT,
+        stats.replay_chunks,
+        stats.frames,
+        stats.input_bytes,
+        stats.upload_bytes,
+    );
+}
+
+fn pixel_hash(pixels: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for &byte in pixels {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn validate_metal_damage(data: &[u8], ascii_table: [[u8; 2]; 128]) {
+    let mut full_baseline = MetalBaseline::new();
+    let mut damage_baseline = MetalBaseline::new();
+    let mut full_replay = MetalReplay::new(ascii_table);
+    let mut damage_replay = MetalReplay::new(ascii_table);
+    let mut full_hashes = Vec::new();
+    let mut damage_hashes = Vec::new();
+
+    full_replay.run_mode(
+        &mut full_baseline,
+        data,
+        ReplayRenderMode::Full,
+        Some(|_, baseline: &MetalBaseline| {
+            full_hashes.push(pixel_hash(&baseline.readback()));
+        }),
+    );
+    damage_replay.run_mode(
+        &mut damage_baseline,
+        data,
+        ReplayRenderMode::Damage,
+        Some(|_, baseline: &MetalBaseline| {
+            damage_hashes.push(pixel_hash(&baseline.readback()));
+        }),
+    );
+
+    assert_eq!(full_hashes, damage_hashes, "damage replay pixels diverged");
+    assert_eq!(
+        full_baseline.readback(),
+        damage_baseline.readback(),
+        "damage replay final pixels diverged"
+    );
+}
+
+fn validate_metal_scroll(data: &[u8], ascii_table: [[u8; 2]; 128]) {
+    let mut full_baseline = MetalBaseline::new();
+    let mut scroll_baseline = MetalBaseline::new();
+    let mut full_replay = MetalReplay::new(ascii_table);
+    let mut scroll_replay = MetalReplay::new(ascii_table);
+    let mut full_hashes = Vec::new();
+    let mut scroll_hashes = Vec::new();
+
+    let full_stats = full_replay.run_mode(
+        &mut full_baseline,
+        data,
+        ReplayRenderMode::Full,
+        Some(|_, baseline: &MetalBaseline| {
+            full_hashes.push(pixel_hash(&baseline.readback()));
+        }),
+    );
+    let scroll_stats = scroll_replay.run_mode(
+        &mut scroll_baseline,
+        data,
+        ReplayRenderMode::Scroll,
+        Some(|_, baseline: &MetalBaseline| {
+            scroll_hashes.push(pixel_hash(&baseline.readback()));
+        }),
+    );
+
+    if full_hashes != scroll_hashes {
+        eprintln!(
+            "scroll frame hashes diverged: full={full_hashes:?} scroll={scroll_hashes:?} full_stats={full_stats:?} scroll_stats={scroll_stats:?}"
+        );
+    }
+    let full_pixels = full_baseline.readback();
+    let scroll_pixels = scroll_baseline.readback();
+    if full_pixels != scroll_pixels {
+        let first_diff = full_pixels
+            .chunks_exact(4)
+            .zip(scroll_pixels.chunks_exact(4))
+            .position(|(full, scroll)| full != scroll)
+            .unwrap();
+        eprintln!(
+            "scroll first pixel diff x={} y={} full={:?} scroll={:?}",
+            first_diff % METAL_PHYSICAL_WIDTH as usize,
+            first_diff / METAL_PHYSICAL_WIDTH as usize,
+            &full_pixels[first_diff * 4..first_diff * 4 + 4],
+            &scroll_pixels[first_diff * 4..first_diff * 4 + 4],
+        );
+    }
+    assert_eq!(
+        full_pixels, scroll_pixels,
+        "scroll replay final pixels diverged"
+    );
+}
+
+fn print_metal_damage(
+    label: &str,
+    path: &str,
+    baseline: &mut MetalBaseline,
+    replay: &mut MetalReplay,
+    data: &[u8],
+) {
+    let _ = replay.run_damage(baseline, data);
+    reset_alloc_counters();
+    let stats = replay.run_damage(baseline, data);
+    let allocs = alloc_count();
+    let allocated_bytes = alloc_bytes();
+    let gpu_ms = stats.gpu_time_ns / 1_000_000.0;
+    let wall_ms = stats.wall_time.as_secs_f64() * 1000.0;
+    let upload_ms = stats.upload_time.as_secs_f64() * 1000.0;
+    let encode_ms = stats.encode_time.as_secs_f64() * 1000.0;
+    let gpu_timing = if stats.gpu_timed_frames == stats.frames {
+        "valid"
+    } else {
+        "partial"
+    };
+    eprintln!(
+        "metal_damage label={label} path={path} rows={} cols={} physical={}x{} chunks={} frames={} damage_regions={} input_bytes={} dispatch_pixels={} upload_bytes={} upload_ms={upload_ms:.3} encode_ms={encode_ms:.3} wall_ms={wall_ms:.3} gpu_ms={gpu_ms:.3} allocs={allocs} allocated_bytes={allocated_bytes} gpu_timing={gpu_timing}",
+        METAL_ROWS,
+        METAL_COLS,
+        METAL_PHYSICAL_WIDTH,
+        METAL_PHYSICAL_HEIGHT,
+        stats.replay_chunks,
+        stats.frames,
+        stats.damage_regions,
+        stats.input_bytes,
+        stats.dispatch_pixels,
+        stats.upload_bytes,
+    );
+}
+
+fn print_metal_scroll(
+    label: &str,
+    path: &str,
+    baseline: &mut MetalBaseline,
+    replay: &mut MetalReplay,
+    data: &[u8],
+) {
+    let _ = replay.run_scroll(baseline, data);
+    reset_alloc_counters();
+    let stats = replay.run_scroll(baseline, data);
+    let allocs = alloc_count();
+    let allocated_bytes = alloc_bytes();
+    let gpu_ms = stats.gpu_time_ns / 1_000_000.0;
+    let wall_ms = stats.wall_time.as_secs_f64() * 1000.0;
+    let upload_ms = stats.upload_time.as_secs_f64() * 1000.0;
+    let encode_ms = stats.encode_time.as_secs_f64() * 1000.0;
+    let gpu_timing = if stats.gpu_timed_frames == stats.frames {
+        "valid"
+    } else {
+        "partial"
+    };
+    eprintln!(
+        "metal_scroll label={label} path={path} rows={} cols={} physical={}x{} chunks={} frames={} scroll_hints={} hint_region={}..{} scroll_events={} scroll_lines={} scroll_copy_bytes={} damage_regions={} input_bytes={} dispatch_pixels={} upload_bytes={} upload_ms={upload_ms:.3} encode_ms={encode_ms:.3} wall_ms={wall_ms:.3} gpu_ms={gpu_ms:.3} allocs={allocs} allocated_bytes={allocated_bytes} gpu_timing={gpu_timing}",
+        METAL_ROWS,
+        METAL_COLS,
+        METAL_PHYSICAL_WIDTH,
+        METAL_PHYSICAL_HEIGHT,
+        stats.replay_chunks,
+        stats.frames,
+        stats.scroll_hints,
+        stats.scroll_hint_top,
+        stats.scroll_hint_bottom,
+        stats.scroll_events,
+        stats.scroll_lines,
+        stats.scroll_copy_bytes,
+        stats.damage_regions,
+        stats.input_bytes,
+        stats.dispatch_pixels,
+        stats.upload_bytes,
+    );
+}
+
+fn bench_metal_baseline(c: &mut Criterion) {
+    let mut group = c.benchmark_group("metal_baseline");
+    let mut baseline = MetalBaseline::new();
+    let ascii_table = baseline.ascii_table();
+
+    for (label, path) in [
+        ("tmux_less_both", "target/tmux-less-44x148-both.typescript"),
+        (
+            "tmux_less_sparse",
+            "target/tmux-less-44x148-sparse.typescript",
+        ),
+    ] {
+        let frames = load_metal_frames(path, &ascii_table);
+        print_metal_baseline(label, path, &mut baseline, &frames);
+        group.throughput(Throughput::Bytes(
+            std::fs::metadata(path).expect("workload metadata").len(),
+        ));
+        group.bench_function(BenchmarkId::new(label, "44x148"), |b| {
+            b.iter_custom(|iters| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iters {
+                    elapsed += baseline.run(&frames).wall_time;
+                }
+                elapsed
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_metal_replay(c: &mut Criterion) {
+    let mut group = c.benchmark_group("metal_replay");
+    let mut baseline = MetalBaseline::new();
+    let ascii_table = baseline.ascii_table();
+    let mut replay = MetalReplay::new(ascii_table);
+
+    for (label, path) in [
+        ("tmux_less_both", "target/tmux-less-44x148-both.typescript"),
+        (
+            "tmux_less_sparse",
+            "target/tmux-less-44x148-sparse.typescript",
+        ),
+    ] {
+        let data = std::fs::read(path).unwrap_or_else(|error| {
+            panic!(
+                "failed to read {path}: {error}; run scripts/record-tmux-less.sh both and sparse"
+            )
+        });
+        print_metal_replay(label, path, &mut baseline, &mut replay, &data);
+        group.throughput(Throughput::Bytes(data.len() as u64));
+        group.bench_function(BenchmarkId::new(label, "44x148"), |b| {
+            b.iter_custom(|iters| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iters {
+                    elapsed += replay.run(&mut baseline, &data).wall_time;
+                }
+                elapsed
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_metal_damage(c: &mut Criterion) {
+    let mut group = c.benchmark_group("metal_damage");
+    let mut baseline = MetalBaseline::new();
+    let ascii_table = baseline.ascii_table();
+    let mut replay = MetalReplay::new(ascii_table);
+
+    for (label, path) in [
+        ("tmux_less_both", "target/tmux-less-44x148-both.typescript"),
+        (
+            "tmux_less_sparse",
+            "target/tmux-less-44x148-sparse.typescript",
+        ),
+    ] {
+        let data = std::fs::read(path).unwrap_or_else(|error| {
+            panic!(
+                "failed to read {path}: {error}; run scripts/record-tmux-less.sh both and sparse"
+            )
+        });
+        if label == "tmux_less_both" {
+            validate_metal_damage(&data, ascii_table);
+        }
+        print_metal_damage(label, path, &mut baseline, &mut replay, &data);
+        group.throughput(Throughput::Bytes(data.len() as u64));
+        group.bench_function(BenchmarkId::new(label, "44x148"), |b| {
+            b.iter_custom(|iters| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iters {
+                    elapsed += replay.run_damage(&mut baseline, &data).wall_time;
+                }
+                elapsed
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_metal_scroll(c: &mut Criterion) {
+    let mut group = c.benchmark_group("metal_scroll");
+    let mut baseline = MetalBaseline::new();
+    let ascii_table = baseline.ascii_table();
+    let mut replay = MetalReplay::new(ascii_table);
+
+    for (label, path) in [
+        ("tmux_less_both", "target/tmux-less-44x148-both.typescript"),
+        (
+            "tmux_less_sparse",
+            "target/tmux-less-44x148-sparse.typescript",
+        ),
+    ] {
+        let data = std::fs::read(path).unwrap_or_else(|error| {
+            panic!(
+                "failed to read {path}: {error}; run scripts/record-tmux-less.sh both and sparse"
+            )
+        });
+        if label == "tmux_less_both" {
+            validate_metal_scroll(&data, ascii_table);
+        }
+        print_metal_scroll(label, path, &mut baseline, &mut replay, &data);
+        group.throughput(Throughput::Bytes(data.len() as u64));
+        group.bench_function(BenchmarkId::new(label, "44x148"), |b| {
+            b.iter_custom(|iters| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iters {
+                    elapsed += replay.run_scroll(&mut baseline, &data).wall_time;
+                }
+                elapsed
+            });
+        });
+    }
+
+    let synthetic = make_scroll_workload();
+    validate_metal_scroll(&synthetic, ascii_table);
+    print_metal_scroll(
+        "synthetic_scroll",
+        "generated",
+        &mut baseline,
+        &mut replay,
+        &synthetic,
+    );
+    group.throughput(Throughput::Bytes(synthetic.len() as u64));
+    group.bench_function(BenchmarkId::new("synthetic_scroll", "44x148"), |b| {
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
+                elapsed += replay.run_scroll(&mut baseline, &synthetic).wall_time;
+            }
+            elapsed
+        });
+    });
+    group.finish();
+}
+
+fn make_scroll_workload() -> Vec<u8> {
+    let mut initial = Vec::new();
+    for row in 0..METAL_ROWS {
+        initial.extend_from_slice(format!("scroll fixture initial row {row:02}\r\n").as_bytes());
+    }
+    initial.truncate(initial.len().saturating_sub(2));
+
+    let mut data = vec![0u8; METAL_REPLAY_CHUNK.saturating_sub(initial.len())];
+    data.extend_from_slice(&initial);
+    data.extend_from_slice(b"\r\n");
+    for row in 0..40 {
+        data.extend_from_slice(format!("scroll fixture update row {row:02}\r\n").as_bytes());
+    }
+    data
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
@@ -2598,5 +4136,9 @@ criterion_group! {
         bench_slow_paths,
         bench_atlas_hash,
         bench_process_rss,
+        bench_metal_baseline,
+        bench_metal_replay,
+        bench_metal_damage,
+        bench_metal_scroll,
 }
 criterion_main!(benches);
