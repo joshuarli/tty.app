@@ -12,6 +12,35 @@ damage-proportional GPU work for sparse updates; row indirection is less
 compelling because the existing grid ring already makes a full-screen scroll
 an O(cols) operation and dirty-row upload is already cheap.
 
+### Overall retained-renderer result
+
+The original Phase 1 full-frame baseline and the integrated retained active-cell
+path were measured on the same Apple M1 target at 148×44 and 2880×1800. The
+cross-run comparison is directional because GPU scheduling varies, but it gives
+the overall scale of the gain:
+
+```text
+                         original       retained       change
+tmux_less_both GPU       17.001 ms      12.200 ms       ~28% lower
+tmux_less_both wall      21.489 ms      17.212 ms       ~20% lower
+tmux_less_sparse GPU     10.433 ms      10.082 ms       ~3% lower
+tmux_less_sparse wall    13.723 ms      13.085 ms       ~5% lower
+```
+
+The retained path removes substantially more GPU work than the timing alone
+shows: dispatched cell pixels fell by about 75% on the two-pane trace and 71%
+on sparse, with active cells averaging 27–32% of the visible grid. Surface-copy
+traffic, CPU row comparison and compaction, and fixed command overhead consume
+the rest of the theoretical saving. In the latest same-run comparison, sparse
+wall time was about 6% slower than the full tiled reference, so the result is
+not a universal win.
+
+The cell-tiled organization is worth keeping. The retained active-cell layer is
+a qualified tradeoff: keep it while dense redraws or GPU energy are important,
+but do not add further retention machinery without longer production traces and
+energy measurements. Semantic scroll retention remains rejected after its
+measured regression.
+
 ## Phase 0: Freeze the contract
 
 Define the invariants before changing production rendering:
