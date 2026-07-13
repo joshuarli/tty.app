@@ -21,12 +21,12 @@ Edit `src/config.rs` and run `make install`.
 
 The 8-byte Cell (`#[repr(C)]`: codepoint, flags, fg, bg, atlas_x, atlas_y) carries the data needed by the Metal shader. Glyph atlas coordinates are resolved when a character is written, not by a CPU-side conversion pass during rendering. ASCII uses a preloaded lookup table; uncached Unicode glyphs can still require rasterization and atlas-cache work.
 
-- **CPU upload = memcpy.** Dirty rows are `copy_nonoverlapping`'d into a Metal shared buffer. There is no per-cell conversion or packing loop. The compute shader still processes the output pixels and samples the atlas.
+- **CPU upload = changed-span memcpy.** Dirty rows enter per-buffer pending sets. The renderer compares each pending source row with the resident GPU cell buffer and copies only contiguous changed spans with `copy_nonoverlapping`; there is no per-cell conversion or packing loop.
 - **Scroll = ring-offset update plus clearing.** Full-screen scroll avoids an O(rows × cols) memmove: it updates the ring offset and clears the newly exposed row, which is O(cols) for one line. Pushing that line into scrollback also copies the row.
 - **Idle = no Metal dispatch and no periodic polling.** Only dirty rows, cursor changes, or deferred frames cause a render dispatch. When there is no work, the main thread blocks in the Core Foundation run loop until AppKit activity or PTY readiness wakes it. This removes the fixed idle timer and lets the process sleep between events.
 - **Unfocused windows do not render.** PTY output is still drained and parsed while a window is unfocused, but Metal submission is skipped. Focus-in marks the grid dirty so the current frame is repainted when focus returns.
 - **Steady state can be allocation-free.** ASCII runs write directly into the Cell vec using a precomputed 128-entry atlas table. Scrollback rows reuse their allocations after the ring is full, and the PTY read buffer is reused. Initial scrollback growth and first-use Unicode glyphs can allocate.
-- **The retained active-cell renderer is the production default.** It keeps a persistent GPU surface, uploads only changed cell spans, compacts active cells into one dispatch, and copies the surface into each drawable. The full-frame and full cell-tiled kernels remain available to the headless benchmark harness as comparison paths.
+- **The retained active-cell renderer is the production default.** It keeps a persistent GPU surface, uploads only changed cell spans, compacts changed and cursor-affected cells into one dispatch, and copies the surface into each drawable. The full-frame and full cell-tiled kernels remain available to the headless benchmark harness as comparison paths.
 
 The event loop is a manual single-threaded loop in `main()`: it drains PTY output, performs one 500µs coalescing wait when data arrived, drains AppKit events, handles input, renders focused windows, and blocks in the Core Foundation run loop when idle. PTY file descriptors are registered as run-loop sources, so PTY output and AppKit activity wake the same thread. There is no async runtime or I/O thread; Metal command buffers execute asynchronously. Idle-power behavior is designed to be event-driven; absolute energy use still depends on AppKit, the display, and the workload and should be measured with macOS power tools.
 
@@ -36,14 +36,14 @@ The repository contains Criterion microbenchmarks for the parser, grid, scrollba
 
 - **SIMD scanner:** NEON examines four 16-byte chunks per iteration on AArch64, with scalar handling for tails and unusual input.
 - **Cell writes:** ASCII writes use the direct atlas table and fixed-size Cell fields; this is the common CPU hot path.
-- **CPU-side upload:** dirty rows are raw copies into Metal shared storage. This removes packing work, but the current benchmark does not measure Metal GPU time.
+- **CPU-side upload:** pending rows are compared against resident cells and only changed spans are copied into Metal shared storage. This removes packing work and reduces GPU cell shading, but the current benchmark does not measure onscreen frame rate or energy.
 - **Allocation behavior:** `Grid::new(80, 24)` currently reports four allocations totaling about 22.5 KiB in the allocation audit. Parsing output that fills scrollback and discovering glyphs are separate allocation cases.
 
 Any throughput number should be reported with the Apple Silicon model, macOS version, compiler/profile, benchmark command, workload, and variance. The existing harness does not justify calling parser/grid numbers “end-to-end” or calling CPU memory-copy throughput “GPU upload.”
 
 ### Deliberate tradeoffs
 
-The fixed-size 8-byte Cell is the foundation of the entire architecture — it enables direct-format copies into Metal shared storage, per-dirty-row uploads, and simple ring buffer scrolling. Everything that doesn't fit in 8 bytes is intentionally omitted:
+The fixed-size 8-byte Cell is the foundation of the entire architecture — it enables direct-format copies into Metal shared storage, changed-span uploads for pending dirty rows, and simple ring buffer scrolling. Everything that doesn't fit in 8 bytes is intentionally omitted:
 
 - **No truecolor in cells** — RGB values are mapped to the nearest 256-color palette index at parse time. The PTY advertises `COLORTERM=truecolor`, but the renderer stores palette indices.
 - **No combining marks or grapheme shaping** — each cell represents one codepoint. Standalone non-BMP characters use a parallel character store, while combining marks and ZWJ composition are ignored.

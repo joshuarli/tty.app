@@ -29,9 +29,9 @@ src/
 ├── pty/
 │   └── mod.rs              # forkpty, non-blocking read/write, TIOCSWINSZ resize
 ├── renderer/
-│   ├── metal.rs            # Metal device, shared buffers, per-dirty-row upload, compute dispatch
+│   ├── metal.rs            # Metal device, retained surface, changed-span upload, active-cell dispatch
 │   ├── core.rs             # Reusable headless/onscreen Metal device, pipeline, queue, palette setup
-│   ├── shader.metal        # Per-pixel compute kernel: bg → glyph → decoration → cursor
+│   ├── shader.metal        # Tiled, active-cell-list, and persistent-surface copy kernels
 │   ├── atlas.rs            # 2048×2048 R8Unorm glyph atlas with pinned ASCII and runtime eviction
 │   ├── font.rs             # Embedded Hack + CoreText fallback rasterization → 8-bit alpha bitmaps
 │   └── mod.rs
@@ -74,16 +74,20 @@ Grid (ring buffer)
   │
   ▼
 MetalRenderer.render_frame()
-  1. Merge grid dirty bits → per-buffer pending bitsets (both buffers)
-  2. Skip frame if no dirty rows and no deferred render
-  3. If GPU still reading current buffer → defer to next frame (non-blocking)
-  4. Per dirty row: ptr::copy_nonoverlapping(grid.row_slice() → shared cell buffer)
-     Cell matches the compute-buffer ABI — no CPU conversion or packing loop
-  5. Acquire next drawable (retry next frame if None)
-  6. Dispatch compute shader (one thread per output pixel, 16×16 threadgroups)
-  7. add_completed_handler → set buffer_ready = true
-  8. commit() and waitUntilScheduled() — submission returns after scheduling; GPU work completes asynchronously
-  9. Swap to other cell buffer for next frame
+  1. Merge grid dirty bits → per-buffer pending row bitsets (both buffers)
+  2. Consume semantic scroll hints; scroll retention is not part of the production path
+  3. Skip frame if no dirty rows, cursor change, or deferred render
+  4. If GPU still reads the current slot → defer to next frame (non-blocking)
+  5. Mark resident cells as skipped, compare each pending source row against
+     the resident cell buffer, and copy only changed contiguous spans
+  6. Clear skip on the initial surface, changed spans, and previous/current cursor cells
+  7. Compact non-skipped cell indices into the current active-cell buffer
+  8. Acquire next drawable (retry next frame without clearing pending rows)
+  9. First frame: dispatch the full tiled kernel to initialize the persistent surface
+     Later frames: dispatch the tiled-list kernel once for compacted active cells
+ 10. Dispatch the scroll-copy kernel from the persistent surface to the drawable
+ 11. add_completed_handler → set buffer_ready = true
+ 12. commit() and waitUntilScheduled(); present and swap to the other slot
 ```
 
 ## Key Design Decisions
@@ -102,7 +106,7 @@ offset  type   field
 7       u8     atlas_y
 ```
 
-Atlas coordinates are resolved at write time — when a character is printed, the atlas position is looked up or the glyph is rasterized, then stored in the Cell. The CPU upload path is therefore a row-wise memcpy with no packing loop. The compute shader still processes every output pixel, samples the atlas for normal glyphs, and draws decorations procedurally. Bold brightness remapping (`palette 0-7 → 8-15`) and hidden attribute (`fg = bg`) are handled in the shader, not CPU-side.
+Atlas coordinates are resolved at write time — when a character is printed, the atlas position is looked up or the glyph is rasterized, then stored in the Cell. The CPU upload path compares pending rows with resident cells and copies changed spans with no packing loop. The active-cell compute shader samples the atlas for normal glyphs and draws decorations procedurally. Bold brightness remapping (`palette 0-7 → 8-15`) and hidden attribute (`fg = bg`) are handled in the shader, not CPU-side.
 
 **The 8-byte Cell is a deliberate constraint.** Everything that doesn't fit is intentionally omitted rather than worked around:
 
@@ -119,9 +123,11 @@ The grid's `ring_offset` maps logical row 0 to a physical row in the flat `Vec<C
 
 Partial scrolls within a scroll region still use `copy_within` since only a subset of rows move.
 
-### Per-dirty-row GPU upload
+### Retained active-cell rendering
 
-Each frame, only rows marked dirty are copied into Metal shared storage. The renderer maintains per-buffer pending bitsets (one per double-buffer slot) so that a row dirtied while the GPU reads buffer A is also queued for buffer B. The copy is `copy_nonoverlapping` per row — no per-cell packing loop or CPU format conversion. This is a CPU-side copy into shared GPU-visible memory, not a measured GPU transfer.
+The production renderer owns a persistent private BGRA surface. Each frame, grid dirty rows are merged into per-buffer pending bitsets so a row dirtied while the GPU reads buffer A is also queued for buffer B. Pending rows are compared against the resident shared cell buffer; only changed contiguous spans are copied with `copy_nonoverlapping`. This is a CPU-side copy into shared GPU-visible memory, not a measured GPU transfer.
+
+Cells unchanged since the previous surface update carry a private skip flag. Changed cells, the first surface initialization, and both the previous and current cursor cells are compacted into a double-buffered list of cell indices. The first frame uses the full tiled kernel to paint the surface; subsequent frames use one tiled-list dispatch whose threadgroups cover only the active cells. A scroll-copy dispatch then copies the persistent surface into the current drawable, so unchanged pixels remain resident between frames.
 
 ### ASCII atlas table
 
@@ -133,7 +139,7 @@ Hack Regular is vendored in `vendor/hack/Hack-Regular.ttf` with its license and 
 
 ### Double-buffered async GPU
 
-Two cell buffers alternate. CPU writes to buffer A while GPU reads buffer B. An `AtomicBool` per buffer is set by a Metal completed handler when the GPU finishes. The render path skips the frame (non-blocking) if the target buffer is still in flight, setting `needs_render` to retry next iteration.
+Two cell buffers, active-cell index buffers, and retained uniform buffers alternate. CPU writes to buffer A while GPU reads buffer B. The persistent surface is reallocated and reinitialized on resize. An `AtomicBool` per slot is set by a Metal completed handler when the GPU finishes. The render path skips the frame (non-blocking) if the target slot is still in flight, setting `needs_render` to retry next iteration. Drawable misses also preserve pending rows for the retry.
 
 ### Synchronized output (Mode 2026)
 
@@ -226,7 +232,13 @@ Grid-based packing in a 2048×2048 texture. Each slot is one cell wide (`cell_wi
 
 ### renderer/shader.metal
 
-The compute kernel processes every pixel in the framebuffer:
+The shader contains three production kernels:
+
+- `render_tiled` initializes or repaints a cell-tiled surface, with one threadgroup per cell and one thread per cell pixel.
+- `render_tiled_list` repaints only the compacted active-cell list, with one threadgroup per active cell.
+- `scroll_copy` copies the persistent surface into the current drawable.
+
+The cell shading logic used by the tiled kernels:
 1. Map pixel → grid cell via integer division
 2. Padding region → default background
 3. Wide continuation cells → sample right half of owner's glyph
