@@ -119,3 +119,9 @@ impl MetalCore {
         data
     }
 }
+
+impl Default for MetalCore {
+    fn default() -> Self {
+        Self::new()
+    }
+}

@@ -11,7 +11,7 @@ tmux is not present.
 - Ring buffer grid — full-screen scroll is O(cols) after the ring-offset update
 - SIMD-accelerated VT parser (three-layer: NEON → CSI fast path → state machine)
 - xterm-256color subset sufficient for tmux, vim, htop
-- Single-threaded: non-blocking PTY I/O with kqueue, no mutexes
+- Single-threaded: non-blocking PTY I/O with AppKit/Core Foundation wakeups, no mutexes
 
 ## Install
 
@@ -23,10 +23,11 @@ The 8-byte Cell (`#[repr(C)]`: codepoint, flags, fg, bg, atlas_x, atlas_y) carri
 
 - **CPU upload = memcpy.** Dirty rows are `copy_nonoverlapping`'d into a Metal shared buffer. There is no per-cell conversion or packing loop. The compute shader still processes the output pixels and samples the atlas.
 - **Scroll = ring-offset update plus clearing.** Full-screen scroll avoids an O(rows × cols) memmove: it updates the ring offset and clears the newly exposed row, which is O(cols) for one line. Pushing that line into scrollback also copies the row.
-- **Idle = no Metal dispatch.** Only dirty rows, cursor changes, or deferred frames cause a render dispatch. AppKit and kqueue polling still run while the application is idle.
+- **Idle = no Metal dispatch and no periodic polling.** Only dirty rows, cursor changes, or deferred frames cause a render dispatch. When there is no work, the main thread blocks in the Core Foundation run loop until AppKit activity or PTY readiness wakes it. This removes the fixed idle timer and lets the process sleep between events.
+- **Unfocused windows do not render.** PTY output is still drained and parsed while a window is unfocused, but Metal submission is skipped. Focus-in marks the grid dirty so the current frame is repainted when focus returns.
 - **Steady state can be allocation-free.** ASCII runs write directly into the Cell vec using a precomputed 128-entry atlas table. Scrollback rows reuse their allocations after the ring is full, and the PTY read buffer is reused. Initial scrollback growth and first-use Unicode glyphs can allocate.
 
-The event loop is a manual single-threaded loop in `main()`: it drains PTY output, performs one 500µs coalescing poll when data arrived, drains AppKit events, handles input, renders, and sleeps on kqueue when idle. There is no async runtime or I/O thread; Metal command buffers execute asynchronously.
+The event loop is a manual single-threaded loop in `main()`: it drains PTY output, performs one 500µs coalescing wait when data arrived, drains AppKit events, handles input, renders focused windows, and blocks in the Core Foundation run loop when idle. PTY file descriptors are registered as run-loop sources, so PTY output and AppKit activity wake the same thread. There is no async runtime or I/O thread; Metal command buffers execute asynchronously. Idle-power behavior is designed to be event-driven; absolute energy use still depends on AppKit, the display, and the workload and should be measured with macOS power tools.
 
 ### Performance
 

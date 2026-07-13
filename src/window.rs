@@ -581,6 +581,10 @@ impl NativeWindow {
         }
     }
 
+    pub fn is_focused(&self) -> bool {
+        self.last_focused
+    }
+
     /// Returns true if the given NSEvent belongs to this window.
     pub fn owns_ns_event(&self, event: &NSEvent, mtm: MainThreadMarker) -> bool {
         event

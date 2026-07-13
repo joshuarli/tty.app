@@ -320,7 +320,55 @@ for the extra retained surface, synchronization, and copy traffic. A future
 attempt should first eliminate the second full-size surface or demonstrate a
 workload with substantially larger stable unchanged regions.
 
-## Phase 4: Prototype instanced cell rendering
+## Phase 4: Measure and reduce idle power
+
+Idle behavior is a separate optimization target from active rendering. The
+renderer submits no Metal work when there is no terminal activity. Before this
+phase, the single-threaded loop called `kevent()` with an 8 ms timeout whenever
+it was idle, creating up to 125 periodic CPU wakeups per second even when the
+terminal was completely quiet.
+
+Establish a quiet-session baseline before changing the loop:
+
+- Release build, fullscreen 148×44 terminal, no PTY output, input, mouse, or
+  resize activity for at least 60 seconds.
+- Record timeout wakeups, actual AppKit/PTY events, render calls, Metal command
+  buffer submissions, process CPU time, and package/GPU power where the Mac
+  exposes stable counters.
+- Repeat with the current app as the control and keep display, power source,
+  thermal state, and background workload fixed.
+- Use `powermetrics` and/or an Instruments Energy Log for system-level energy;
+  use internal counters for wakeups and renderer activity.
+
+The first implementation experiment should replace periodic idle polling with
+an event-driven wait that can be woken by either AppKit or PTY readiness. A
+longer adaptive timeout is an acceptable fallback only if it preserves the
+latency gate.
+
+Gate:
+
+- No Metal command buffers are submitted during a quiet 60-second session.
+- Periodic timeout wakeups disappear or fall to an insignificant background
+  level rather than remaining at the current 8 ms cadence.
+- PTY-output-to-render and key-to-PTY-write latency remain within the current
+  approximately one-frame budget.
+- Process CPU and measured system/package energy show a repeatable reduction
+  beyond measurement noise.
+- If the event-driven design produces no repeatable energy improvement, or
+  harms responsiveness, stop and retain the simpler current loop.
+
+This phase is independent of the GPU rendering experiments. It should be
+completed even if the instanced renderer does not pass its performance gate.
+
+Implementation status, 2026-07-12: the fixed idle timeout has been replaced by
+Core Foundation run-loop sources for PTY readiness. AppKit and PTY activity now
+wake the same main-thread loop, PTY output continues to drain while a window is
+unfocused, and rendering is skipped for unfocused windows. Focus-in marks the
+grid dirty so the next focused iteration repaints the current frame. Runtime
+wakeup and energy measurements remain to be collected; no production I/O thread
+was added.
+
+## Phase 5: Prototype instanced cell rendering
 
 The next architectural experiment should attack the dominant cost directly:
 the current compute kernel launches one thread per output pixel and repeats
@@ -361,9 +409,9 @@ If this gate fails, keep the current compute renderer and stop pursuing GPU
 damage architecture for this workload. If it passes, validate the instanced
 pipeline onscreen before considering any retained-surface optimization.
 
-## Phase 5: Integrate production presentation only if Phase 4 wins
+## Phase 6: Integrate production presentation only if Phase 5 wins
 
-Currently deferred until the Phase 4 instanced-rendering gate passes. Generic
+Currently deferred until the Phase 5 instanced-rendering gate passes. Generic
 damage and scroll-aware retained rendering remain benchmark infrastructure only.
 
 Once the headless core passes:
@@ -382,13 +430,13 @@ headless correctness suite
 instanced-cell benchmark
 ```
 
-No production switch until all pass and the Phase 4 performance gates are met.
+No production switch until all pass and the Phase 5 performance gates are met.
 If they are not met, document the prototype result and leave the current
 renderer as the production path.
 
-## Phase 6: Decide whether to extend the architecture
+## Phase 7: Decide whether to extend the architecture
 
-Only after the Phase 4 and Phase 5 experiments establish a real bottleneck:
+Only after the Phase 4 through Phase 6 experiments establish a real bottleneck:
 
 - If CPU upload remains significant, make scrollback GPU-resident or paged.
 - If GPU compute remains significant for sparse updates, improve damage-region batching.
@@ -401,5 +449,6 @@ The key acceptance criterion is not “the benchmark is faster.” It is:
 
 For the current measured workload, this is an optimization opportunity rather
 than a demonstrated necessity. Phase 4 is the next experiment; it should be
-abandoned if it cannot produce a large, exact, low-memory win over the current
-full-frame compute renderer.
+completed independently, while Phase 5 should be abandoned if it cannot
+produce a large, exact, low-memory win over the current full-frame compute
+renderer.

@@ -105,7 +105,7 @@ impl Pty {
         }
     }
 
-    /// The raw file descriptor for the PTY master (for kqueue registration, etc.)
+    /// The raw file descriptor for run-loop readiness registration.
     pub fn fd(&self) -> std::os::fd::RawFd {
         self.master.as_raw_fd()
     }

@@ -12,14 +12,17 @@ mod terminal;
 mod unicode;
 mod window;
 
-use std::os::fd::OwnedFd;
+use std::ffi::c_void;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSEventMask, NSEventModifierFlags, NSEventType};
+use objc2_core_foundation::{
+    CFFileDescriptor, CFFileDescriptorContext, CFRetained, CFRunLoop, CFRunLoopSource,
+    kCFFileDescriptorReadCallBack, kCFRunLoopCommonModes, kCFRunLoopDefaultMode,
+};
 use objc2_foundation::NSDefaultRunLoopMode;
-use rustix::event::kqueue::{Event as KqueueEvent, EventFilter, EventFlags, kevent, kqueue};
 
 use crate::clipboard::{base64_decode, clipboard_has_image, get_clipboard, set_clipboard};
 
@@ -610,6 +613,7 @@ impl App {
             }
 
             Event::FocusIn => {
+                self.shared.grid.mark_all_dirty();
                 if self.shared.grid.mode.contains(TermMode::FOCUS_EVENTS) {
                     let _ = self.pty.write(b"\x1B[I");
                 }
@@ -718,14 +722,93 @@ struct Terminal {
     app: App,
 }
 
-fn register_pty_fd(kq: &OwnedFd, fd: std::os::fd::RawFd) {
-    let ev = KqueueEvent::new(
-        EventFilter::Read(fd),
-        EventFlags::ADD | EventFlags::ENABLE,
-        std::ptr::null_mut(),
-    );
-    let mut out: [std::mem::MaybeUninit<KqueueEvent>; 0] = [];
-    unsafe { kevent(kq, &[ev], &mut out, None).expect("kevent register failed") };
+unsafe extern "C-unwind" fn pty_read_callback(
+    descriptor: *mut CFFileDescriptor,
+    flags: usize,
+    _info: *mut c_void,
+) {
+    if flags & kCFFileDescriptorReadCallBack != 0 && !descriptor.is_null() {
+        unsafe {
+            (*descriptor).disable_call_backs(kCFFileDescriptorReadCallBack);
+        }
+    }
+}
+
+struct PtyRunLoopSources {
+    run_loop: CFRetained<CFRunLoop>,
+    descriptors: Vec<CFRetained<CFFileDescriptor>>,
+    sources: Vec<CFRetained<CFRunLoopSource>>,
+}
+
+impl PtyRunLoopSources {
+    fn new() -> Self {
+        Self {
+            run_loop: CFRunLoop::current().expect("no current Core Foundation run loop"),
+            descriptors: Vec::new(),
+            sources: Vec::new(),
+        }
+    }
+
+    fn register(&mut self, fd: std::os::fd::RawFd) {
+        let context = CFFileDescriptorContext {
+            version: 0,
+            info: std::ptr::null_mut(),
+            retain: None,
+            release: None,
+            copyDescription: None,
+        };
+        let descriptor =
+            unsafe { CFFileDescriptor::new(None, fd, false, Some(pty_read_callback), &context) }
+                .expect("failed to create PTY run-loop descriptor");
+        let source = CFFileDescriptor::new_run_loop_source(None, Some(&descriptor), 0)
+            .expect("failed to create PTY run-loop source");
+        let common_modes = unsafe {
+            kCFRunLoopCommonModes
+                .as_ref()
+                .expect("Core Foundation common modes unavailable")
+        };
+        self.run_loop.add_source(Some(&source), Some(common_modes));
+        descriptor.enable_call_backs(kCFFileDescriptorReadCallBack);
+        self.descriptors.push(descriptor);
+        self.sources.push(source);
+    }
+
+    fn enable_callbacks(&self) {
+        for descriptor in &self.descriptors {
+            descriptor.enable_call_backs(kCFFileDescriptorReadCallBack);
+        }
+    }
+
+    fn unregister(&mut self, fd: std::os::fd::RawFd) {
+        let Some(index) = self
+            .descriptors
+            .iter()
+            .position(|descriptor| descriptor.native_descriptor() == fd)
+        else {
+            return;
+        };
+
+        let common_modes = unsafe {
+            kCFRunLoopCommonModes
+                .as_ref()
+                .expect("Core Foundation common modes unavailable")
+        };
+        let source = self.sources.swap_remove(index);
+        self.run_loop
+            .remove_source(Some(&source), Some(common_modes));
+        let descriptor = self.descriptors.swap_remove(index);
+        descriptor.disable_call_backs(kCFFileDescriptorReadCallBack);
+        descriptor.invalidate();
+    }
+
+    fn wait(&self, seconds: f64) {
+        let default_mode = unsafe {
+            kCFRunLoopDefaultMode
+                .as_ref()
+                .expect("Core Foundation default mode unavailable")
+        };
+        let _ = CFRunLoop::run_in_mode(Some(default_mode), seconds, true);
+    }
 }
 
 fn spawn_terminal(mtm: MainThreadMarker) -> Terminal {
@@ -805,8 +888,8 @@ fn main() {
     let mut terminals: Vec<Terminal> = Vec::new();
     terminals.push(spawn_terminal(mtm));
 
-    let kq = kqueue().expect("kqueue() failed");
-    register_pty_fd(&kq, terminals[0].app.pty_fd());
+    let mut pty_sources = PtyRunLoopSources::new();
+    pty_sources.register(terminals[0].app.pty_fd());
 
     let mut state_events = Vec::new();
 
@@ -826,13 +909,9 @@ fn main() {
             // writes (e.g., tmux hiding cursor, drawing, then showing cursor).
             // Single pass only — looping would hang on continuous output (yes).
             if got_any_pty_data {
-                let mut ev = [std::mem::MaybeUninit::<KqueueEvent>::uninit()];
-                let events = unsafe { kevent(&kq, &[], &mut ev, Some(Duration::from_micros(500))) }
-                    .expect("kevent coalesce failed");
-                if !events.0.is_empty() {
-                    for t in terminals.iter_mut() {
-                        t.app.process_pty_output(&t.win, PTY_BUDGET);
-                    }
+                pty_sources.wait(0.0005);
+                for t in terminals.iter_mut() {
+                    t.app.process_pty_output(&t.win, PTY_BUDGET);
                 }
             }
 
@@ -924,11 +1003,19 @@ fn main() {
             // Spawn new terminal if Cmd+N was pressed or dock menu clicked
             if spawn_pending || new_window_requested() {
                 let t = spawn_terminal(mtm);
-                register_pty_fd(&kq, t.app.pty_fd());
+                pty_sources.register(t.app.pty_fd());
                 terminals.push(t);
             }
 
-            // Remove dead terminals (shell exited)
+            // Remove dead terminals (shell exited) and their run-loop sources.
+            let dead_fds: Vec<_> = terminals
+                .iter()
+                .filter(|t| !t.app.is_alive())
+                .map(|t| t.app.pty_fd())
+                .collect();
+            for fd in dead_fds {
+                pty_sources.unregister(fd);
+            }
             terminals.retain_mut(|t| {
                 if t.app.is_alive() {
                     true
@@ -941,10 +1028,13 @@ fn main() {
             // Render all terminals
             let mut all_idle = true;
             for t in terminals.iter_mut() {
-                all_idle &= t.app.render();
+                if t.win.is_focused() {
+                    all_idle &= t.app.render();
+                }
             }
 
             let idle = !got_any_pty_data && !sent_deferred_mouse && !got_events && all_idle;
+            pty_sources.enable_callbacks();
             (idle, quit)
         });
 
@@ -952,13 +1042,9 @@ fn main() {
             break;
         }
 
-        // When idle, block until any PTY has data or 8ms elapses
+        // When idle, block until AppKit or a PTY run-loop source wakes us.
         if idle {
-            let mut ev_out = [std::mem::MaybeUninit::<KqueueEvent>::uninit()];
-            unsafe {
-                kevent(&kq, &[], &mut ev_out, Some(Duration::from_millis(8)))
-                    .expect("kevent wait failed");
-            }
+            pty_sources.wait(f64::MAX);
         }
     }
 }

@@ -400,16 +400,16 @@ impl MetalRenderer {
         // Reallocate both cell buffers
         let buffer_size = (self.cols as usize * self.rows as usize * CELL_SIZE) as u64;
         self.cell_buffers = [
-        self.core
-            .device()
-            .newBufferWithLength_options(
+            self.core
+                .device()
+                .newBufferWithLength_options(
                     buffer_size as usize,
                     MTLResourceOptions::StorageModeShared,
                 )
                 .expect("failed to create cell buffer"),
-        self.core
-            .device()
-            .newBufferWithLength_options(
+            self.core
+                .device()
+                .newBufferWithLength_options(
                     buffer_size as usize,
                     MTLResourceOptions::StorageModeShared,
                 )

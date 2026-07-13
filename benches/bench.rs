@@ -3689,11 +3689,10 @@ impl MetalReplay {
                         }
                     }
                 }
-                if rendered {
-                    if let Some(ref mut observer) = observer {
+                if rendered
+                    && let Some(ref mut observer) = observer {
                         observer(stats.frames, baseline);
                     }
-                }
             }
             self.grid.clear_dirty();
         }
