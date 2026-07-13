@@ -2625,6 +2625,27 @@ struct ScrollCopyUniforms {
     height: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct InstancedUniforms {
+    cols: u32,
+    rows: u32,
+    cell_width: u32,
+    cell_height: u32,
+    atlas_cell_width: u32,
+    atlas_cell_height: u32,
+    padding: u32,
+    padding_top: u32,
+    cursor_row: u32,
+    cursor_col: u32,
+    cursor_visible: u32,
+    frame_bg: u32,
+    damage_origin_x: u32,
+    damage_origin_y: u32,
+    output_width: u32,
+    output_height: u32,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct MetalRunStats {
     input_bytes: usize,
@@ -2640,6 +2661,7 @@ struct MetalRunStats {
     parser_performer_grid_time: Duration,
     row_prep_time: Duration,
     dispatch_pixels: u64,
+    instanced_cells: u64,
     upload_bytes: usize,
     upload_time: Duration,
     encode_time: Duration,
@@ -2666,7 +2688,7 @@ struct MetalBaseline {
 
 impl MetalBaseline {
     fn new() -> Self {
-        let core = MetalCore::new();
+        let core = MetalCore::new_with_instanced();
         let rasterizer = FontRasterizer::new(config::FONT_FAMILY, config::FONT_SIZE, 2.0);
         let cell_width = rasterizer.metrics.cell_width;
         let cell_height = rasterizer.metrics.cell_height;
@@ -2692,7 +2714,11 @@ impl MetalBaseline {
             )
         };
         output_desc.setStorageMode(MTLStorageMode::Shared);
-        output_desc.setUsage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
+        output_desc.setUsage(
+            MTLTextureUsage::RenderTarget
+                | MTLTextureUsage::ShaderRead
+                | MTLTextureUsage::ShaderWrite,
+        );
         let output = core
             .device()
             .newTextureWithDescriptor(&output_desc)
@@ -3495,6 +3521,109 @@ impl MetalBaseline {
 
         stats
     }
+
+    fn run_instanced(&mut self, frames: &[MetalFrame]) -> MetalRunStats {
+        let mut stats = MetalRunStats::default();
+        let dst_base = self.cell_buffer.contents().as_ptr() as *mut u8;
+
+        for frame in frames {
+            let frame_start = Instant::now();
+            let upload_start = Instant::now();
+            for &row in &frame.dirty_rows {
+                let src = &frame.cells[row * METAL_COLS as usize..(row + 1) * METAL_COLS as usize];
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        src.as_ptr() as *const u8,
+                        dst_base.add(row * self.row_bytes),
+                        self.row_bytes,
+                    );
+                }
+                stats.upload_bytes += self.row_bytes;
+            }
+            stats.upload_time += upload_start.elapsed();
+
+            let uniforms = InstancedUniforms {
+                cols: METAL_COLS as u32,
+                rows: METAL_ROWS as u32,
+                cell_width: self.cell_width,
+                cell_height: self.cell_height,
+                atlas_cell_width: self.cell_width,
+                atlas_cell_height: self.cell_height,
+                padding: self.padding,
+                padding_top: self.padding,
+                cursor_row: frame.cursor_row,
+                cursor_col: frame.cursor_col,
+                cursor_visible: u32::from(frame.cursor_visible),
+                frame_bg: config::DEFAULT_BG,
+                damage_origin_x: 0,
+                damage_origin_y: 0,
+                output_width: METAL_PHYSICAL_WIDTH,
+                output_height: METAL_PHYSICAL_HEIGHT,
+            };
+            unsafe {
+                let dst = self.uniform_buffer.contents().as_ptr() as *mut InstancedUniforms;
+                *dst = uniforms;
+            }
+
+            let encode_start = Instant::now();
+            let command_buffer = self
+                .core
+                .command_queue()
+                .commandBuffer()
+                .expect("failed to create headless instanced command buffer");
+            let render_pass = MTLRenderPassDescriptor::renderPassDescriptor();
+            let color_attachment =
+                unsafe { render_pass.colorAttachments().objectAtIndexedSubscript(0) };
+            color_attachment.setTexture(Some(&self.output));
+            color_attachment.setLoadAction(MTLLoadAction::Clear);
+            color_attachment.setStoreAction(MTLStoreAction::Store);
+            let rgb = config::DEFAULT_BG;
+            color_attachment.setClearColor(MTLClearColor {
+                red: ((rgb >> 16) & 0xFF) as f64 / 255.0,
+                green: ((rgb >> 8) & 0xFF) as f64 / 255.0,
+                blue: (rgb & 0xFF) as f64 / 255.0,
+                alpha: 1.0,
+            });
+            let encoder = command_buffer
+                .renderCommandEncoderWithDescriptor(&render_pass)
+                .expect("failed to create headless instanced render encoder");
+            encoder.setRenderPipelineState(self.core.instanced_pipeline());
+            unsafe {
+                encoder.setVertexBuffer_offset_atIndex(Some(&self.cell_buffer), 0, 0);
+                encoder.setVertexBuffer_offset_atIndex(Some(&self.uniform_buffer), 0, 2);
+                encoder.setFragmentTexture_atIndex(Some(&self.atlas.texture), 0);
+                encoder.setFragmentBuffer_offset_atIndex(Some(&self.cell_buffer), 0, 0);
+                encoder.setFragmentBuffer_offset_atIndex(Some(self.core.palette_buffer()), 0, 1);
+                encoder.setFragmentBuffer_offset_atIndex(Some(&self.uniform_buffer), 0, 2);
+                encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                    MTLPrimitiveType::TriangleStrip,
+                    0,
+                    4,
+                    (METAL_COLS as usize) * (METAL_ROWS as usize),
+                );
+            }
+            encoder.endEncoding();
+            stats.encode_time += encode_start.elapsed();
+
+            command_buffer.commit();
+            command_buffer.waitUntilCompleted();
+            assert!(
+                command_buffer.error().is_none(),
+                "headless instanced command buffer failed"
+            );
+            let gpu_start = command_buffer.GPUStartTime();
+            let gpu_end = command_buffer.GPUEndTime();
+            if gpu_end > gpu_start && gpu_start > 0.0 {
+                stats.gpu_time_ns += (gpu_end - gpu_start) * 1_000_000_000.0;
+                stats.gpu_timed_frames += 1;
+            }
+            stats.frames += 1;
+            stats.instanced_cells += (METAL_COLS as u64) * (METAL_ROWS as u64);
+            stats.wall_time += frame_start.elapsed();
+        }
+
+        stats
+    }
 }
 
 fn load_metal_frames(path: &str, ascii_table: &[[u8; 2]; 128]) -> Vec<MetalFrame> {
@@ -3816,6 +3945,25 @@ fn validate_metal_damage(data: &[u8], ascii_table: [[u8; 2]; 128]) {
     );
 }
 
+fn validate_metal_instanced(frames: &[MetalFrame]) {
+    let mut full_baseline = MetalBaseline::new();
+    let mut instanced_baseline = MetalBaseline::new();
+    for (index, frame) in frames.iter().enumerate() {
+        let full_pixels = {
+            full_baseline.run(std::slice::from_ref(frame));
+            full_baseline.readback()
+        };
+        let instanced_pixels = {
+            instanced_baseline.run_instanced(std::slice::from_ref(frame));
+            instanced_baseline.readback()
+        };
+        assert_eq!(
+            full_pixels, instanced_pixels,
+            "instanced pixels diverged at replay frame {index}"
+        );
+    }
+}
+
 fn validate_metal_scroll(data: &[u8], ascii_table: [[u8; 2]; 128]) {
     let mut full_baseline = MetalBaseline::new();
     let mut scroll_baseline = MetalBaseline::new();
@@ -3904,6 +4052,39 @@ fn print_metal_damage(
     );
 }
 
+fn print_metal_instanced(
+    label: &str,
+    path: &str,
+    baseline: &mut MetalBaseline,
+    frames: &[MetalFrame],
+) {
+    let _ = baseline.run_instanced(frames);
+    reset_alloc_counters();
+    let stats = baseline.run_instanced(frames);
+    let allocs = alloc_count();
+    let allocated_bytes = alloc_bytes();
+    let gpu_ms = stats.gpu_time_ns / 1_000_000.0;
+    let wall_ms = stats.wall_time.as_secs_f64() * 1000.0;
+    let upload_ms = stats.upload_time.as_secs_f64() * 1000.0;
+    let encode_ms = stats.encode_time.as_secs_f64() * 1000.0;
+    let gpu_timing = if stats.gpu_timed_frames == stats.frames {
+        "valid"
+    } else {
+        "partial"
+    };
+    eprintln!(
+        "metal_instanced label={label} path={path} rows={} cols={} physical={}x{} frames={} instanced_cells={} upload_bytes={} upload_ms={upload_ms:.3} encode_ms={encode_ms:.3} wall_ms={wall_ms:.3} gpu_ms={gpu_ms:.3} allocs={allocs} allocated_bytes={allocated_bytes} headless_resource_bytes={} gpu_timing={gpu_timing}",
+        METAL_ROWS,
+        METAL_COLS,
+        METAL_PHYSICAL_WIDTH,
+        METAL_PHYSICAL_HEIGHT,
+        stats.frames,
+        stats.instanced_cells,
+        stats.upload_bytes,
+        baseline.resource_bytes(),
+    );
+}
+
 fn print_metal_scroll(
     label: &str,
     path: &str,
@@ -3968,6 +4149,37 @@ fn bench_metal_baseline(c: &mut Criterion) {
                 let mut elapsed = Duration::ZERO;
                 for _ in 0..iters {
                     elapsed += baseline.run(&frames).wall_time;
+                }
+                elapsed
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_metal_instanced(c: &mut Criterion) {
+    let mut group = c.benchmark_group("metal_instanced");
+    let mut baseline = MetalBaseline::new();
+    let ascii_table = baseline.ascii_table();
+
+    for (label, path) in [
+        ("tmux_less_both", "target/tmux-less-44x148-both.typescript"),
+        (
+            "tmux_less_sparse",
+            "target/tmux-less-44x148-sparse.typescript",
+        ),
+    ] {
+        let frames = load_metal_frames(path, &ascii_table);
+        validate_metal_instanced(&frames);
+        print_metal_instanced(label, path, &mut baseline, &frames);
+        group.throughput(Throughput::Bytes(
+            std::fs::metadata(path).expect("workload metadata").len(),
+        ));
+        group.bench_function(BenchmarkId::new(label, "44x148"), |b| {
+            b.iter_custom(|iters| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iters {
+                    elapsed += baseline.run_instanced(&frames).wall_time;
                 }
                 elapsed
             });
@@ -4136,6 +4348,7 @@ criterion_group! {
         bench_atlas_hash,
         bench_process_rss,
         bench_metal_baseline,
+        bench_metal_instanced,
         bench_metal_replay,
         bench_metal_damage,
         bench_metal_scroll,

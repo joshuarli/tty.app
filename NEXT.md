@@ -409,6 +409,41 @@ If this gate fails, keep the current compute renderer and stop pursuing GPU
 damage architecture for this workload. If it passes, validate the instanced
 pipeline onscreen before considering any retained-surface optimization.
 
+Phase 5 headless prototype result, recorded on 2026-07-12 with the same Apple
+M1, 148×44 logical geometry, and 2880×1800 physical drawable as the earlier
+baselines:
+
+```text
+metal_instanced tmux_less_both:
+  13 frames, 84,656 cell instances, 663,040 uploaded bytes
+  encode: 0.140 ms, GPU: 15.688 ms, wall: 19.665 ms
+  steady-state Rust allocations: 0
+
+metal_instanced tmux_less_sparse:
+  8 frames, 52,096 cell instances, 408,480 uploaded bytes
+  encode: 0.086 ms, GPU: 9.848 ms, wall: 12.198 ms
+  steady-state Rust allocations: 0
+```
+
+The instanced path uses one four-vertex triangle strip per cell, the existing
+8-byte Cell ABI, the existing atlas, and one render pass into the same-size
+BGRA8 output texture. It adds no framebuffer and no per-frame allocation. The
+recorded replays matched the compute renderer pixel-for-pixel after every
+frame. A dedicated headless feature test also covers padding, atlas glyphs,
+wide cells, box drawing, arrows, bold, inverse, hidden, selection,
+underline, strikethrough, and cursor inversion.
+
+Relative to the same-run full-frame compute baseline, GPU time improved by
+about 5% for the two-pane replay and 3% for the sparse replay. Command
+encoding was slightly more expensive, and the wall-time change was within
+noise. This fails the 2× GPU-time or equally clear energy-reduction gate.
+
+Decision: retain the instanced pipeline as headless benchmark and correctness
+infrastructure, but do not integrate it into `MetalRenderer`. The production
+renderer remains the compute path. Phase 6 is therefore not justified by the
+current workload; the next architectural work should wait for a workload or
+measurement that demonstrates a larger stable GPU or energy bottleneck.
+
 ## Phase 6: Integrate production presentation only if Phase 5 wins
 
 Currently deferred until the Phase 5 instanced-rendering gate passes. Generic

@@ -340,6 +340,132 @@ kernel void render(
     output.write(color, gid);
 }
 
+struct InstancedUniforms {
+    uint cols;
+    uint rows;
+    uint cell_width;
+    uint cell_height;
+    uint atlas_cell_width;
+    uint atlas_cell_height;
+    uint padding;
+    uint padding_top;
+    uint cursor_row;
+    uint cursor_col;
+    uint cursor_visible;
+    uint frame_bg;
+    uint damage_origin_x;
+    uint damage_origin_y;
+    uint output_width;
+    uint output_height;
+};
+
+struct InstancedVertexOut {
+    float4 position [[position]];
+};
+
+vertex InstancedVertexOut render_instanced_vertex(
+    uint vertex_id [[vertex_id]],
+    uint instance_id [[instance_id]],
+    constant InstancedUniforms& uni [[buffer(2)]]) {
+    uint col = instance_id % uni.cols;
+    uint row = instance_id / uni.cols;
+    uint2 corner = uint2(vertex_id & 1, vertex_id >> 1);
+    float2 pixel = float2(
+        uni.padding + (col + corner.x) * uni.cell_width,
+        uni.padding_top + (row + corner.y) * uni.cell_height);
+    float2 ndc = float2(
+        pixel.x / float(uni.output_width) * 2.0 - 1.0,
+        1.0 - pixel.y / float(uni.output_height) * 2.0);
+
+    InstancedVertexOut out;
+    out.position = float4(ndc, 0.0, 1.0);
+    return out;
+}
+
+fragment half4 render_instanced_fragment(
+    InstancedVertexOut in [[stage_in]],
+    texture2d<half, access::read> atlas [[texture(0)]],
+    device const CellData* cells [[buffer(0)]],
+    device const half4* palette [[buffer(1)]],
+    constant Uniforms& uni [[buffer(2)]]) {
+    uint2 gid = uint2(in.position.xy);
+    uint pos_x = gid.x - uni.padding;
+    uint pos_y = gid.y - uni.padding_top;
+    uint col = pos_x / uni.cell_width;
+    uint row = pos_y / uni.cell_height;
+    uint px = pos_x % uni.cell_width;
+    uint py = pos_y % uni.cell_height;
+    CellData cell = cells[row * uni.cols + col];
+
+    if (cell.flags & FLAG_WIDE_CONT) {
+        half4 fg = palette[cell.fg_index];
+        half4 bg = palette[cell.bg_index];
+        if (cell.flags & FLAG_INVERSE) { half4 tmp = fg; fg = bg; bg = tmp; }
+        if (cell.flags & FLAG_HIDDEN) fg = bg;
+        px += uni.cell_width;
+        uint atlas_px = uint(cell.atlas_x) * uni.atlas_cell_width + px;
+        uint atlas_py = uint(cell.atlas_y) * uni.atlas_cell_height + py;
+        half alpha = atlas.read(uint2(atlas_px, atlas_py)).r;
+        return mix(bg, fg, alpha);
+    }
+
+    uchar fg_idx = cell.fg_index;
+    if ((cell.flags & FLAG_BOLD) && fg_idx < 8) {
+        fg_idx += 8;
+    }
+    half4 fg = palette[fg_idx];
+    half4 bg = palette[cell.bg_index];
+    if (cell.flags & FLAG_HIDDEN) {
+        fg = bg;
+    }
+    if (cell.flags & FLAG_INVERSE) {
+        half4 tmp = fg;
+        fg = bg;
+        bg = tmp;
+    }
+    if (cell.flags & FLAG_SELECTED) {
+        half4 tmp = fg;
+        fg = bg;
+        bg = tmp;
+    }
+
+    half4 color = bg;
+    uint cp = uint(cell.codepoint);
+    if (cp >= 0x2500 && cp <= 0x257F) {
+        if (draw_box_line(cp, px, py, uni.cell_width, uni.cell_height)) {
+            color = fg;
+        }
+    } else if (cp >= 0x2190 && cp <= 0x2195) {
+        if (draw_arrow(cp, px, py, uni.cell_width, uni.cell_height)) {
+            color = fg;
+        }
+    } else if (cell.atlas_x != 0 || cell.atlas_y != 0) {
+        uint glyph_w = (cell.flags & FLAG_WIDE) ? uni.atlas_cell_width * 2 : uni.atlas_cell_width;
+        if (px < glyph_w && py < uni.atlas_cell_height) {
+            uint atlas_px = uint(cell.atlas_x) * uni.atlas_cell_width + px;
+            uint atlas_py = uint(cell.atlas_y) * uni.atlas_cell_height + py;
+            half alpha = atlas.read(uint2(atlas_px, atlas_py)).r;
+            color = mix(bg, fg, alpha);
+        }
+    }
+    if (cell.flags & FLAG_UNDERLINE) {
+        uint underline_y = uni.cell_height - 2;
+        if (py == underline_y) {
+            color = fg;
+        }
+    }
+    if (cell.flags & FLAG_STRIKE) {
+        uint strike_y = uni.cell_height / 2;
+        if (py == strike_y) {
+            color = fg;
+        }
+    }
+    if (row == uni.cursor_row && col == uni.cursor_col && uni.cursor_visible != 0) {
+        color = half4(1.0h - color.r, 1.0h - color.g, 1.0h - color.b, 1.0h);
+    }
+    return color;
+}
+
 struct ScrollCopyUniforms {
     uint source_y;
     uint destination_y;

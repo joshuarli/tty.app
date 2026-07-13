@@ -28,13 +28,33 @@ struct ShaderUniforms {
     damage_origin_y: u32,
 }
 
+#[repr(C)]
+struct InstancedShaderUniforms {
+    cols: u32,
+    rows: u32,
+    cell_width: u32,
+    cell_height: u32,
+    atlas_cell_width: u32,
+    atlas_cell_height: u32,
+    padding: u32,
+    padding_top: u32,
+    cursor_row: u32,
+    cursor_col: u32,
+    cursor_visible: u32,
+    frame_bg: u32,
+    damage_origin_x: u32,
+    damage_origin_y: u32,
+    output_width: u32,
+    output_height: u32,
+}
+
 struct Ctx {
     core: MetalCore,
 }
 
 fn setup() -> Ctx {
     Ctx {
-        core: MetalCore::new(),
+        core: MetalCore::new_with_instanced(),
     }
 }
 
@@ -225,6 +245,159 @@ fn render_pixels_with_atlas(
     cmd_buf.waitUntilCompleted();
 
     // Read back pixels
+    let bpr = out_w as u64 * 4;
+    let mut pixels = vec![0u8; (out_h as usize) * (bpr as usize)];
+    unsafe {
+        output.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+            NonNull::new(pixels.as_mut_ptr() as *mut c_void).unwrap(),
+            bpr as usize,
+            region(0, 0, out_w, out_h),
+            0,
+        );
+    }
+    pixels
+}
+
+fn render_instanced_pixels_with_atlas(
+    ctx: &Ctx,
+    cells: &[Cell],
+    uniforms: &ShaderUniforms,
+    out_w: u32,
+    out_h: u32,
+    atlas_fill: Option<(u32, u32, u32, u32, u8)>,
+) -> Vec<u8> {
+    let out_desc = unsafe {
+        MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+            MTLPixelFormat::BGRA8Unorm,
+            out_w as usize,
+            out_h as usize,
+            false,
+        )
+    };
+    out_desc.setUsage(MTLTextureUsage::RenderTarget);
+    out_desc.setStorageMode(MTLStorageMode::Shared);
+    let output = ctx
+        .core
+        .device()
+        .newTextureWithDescriptor(&out_desc)
+        .expect("failed to create instanced output texture");
+
+    let atlas_desc = unsafe {
+        MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+            MTLPixelFormat::R8Unorm,
+            256,
+            256,
+            false,
+        )
+    };
+    atlas_desc.setUsage(MTLTextureUsage::ShaderRead);
+    atlas_desc.setStorageMode(MTLStorageMode::Shared);
+    let atlas = ctx
+        .core
+        .device()
+        .newTextureWithDescriptor(&atlas_desc)
+        .expect("failed to create instanced atlas texture");
+    let zero = vec![0u8; 256 * 256];
+    unsafe {
+        atlas.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+            region(0, 0, 256, 256),
+            0,
+            NonNull::new(zero.as_ptr() as *mut c_void).unwrap(),
+            256,
+        );
+    }
+    if let Some((x, y, width, height, value)) = atlas_fill {
+        let data = vec![value; (width * height) as usize];
+        unsafe {
+            atlas.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                region(x, y, width, height),
+                0,
+                NonNull::new(data.as_ptr() as *mut c_void).unwrap(),
+                width as usize,
+            );
+        }
+    }
+
+    let cell_buf = unsafe {
+        buffer_with_data(
+            ctx.core.device(),
+            cells.as_ptr() as *const c_void,
+            std::mem::size_of_val(cells),
+        )
+    };
+    let pal_data = build_palette_data();
+    let pal_buf = unsafe {
+        buffer_with_data(
+            ctx.core.device(),
+            pal_data.as_ptr() as *const c_void,
+            pal_data.len() * 2,
+        )
+    };
+    let instanced_uniforms = InstancedShaderUniforms {
+        cols: uniforms.cols,
+        rows: uniforms.rows,
+        cell_width: uniforms.cell_width,
+        cell_height: uniforms.cell_height,
+        atlas_cell_width: uniforms.atlas_cell_width,
+        atlas_cell_height: uniforms.atlas_cell_height,
+        padding: uniforms.padding,
+        padding_top: uniforms.padding_top,
+        cursor_row: uniforms.cursor_row,
+        cursor_col: uniforms.cursor_col,
+        cursor_visible: uniforms.cursor_visible,
+        frame_bg: uniforms.frame_bg,
+        damage_origin_x: uniforms.damage_origin_x,
+        damage_origin_y: uniforms.damage_origin_y,
+        output_width: out_w,
+        output_height: out_h,
+    };
+    let uni_buf = unsafe {
+        buffer_with_data(
+            ctx.core.device(),
+            &instanced_uniforms as *const _ as *const c_void,
+            size_of::<InstancedShaderUniforms>(),
+        )
+    };
+
+    let command_buffer = ctx
+        .core
+        .command_queue()
+        .commandBuffer()
+        .expect("command buffer");
+    let render_pass = MTLRenderPassDescriptor::renderPassDescriptor();
+    let color_attachment = unsafe { render_pass.colorAttachments().objectAtIndexedSubscript(0) };
+    color_attachment.setTexture(Some(&output));
+    color_attachment.setLoadAction(MTLLoadAction::Clear);
+    color_attachment.setStoreAction(MTLStoreAction::Store);
+    color_attachment.setClearColor(MTLClearColor {
+        red: ((uniforms.frame_bg >> 16) & 0xFF) as f64 / 255.0,
+        green: ((uniforms.frame_bg >> 8) & 0xFF) as f64 / 255.0,
+        blue: (uniforms.frame_bg & 0xFF) as f64 / 255.0,
+        alpha: 1.0,
+    });
+    let encoder = command_buffer
+        .renderCommandEncoderWithDescriptor(&render_pass)
+        .expect("render command encoder");
+    encoder.setRenderPipelineState(ctx.core.instanced_pipeline());
+    unsafe {
+        encoder.setVertexBuffer_offset_atIndex(Some(&cell_buf), 0, 0);
+        encoder.setVertexBuffer_offset_atIndex(Some(&uni_buf), 0, 2);
+        encoder.setFragmentTexture_atIndex(Some(&atlas), 0);
+        encoder.setFragmentBuffer_offset_atIndex(Some(&cell_buf), 0, 0);
+        encoder.setFragmentBuffer_offset_atIndex(Some(&pal_buf), 0, 1);
+        encoder.setFragmentBuffer_offset_atIndex(Some(&uni_buf), 0, 2);
+        encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
+            MTLPrimitiveType::TriangleStrip,
+            0,
+            4,
+            (uniforms.cols * uniforms.rows) as usize,
+        );
+    }
+    encoder.endEncoding();
+    command_buffer.commit();
+    command_buffer.waitUntilCompleted();
+    assert!(command_buffer.error().is_none(), "instanced command failed");
+
     let bpr = out_w as u64 * 4;
     let mut pixels = vec![0u8; (out_h as usize) * (bpr as usize)];
     unsafe {
@@ -742,4 +915,50 @@ fn bold_no_remap_for_fg_above_7() {
         expected_fg,
         "bold should not remap fg >= 8"
     );
+}
+
+#[test]
+fn instanced_pipeline_matches_compute_for_visual_features() {
+    let ctx = setup();
+    let cell = |codepoint, flags, fg_index, bg_index, atlas_x, atlas_y| Cell {
+        codepoint,
+        flags,
+        fg_index,
+        bg_index,
+        atlas_x,
+        atlas_y,
+    };
+    let cells = [
+        cell(0, CellFlags::empty(), 7, 0, 0, 0),
+        cell(0x2500, CellFlags::BOLD | CellFlags::INVERSE, 1, 2, 0, 0),
+        cell(0x2194, CellFlags::UNDERLINE, 7, 0, 0, 0),
+        cell(b'A' as u16, CellFlags::empty(), 7, 0, 1, 0),
+        cell(b'B' as u16, CellFlags::WIDE, 7, 0, 1, 0),
+        cell(0, CellFlags::WIDE_CONT, 7, 0, 1, 0),
+        cell(0x2500, CellFlags::HIDDEN | CellFlags::STRIKE, 7, 3, 0, 0),
+        cell(0x2500, CellFlags::SELECTED, 7, 0, 0, 0),
+    ];
+    let uniforms = ShaderUniforms {
+        cols: 4,
+        rows: 2,
+        cell_width: 8,
+        cell_height: 16,
+        atlas_cell_width: 8,
+        atlas_cell_height: 16,
+        padding: 3,
+        padding_top: 2,
+        cursor_row: 1,
+        cursor_col: 2,
+        cursor_visible: 1,
+        frame_bg: config::DEFAULT_BG,
+        damage_origin_x: 0,
+        damage_origin_y: 0,
+    };
+    let out_w = 4 * 8 + 6;
+    let out_h = 2 * 16 + 5;
+    let atlas_fill = Some((8, 0, 24, 16, 255));
+    let compute = render_pixels_with_atlas(&ctx, &cells, &uniforms, out_w, out_h, atlas_fill);
+    let instanced =
+        render_instanced_pixels_with_atlas(&ctx, &cells, &uniforms, out_w, out_h, atlas_fill);
+    assert_eq!(compute, instanced, "instanced visual output diverged");
 }

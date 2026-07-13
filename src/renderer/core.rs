@@ -15,6 +15,8 @@ pub struct MetalCore {
     pub(crate) command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     pub(crate) pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     #[allow(dead_code)]
+    pub(crate) instanced_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
+    #[allow(dead_code)]
     pub(crate) scroll_pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     pub(crate) palette_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
 }
@@ -23,6 +25,16 @@ impl MetalCore {
     /// Create the device, command queue, render pipeline, and palette buffer.
     /// No window, layer, drawable, or display connection is required.
     pub fn new() -> Self {
+        Self::new_internal(false)
+    }
+
+    /// Create Metal resources including the headless instanced-cell pipeline.
+    #[allow(dead_code)]
+    pub fn new_with_instanced() -> Self {
+        Self::new_internal(true)
+    }
+
+    fn new_internal(with_instanced: bool) -> Self {
         let device = MTLCreateSystemDefaultDevice().expect("no Metal device found");
         let command_queue = device
             .newCommandQueue()
@@ -49,6 +61,30 @@ impl MetalCore {
         let scroll_pipeline = device
             .newComputePipelineStateWithFunction_error(&scroll_function)
             .expect("failed to create scroll compute pipeline");
+        let instanced_pipeline = if with_instanced {
+            let vertex_function = library
+                .newFunctionWithName(&NSString::from_str("render_instanced_vertex"))
+                .expect("shader function 'render_instanced_vertex' not found");
+            let fragment_function = library
+                .newFunctionWithName(&NSString::from_str("render_instanced_fragment"))
+                .expect("shader function 'render_instanced_fragment' not found");
+            let render_descriptor = MTLRenderPipelineDescriptor::new();
+            render_descriptor.setVertexFunction(Some(&vertex_function));
+            render_descriptor.setFragmentFunction(Some(&fragment_function));
+            let color_attachment = unsafe {
+                render_descriptor
+                    .colorAttachments()
+                    .objectAtIndexedSubscript(0)
+            };
+            color_attachment.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            Some(
+                device
+                    .newRenderPipelineStateWithDescriptor_error(&render_descriptor)
+                    .expect("failed to create instanced render pipeline"),
+            )
+        } else {
+            None
+        };
 
         let palette_data = Self::build_palette_buffer();
         let palette_buffer = unsafe {
@@ -65,6 +101,7 @@ impl MetalCore {
             device,
             command_queue,
             pipeline,
+            instanced_pipeline,
             scroll_pipeline,
             palette_buffer,
         }
@@ -80,6 +117,13 @@ impl MetalCore {
 
     pub fn pipeline(&self) -> &ProtocolObject<dyn MTLComputePipelineState> {
         &self.pipeline
+    }
+
+    #[allow(dead_code)]
+    pub fn instanced_pipeline(&self) -> &ProtocolObject<dyn MTLRenderPipelineState> {
+        self.instanced_pipeline
+            .as_ref()
+            .expect("instanced pipeline was not requested")
     }
 
     #[allow(dead_code)]
