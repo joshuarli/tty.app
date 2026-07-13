@@ -479,17 +479,39 @@ not yet meet the 50–70% reduction target, so generic damage and scroll-aware
 retained rendering remain benchmark infrastructure only. The production switch
 is still guarded and defaults to the full-frame compute path.
 
-The guarded integration is selected with `TTY_TILED_RENDER=1` when launching
-the app. It preserves the current double-buffering and GPU-in-flight behavior,
-handles drawable misses through the existing retry path, and keeps the
-full-frame compute path available as the default and comparison reference.
+The full tiled integration is selected with `TTY_TILED_RENDER=1`, and the
+retained active-cell integration is selected with `TTY_TILED_DAMAGE=1` when
+launching the app. The retained path keeps the current double-buffering and
+GPU-in-flight behavior, handles drawable misses through the existing retry
+path, and copies its persistent surface into each drawable. The full-frame
+compute path remains the default and comparison reference.
 
-Remaining onscreen checks:
+Implementation status: the retained active-cell path is integrated behind
+`TTY_TILED_DAMAGE=1`; its onscreen lifecycle was validated separately. It
+allocates the persistent surface only for that switch, double-buffers active
+lists and uniforms, reinitializes the surface on resize, retries drawable
+misses without losing pending rows, and presents a surface copy after each
+active-cell dispatch.
 
-- Validate scrollback viewport rendering, selection, synchronized output, and resize.
-- Exercise focus transitions and drawable misses while output is active.
-- Compare the same workload against the default path for visual artifacts and
-  repeated GPU timing.
+A same-run headless sample after integration measured the retained path against
+the full-frame baseline as follows:
+
+```text
+tmux_less_both:   16.440 ms → 12.200 ms GPU, 19.648 ms → 17.212 ms wall
+tmux_less_sparse: 10.143 ms → 10.082 ms GPU, 12.317 ms → 13.085 ms wall
+```
+
+The result remains workload-sensitive. The retained path improves the dense
+two-pane replay by about 26% GPU and 12% wall time in this sample, while sparse
+is within GPU noise and slightly slower wall-clock. It is therefore retained
+as an opt-in comparison path; the default remains the full-frame renderer
+until longer production traces establish a stable benefit.
+
+Follow-up measurement:
+
+- Repeat the comparison on longer production traces and record variance.
+- Compare process/GPU energy as well as frame timing before considering a
+  different default.
 
 Gate:
 
