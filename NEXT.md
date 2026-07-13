@@ -472,26 +472,18 @@ on GPU and 125% slower wall-clock on this 2880×1800 workload. Keep the
 implementation on the experiment branch for reference, but leave the
 production direction on the simpler active-cell/tiled paths.
 
-## Phase 6: Integrate tiled compute only if the headless gates win
+## Phase 6: Integrate retained active-cell rendering
 
 The headless full tiled-compute gate passes. The retained masked prototype does
 not yet meet the 50–70% reduction target, so generic damage and scroll-aware
-retained rendering remain benchmark infrastructure only. The production switch
-is still guarded and defaults to the full-frame compute path.
+retained rendering remain benchmark infrastructure only. The retained
+active-cell path is now the production default.
 
-The full tiled integration is selected with `TTY_TILED_RENDER=1`, and the
-retained active-cell integration is selected with `TTY_TILED_DAMAGE=1` when
-launching the app. The retained path keeps the current double-buffering and
-GPU-in-flight behavior, handles drawable misses through the existing retry
-path, and copies its persistent surface into each drawable. The full-frame
-compute path remains the default and comparison reference.
-
-Implementation status: the retained active-cell path is integrated behind
-`TTY_TILED_DAMAGE=1`; its onscreen lifecycle was validated separately. It
-allocates the persistent surface only for that switch, double-buffers active
-lists and uniforms, reinitializes the surface on resize, retries drawable
-misses without losing pending rows, and presents a surface copy after each
-active-cell dispatch.
+The retained path keeps the current double-buffering and GPU-in-flight
+behavior, handles drawable misses through the existing retry path, and copies
+its persistent surface into each drawable. It allocates the persistent surface
+unconditionally, double-buffers active lists and uniforms, reinitializes the
+surface on resize, and preserves pending rows across drawable misses.
 
 A same-run headless sample after integration measured the retained path against
 the full-frame baseline as follows:
@@ -503,17 +495,17 @@ tmux_less_sparse: 10.143 ms → 10.082 ms GPU, 12.317 ms → 13.085 ms wall
 
 The result remains workload-sensitive. The retained path improves the dense
 two-pane replay by about 26% GPU and 12% wall time in this sample, while sparse
-is within GPU noise and slightly slower wall-clock. It is therefore retained
-as an opt-in comparison path; the default remains the full-frame renderer
-until longer production traces establish a stable benefit.
+is within GPU noise and slightly slower wall-clock. It is integrated because
+the onscreen lifecycle and pixel-equivalence validation passed; longer traces
+are still needed to establish a stable benefit across workloads.
 
 Follow-up measurement:
 
 - Repeat the comparison on longer production traces and record variance.
-- Compare process/GPU energy as well as frame timing before considering a
-  different default.
+- Compare process/GPU energy as well as frame timing before extending the
+  renderer architecture.
 
-Gate:
+Validation:
 
 ```text
 cargo test --all-targets
@@ -521,9 +513,9 @@ headless correctness suite
 tiled-compute benchmark
 ```
 
-No default production switch until the remaining onscreen checks and repeated
-GPU/energy measurements pass. If they do not, remove the switch and leave the
-current renderer as the production path.
+The headless full-frame and tiled paths remain comparison references for future
+measurements. Repeat GPU and energy measurements on longer production traces
+before extending the architecture.
 
 ## Phase 7: Decide whether to extend the architecture
 

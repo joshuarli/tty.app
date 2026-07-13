@@ -13,6 +13,7 @@ use crate::config;
 pub struct MetalCore {
     pub(crate) device: Retained<ProtocolObject<dyn MTLDevice>>,
     pub(crate) command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    #[allow(dead_code)]
     pub(crate) pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     #[allow(dead_code)]
     pub(crate) tiled_pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
@@ -118,6 +119,7 @@ impl MetalCore {
         &self.command_queue
     }
 
+    #[allow(dead_code)]
     pub fn pipeline(&self) -> &ProtocolObject<dyn MTLComputePipelineState> {
         &self.pipeline
     }
