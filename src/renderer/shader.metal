@@ -410,6 +410,63 @@ kernel void render_tiled(
     half4 fg = shared_fg;
     half4 bg = shared_bg;
 
+    // A CAMetal drawable is not guaranteed to preserve its previous contents.
+    // Paint the border from the same cell threadgroups so the tiled path owns
+    // every output pixel without a retained framebuffer or a second clear pass.
+    half4 frame_bg = unpack_rgb(uni.frame_bg);
+    if (col == 0 && px == 0) {
+        for (uint x = 0; x < uni.padding; ++x) {
+            output.write(frame_bg, uint2(x, gid_y));
+        }
+        if (row == 0) {
+            for (uint x = 0; x < uni.padding; ++x) {
+                for (uint y = 0; y < uni.padding_top; ++y) {
+                    output.write(frame_bg, uint2(x, y));
+                }
+            }
+        }
+        if (row + 1 == uni.rows) {
+            for (uint x = 0; x < uni.padding; ++x) {
+                for (uint y = uni.padding_top + uni.rows * uni.cell_height;
+                     y < output.get_height(); ++y) {
+                    output.write(frame_bg, uint2(x, y));
+                }
+            }
+        }
+    }
+    if (col + 1 == uni.cols && px == 0) {
+        for (uint x = uni.padding + uni.cols * uni.cell_width; x < output.get_width(); ++x) {
+            output.write(frame_bg, uint2(x, gid_y));
+        }
+        if (row == 0) {
+            for (uint x = uni.padding + uni.cols * uni.cell_width;
+                 x < output.get_width(); ++x) {
+                for (uint y = 0; y < uni.padding_top; ++y) {
+                    output.write(frame_bg, uint2(x, y));
+                }
+            }
+        }
+        if (row + 1 == uni.rows) {
+            for (uint x = uni.padding + uni.cols * uni.cell_width;
+                 x < output.get_width(); ++x) {
+                for (uint y = uni.padding_top + uni.rows * uni.cell_height;
+                     y < output.get_height(); ++y) {
+                    output.write(frame_bg, uint2(x, y));
+                }
+            }
+        }
+    }
+    if (row == 0 && py == 0) {
+        for (uint y = 0; y < uni.padding_top; ++y) {
+            output.write(frame_bg, uint2(gid_x, y));
+        }
+    }
+    if (row + 1 == uni.rows && py == 0) {
+        for (uint y = uni.padding_top + uni.rows * uni.cell_height; y < output.get_height(); ++y) {
+            output.write(frame_bg, uint2(gid_x, y));
+        }
+    }
+
     if (flags & FLAG_WIDE_CONT) {
         px += uni.cell_width;
         uint atlas_px = uint(shared_atlas_x) * uni.atlas_cell_width + px;

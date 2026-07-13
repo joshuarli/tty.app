@@ -377,10 +377,11 @@ Cell and resolves its palette/style state once into threadgroup memory, then
 shades that cell's pixels. The existing full-frame compute kernel remains the
 reference implementation.
 
-The tiled kernel shades the cell interior only. The headless fixture initializes
-the static frame background once; a production integration must preserve that
-background across drawable acquisition, resize, and first-frame initialization.
-No retained framebuffer or additional per-frame allocation was introduced.
+The tiled kernel shades the cell interiors and explicitly paints every border
+pixel, including the leftover pixels after the final row or column. This is
+required because a CAMetal drawable is not guaranteed to preserve its previous
+contents. No retained framebuffer or additional per-frame allocation was
+introduced.
 
 The canonical replay validation matched the reference pixel-for-pixel after
 every frame. The focused headless visual test also covers the tiled path for
@@ -410,25 +411,27 @@ because it omits static padding; the larger gain comes from eliminating
 repeated per-pixel cell/style work.
 
 Decision: this is the first active-rendering prototype that merits a guarded
-production integration experiment. Do not replace the production kernel yet.
-Phase 6 should integrate the tiled compute path behind a debug/reference switch,
-then validate drawable clearing, resize, double-buffering, synchronized output,
-scrollback, selection, and cursor behavior onscreen. Keep the full-frame kernel
-as the fallback until those gates and repeated GPU/energy measurements pass.
+production integration experiment. Keep the full-frame kernel as the fallback
+until the remaining drawable, resize, double-buffering, synchronized output,
+scrollback, selection, cursor, and manual visual gates pass.
 
 ## Phase 6: Integrate tiled compute only if Phase 5 wins
 
-Currently deferred until the Phase 5 tiled-compute gate passes. Generic
-damage and scroll-aware retained rendering remain benchmark infrastructure
-only.
+The headless tiled-compute gate passes. Generic damage and scroll-aware retained
+rendering remain benchmark infrastructure only. The production switch is still
+guarded and defaults to the full-frame compute path.
 
-Once the headless tiled core passes:
+The guarded integration is selected with `TTY_TILED_RENDER=1` when launching
+the app. It preserves the current double-buffering and GPU-in-flight behavior,
+handles drawable misses through the existing retry path, and keeps the
+full-frame compute path available as the default and comparison reference.
 
-- Add the tiled compute pipeline to `MetalRenderer` behind a debug/reference switch.
-- Preserve the current double-buffering and GPU-in-flight behavior.
-- Handle drawable misses without losing the current frame.
+Remaining onscreen checks:
+
 - Validate scrollback viewport rendering, selection, synchronized output, and resize.
-- Keep the full-frame compute path available for pixel-by-pixel comparison.
+- Exercise focus transitions and drawable misses while output is active.
+- Compare the same workload against the default path for visual artifacts and
+  repeated GPU timing.
 
 Gate:
 
@@ -438,9 +441,9 @@ headless correctness suite
 tiled-compute benchmark
 ```
 
-No production switch until all pass and the Phase 5 performance gates are met.
-If they are not met, document the prototype result and leave the current
-renderer as the production path.
+No default production switch until the remaining onscreen checks and repeated
+GPU/energy measurements pass. If they do not, remove the switch and leave the
+current renderer as the production path.
 
 ## Phase 7: Decide whether to extend the architecture
 

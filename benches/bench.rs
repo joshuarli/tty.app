@@ -3810,10 +3810,9 @@ impl MetalReplay {
                         }
                     }
                 }
-                if rendered
-                    && let Some(ref mut observer) = observer {
-                        observer(stats.frames, baseline);
-                    }
+                if rendered && let Some(ref mut observer) = observer {
+                    observer(stats.frames, baseline);
+                }
             }
             self.grid.clear_dirty();
         }

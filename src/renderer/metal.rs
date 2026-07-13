@@ -72,6 +72,9 @@ pub struct MetalRenderer {
     // Track whether we need to render (deferred frame or previous drawable miss)
     pub(crate) needs_render: bool,
 
+    // Headless tiled prototype, enabled with TTY_TILED_RENDER=1.
+    use_tiled: bool,
+
     // Previous cursor state — re-render when cursor moves without dirtying cells
     prev_cursor_row: u32,
     prev_cursor_col: u32,
@@ -91,7 +94,12 @@ impl MetalRenderer {
         cell_height: u32,
         notch_px: u32,
     ) -> Self {
-        let core = MetalCore::new();
+        let use_tiled = std::env::var_os("TTY_TILED_RENDER").is_some();
+        let core = if use_tiled {
+            MetalCore::new_with_tiled()
+        } else {
+            MetalCore::new()
+        };
         let device = core.device();
 
         // Set up CAMetalLayer
@@ -177,6 +185,7 @@ impl MetalRenderer {
             scale_factor,
             notch_px,
             needs_render: true,
+            use_tiled,
             prev_cursor_row: 0,
             prev_cursor_col: 0,
             prev_cursor_visible: true,
@@ -317,7 +326,11 @@ impl MetalRenderer {
                 .computeCommandEncoder()
                 .expect("failed to create compute command encoder");
 
-            encoder.setComputePipelineState(self.core.pipeline());
+            if self.use_tiled {
+                encoder.setComputePipelineState(self.core.tiled_pipeline());
+            } else {
+                encoder.setComputePipelineState(self.core.pipeline());
+            }
             unsafe {
                 encoder.setTexture_atIndex(Some(&texture), 0);
                 encoder.setTexture_atIndex(Some(&self.atlas_texture), 1);
@@ -343,7 +356,22 @@ impl MetalRenderer {
                 depth: 1,
             };
 
-            encoder.dispatchThreads_threadsPerThreadgroup(grid_size, threadgroup_size);
+            if self.use_tiled {
+                encoder.dispatchThreadgroups_threadsPerThreadgroup(
+                    MTLSize {
+                        width: self.cols as usize,
+                        height: self.rows as usize,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: self.cell_width as usize,
+                        height: self.cell_height as usize,
+                        depth: 1,
+                    },
+                );
+            } else {
+                encoder.dispatchThreads_threadsPerThreadgroup(grid_size, threadgroup_size);
+            }
             encoder.endEncoding();
 
             // Mark buffer as in-flight before commit

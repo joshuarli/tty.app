@@ -260,19 +260,6 @@ fn render_tiled_pixels(
         .device()
         .newTextureWithDescriptor(&out_desc)
         .expect("failed to create tiled output texture");
-    let mut clear_pixels = vec![0u8; out_w as usize * out_h as usize * 4];
-    for pixel in clear_pixels.chunks_exact_mut(4) {
-        pixel[3] = 255;
-    }
-    unsafe {
-        output.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
-            region(0, 0, out_w, out_h),
-            0,
-            NonNull::new(clear_pixels.as_ptr() as *mut c_void).unwrap(),
-            out_w as usize * 4,
-        );
-    }
-
     let atlas_desc = unsafe {
         MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
             MTLPixelFormat::R8Unorm,
@@ -896,7 +883,7 @@ fn tiled_pipeline_matches_compute_for_visual_features() {
         cursor_row: 1,
         cursor_col: 2,
         cursor_visible: 1,
-        frame_bg: config::DEFAULT_BG,
+        frame_bg: 0x00112233,
         damage_origin_x: 0,
         damage_origin_y: 0,
     };
