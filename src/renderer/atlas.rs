@@ -39,7 +39,8 @@ pub struct Atlas {
     cols: u32,
     rows: u32,
     map: FxHashMap<GlyphKey, AtlasPos>,
-    // Next allocation slot
+    // Next allocation slot. Every slot reserves two cell columns so wide
+    // glyphs cannot overlap the following slot or run past the texture edge.
     next_slot: u32,
     // LRU: slot → last used frame
     usage: Vec<u64>,
@@ -54,6 +55,9 @@ pub struct Atlas {
 
 impl Atlas {
     pub fn new(device: &ProtocolObject<dyn MTLDevice>, cell_width: u32, cell_height: u32) -> Self {
+        assert!(cell_width > 0 && cell_width <= ATLAS_SIZE / 2);
+        assert!(cell_height > 0 && cell_height <= ATLAS_SIZE);
+
         let desc = unsafe {
             MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
                 MTLPixelFormat::R8Unorm,
@@ -68,8 +72,10 @@ impl Atlas {
             .newTextureWithDescriptor(&desc)
             .expect("failed to create atlas texture");
 
-        // Use double cell width for the atlas grid to accommodate wide glyphs
-        let cols = ATLAS_SIZE / cell_width;
+        // Every slot is two cells wide because wide glyphs are uploaded as a
+        // double-cell bitmap. Positions remain expressed in cell columns for
+        // the shader, so allocated x coordinates are even.
+        let cols = ATLAS_SIZE / (cell_width * 2);
         let rows = ATLAS_SIZE / cell_height;
 
         Atlas {
@@ -128,7 +134,7 @@ impl Atlas {
         let key = GlyphKey { codepoint, wide };
 
         if let Some(pos) = self.map.get(&key) {
-            let slot = pos.y as u32 * self.cols + pos.x as u32;
+            let slot = pos.y as u32 * self.cols + pos.x as u32 / 2;
             self.usage[slot as usize] = self.frame;
             self.lru_heap.push(Reverse((self.frame, slot)));
             return *pos;
@@ -156,7 +162,7 @@ impl Atlas {
             self.evict_lru()
         };
 
-        let grid_x = slot % self.cols;
+        let grid_x = (slot % self.cols) * 2;
         let grid_y = slot / self.cols;
 
         // Upload glyph data to atlas texture
@@ -206,7 +212,7 @@ impl Atlas {
                 continue; // stale — slot was accessed more recently
             }
             // Found the real LRU slot
-            let grid_x = slot % self.cols;
+            let grid_x = (slot % self.cols) * 2;
             let grid_y = slot / self.cols;
             self.map
                 .retain(|_, pos| !(pos.x == grid_x as u8 && pos.y == grid_y as u8));

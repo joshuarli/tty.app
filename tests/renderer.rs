@@ -107,6 +107,27 @@ fn wide_glyph_gets_slot() {
 }
 
 #[test]
+fn wide_glyph_at_slot_boundary_fits_atlas() {
+    let device = device();
+    let cell_w = 512;
+    let cell_h = 512;
+    let rasterizer = MockRasterizer {
+        cell_width: cell_w,
+        cell_height: cell_h,
+    };
+    let mut atlas = Atlas::new(&device, cell_w, cell_h);
+
+    // With one-cell slots, this wide insert lands in the final atlas column
+    // and triggers AGX's Region width OOB assertion.
+    for cp in 0x41..0x44 {
+        atlas.get_or_insert(cp, false, &rasterizer);
+    }
+    let pos = atlas.get_or_insert(0x4E00, true, &rasterizer);
+
+    assert!(pos.x as u32 + 2 <= 2048 / cell_w);
+}
+
+#[test]
 fn ascii_table_raw_matches_preload() {
     let device = device();
     let rasterizer = MockRasterizer {
@@ -137,7 +158,7 @@ fn evict_lru_when_full() {
     };
     let mut atlas = Atlas::new(&device, cell_w, cell_h);
 
-    // Fill all 16 slots (2048/512 = 4, so 4×4 = 16)
+    // Fill all 8 double-cell slots (2048/512 = 4 cell columns, so 2×4 = 8)
     for cp in 0x41u32..0x51 {
         atlas.get_or_insert(cp, false, &rasterizer);
     }
