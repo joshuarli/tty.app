@@ -6,8 +6,15 @@ LLVM_BIN   := $(shell rustc --print sysroot)/lib/rustlib/$(TARGET)/bin
 
 .PHONY: build prof pgo-profile dist-pgo bench-pgo dist install test test-ci coverage pc bump-version
 
-build:
+# inspect with:
+# heap <pid>
+# vmmap --summary <pid>
+# malloc_history <pid> <address>
+debug:
 	cargo build
+	MallocStackLoggingNoCompact=1 \
+	MallocScribble=1 \
+	./target/debug/tty
 
 lint:
 	cargo fmt --all

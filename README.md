@@ -1,53 +1,86 @@
 # tty.app
 
-The terminal emulator should be as simple as possible because
-tmux gives you everything else you need: session management,
-tabs (windows/panes), scrollback buffer, selection, clipboard,
-search. Of course, we still implement basic amenities in case
-tmux is not present.
+tty.app is a small macOS terminal emulator for Apple Silicon. It is designed
+to provide the terminal itself; tmux remains responsible for sessions, panes,
+tabs, searchable history, and selection workflows.
 
-- Apple Silicon only — Rust + native Metal compute shader
-- 8-byte Cell is the Metal compute-buffer format — dirty rows are copied directly
-- Ring buffer grid — full-screen scroll is O(cols) after the ring-offset update
-- SIMD-accelerated VT parser (three-layer: NEON → CSI fast path → state machine)
-- xterm-256color subset sufficient for tmux, vim, htop
-- Single-threaded: non-blocking PTY I/O with AppKit/Core Foundation wakeups, no mutexes
+The implementation is Rust with native AppKit windowing and a Metal compute
+renderer. The supported terminal behavior is the xterm-256color subset needed
+by shells and applications such as tmux, vim, and htop.
 
 ## Install
 
-Edit `src/config.rs` and run `make install`.
+Edit the compile-time settings in `src/config.rs`, then run:
 
-### Design
+```sh
+make install
+```
 
-The 8-byte Cell (`#[repr(C)]`: codepoint, flags, fg, bg, atlas_x, atlas_y) carries the data needed by the Metal shader. Glyph atlas coordinates are resolved when a character is written, not by a CPU-side conversion pass during rendering. ASCII uses a preloaded lookup table; uncached Unicode glyphs can still require rasterization and atlas-cache work.
+## Design decisions
 
-- **CPU upload = memcpy.** Dirty rows are copied directly into the double-buffered Metal shared cell buffer. There is no per-cell conversion or packing loop.
-- **Scroll = ring-offset update plus clearing.** Full-screen scroll avoids an O(rows × cols) memmove: it updates the ring offset and clears the newly exposed row, which is O(cols) for one line. Pushing that line into scrollback also copies the row.
-- **Idle = no Metal dispatch and no periodic polling.** Only dirty rows, cursor changes, or deferred frames cause a render dispatch. When there is no work, the main thread blocks in the Core Foundation run loop until AppKit activity or PTY readiness wakes it. This removes the fixed idle timer and lets the process sleep between events.
-- **Unfocused windows do not render.** PTY output is still drained and parsed while a window is unfocused, but Metal submission is skipped. Focus-in marks the grid dirty so the current frame is repainted when focus returns.
-- **Steady state can be allocation-free.** ASCII runs write directly into the Cell vec using a precomputed 128-entry atlas table. Scrollback rows reuse their allocations after the ring is full, and the PTY read buffer is reused. Initial scrollback growth and first-use Unicode glyphs can allocate.
-- **The full cell-tiled renderer is the production default.** Each terminal cell owns one Metal threadgroup, which resolves its style once and shades the cell's pixels. The full-frame kernel and retained active-cell prototype remain available to the headless benchmark harness as comparison paths.
+### The screen is also the GPU input
 
-The event loop is a manual single-threaded loop in `main()`: it drains PTY output, performs one 500µs coalescing wait when data arrived, drains AppKit events, handles input, renders focused windows, and blocks in the Core Foundation run loop when idle. PTY file descriptors are registered as run-loop sources, so PTY output and AppKit activity wake the same thread. There is no async runtime or I/O thread; Metal command buffers execute asynchronously. Idle-power behavior is designed to be event-driven; absolute energy use still depends on AppKit, the display, and the workload and should be measured with macOS power tools.
+`Cell` is an 8-byte `#[repr(C)]` value shared by Rust and Metal:
 
-### Performance
+```text
+u16 codepoint | u16 flags | u8 foreground | u8 background | u8 atlas_x | u8 atlas_y
+```
 
-The repository contains Criterion microbenchmarks for the parser, grid, scrollback, allocation behavior, and CPU-side cell copies. They are useful for tracking regressions, but they are not an end-to-end Metal or frame-rate benchmark: the parser benchmarks use a simplified performer, and the cell-copy benchmark copies into ordinary process memory rather than measuring a GPU transfer.
+The grid can therefore copy dirty rows directly into Metal shared storage.
+There is no render-time cell conversion or packing pass. The fixed layout is a
+deliberate constraint: colors are palette indices, and combining marks,
+grapheme shaping, and runtime font configuration are outside the model.
 
-- **SIMD scanner:** NEON examines four 16-byte chunks per iteration on AArch64, with scalar handling for tails and unusual input.
-- **Cell writes:** ASCII writes use the direct atlas table and fixed-size Cell fields; this is the common CPU hot path.
-- **CPU-side upload:** dirty rows are raw copies into Metal shared storage. This removes packing work, but the current benchmark does not measure onscreen frame rate or energy.
-- **Allocation behavior:** `Grid::new(80, 24)` currently reports four allocations totaling about 22.5 KiB in the allocation audit. Parsing output that fills scrollback and discovering glyphs are separate allocation cases.
+Glyph atlas coordinates are resolved when characters are written. ASCII uses
+a preloaded 128-entry table; other glyphs are rasterized and cached on demand.
+Hack Regular is embedded, with CoreText fallback for glyphs it does not cover.
 
-Any throughput number should be reported with the Apple Silicon model, macOS version, compiler/profile, benchmark command, workload, and variance. The existing harness does not justify calling parser/grid numbers “end-to-end” or calling CPU memory-copy throughput “GPU upload.”
+### Scrolling rotates rows
 
-### Deliberate tradeoffs
+The screen is a flat cell vector with ring-buffer row addressing. A full-screen
+scroll advances the ring offset, clears the newly exposed row, and copies the
+evicted row to scrollback. It does not move the rest of the screen. Partial
+scroll regions use row copies.
 
-The fixed-size 8-byte Cell is the foundation of the entire architecture — it enables direct-format copies into Metal shared storage, per-dirty-row uploads, and simple ring buffer scrolling. Everything that doesn't fit in 8 bytes is intentionally omitted:
+### Rendering is damage-driven and asynchronous
 
-- **No truecolor in cells** — RGB values are mapped to the nearest 256-color palette index at parse time. The PTY advertises `COLORTERM=truecolor`, but the renderer stores palette indices.
-- **No combining marks or grapheme shaping** — each cell represents one codepoint. Standalone non-BMP characters use a parallel character store, while combining marks and ZWJ composition are ignored.
-- **No runtime config** — font choice, colors, and padding are compile-time constants in `src/config.rs`. Hack is embedded, with CoreText fallback fonts for missing glyphs, but changing the configured font still requires recompilation.
-- **No scrollback search or scrollback selection** — scrollback is stored as raw Cell rows for display, not as searchable text.
+The renderer tracks dirty rows separately for two shared cell buffers. It
+uploads only pending rows and skips submission if the target buffer is still in
+flight. Metal completion handlers mark buffers available for reuse; the
+application loop never waits for GPU completion during normal rendering.
 
-These are accepted limitations, not planned features.
+The production shader is cell-tiled: each terminal cell owns a threadgroup
+that handles its glyph, palette attributes, decorations, wide-cell behavior,
+selection, and cursor. Box drawing and arrows are rendered procedurally.
+
+### One event-driven application loop
+
+Each terminal owns an `App` and a native window. The main thread drains
+non-blocking PTYs, processes AppKit events, handles input, and renders focused
+windows. PTY descriptors are Core Foundation run-loop sources, so idle time
+blocks until AppKit or PTY activity; there is no fixed idle timer, async
+runtime, or PTY I/O thread.
+
+After PTY data arrives, the loop performs one 500 µs run-loop wait and a second
+read pass. This coalesces split writes from applications that update a screen
+in several small writes. Continuous output is bounded by a 256 KiB per-frame
+read budget so input and rendering still get turns.
+
+PTY output is drained and parsed for unfocused windows, but their Metal
+submission is deferred. Focus changes mark the screen for repaint.
+
+### Synchronized output is a terminal mode
+
+Mode 2026 defers rendering while an application performs a coordinated update.
+Dirty state accumulates and is rendered once the mode ends. A 100 ms timeout
+prevents a misbehaving application from keeping the display frozen.
+
+## Deliberate limits
+
+- 256-color palette storage; truecolor SGR is mapped to the nearest palette
+  entry.
+- One codepoint per cell; combining marks and ZWJ composition are ignored.
+- Non-BMP characters use a parallel character store because the cell's
+  codepoint field is `u16`.
+- Font, palette, padding, and scrollback capacity are compile-time settings.
+- Scrollback contains rendered cell rows, not searchable text.

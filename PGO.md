@@ -1,96 +1,48 @@
-# Profile-Guided Optimization
+# Profile-guided optimization
 
-PGO compiles an instrumented binary, runs it on realistic workloads to record
-branch/call patterns, then recompiles using those profiles. Typical gains:
-10-20% on real-world programs.
+The Makefile owns the automated PGO workflow. This document covers the part
+that cannot be supplied by benchmarks: recordings of real terminal sessions.
 
-## Quick start
+## Manual session capture
 
-```bash
-make dist-pgo
-```
+Capture a session with macOS `script`, then use the terminal normally:
 
-This runs the benchmark suite under instrumentation, then recompiles with the
-gathered profiles. For better coverage, add a manual session first (see below).
-
-## How it works
-
-### Automatic profiles (benches)
-
-`make dist-pgo` runs the criterion benchmarks under an instrumented build.
-This exercises the parser hot path (SIMD scanner, CSI fast path, state machine,
-grid mutations) with realistic byte patterns.
-
-### Manual session capture
-
-Benchmarks miss the render path, PTY I/O, and interactive patterns. For fuller
-coverage, record a manual session:
-
-```bash
-# Record raw PTY output
+```sh
+mkdir -p sessions
 script -q sessions/interactive.raw
-# ... use the terminal: cat large files, run ls --color, use vim, scroll
-# ... then exit
 
-# Record a heavy-output session
-ls --color=always -laR / > /dev/null 2>&1  # or any noisy command
+# Inside the session, exercise the workloads you want represented:
+# cat large files, run colored commands, use vim/tmux, scroll, resize, etc.
+# Exit the shell when finished.
 ```
 
-The `sessions/` directory holds raw byte streams that can be replayed through
-the parser+grid pipeline without a window or PTY.
+The recording should contain terminal output, not a screenshot or application
+log. Keep recordings representative and reasonably bounded; they are replayed
+for every profiling run.
 
-### Suggested recordings
+## Suggested recordings
 
-Keep a few recordings covering different workloads:
-
-| File | Workload | Exercises |
+| Recording | Workload | Covers |
 |---|---|---|
-| `sessions/bulk-ascii.raw` | `cat` a large source file | SIMD scanner, bulk ASCII path |
-| `sessions/heavy-sgr.raw` | `ls --color=always -laR` of a big dir | SGR parsing, 256-color |
-| `sessions/interactive.raw` | vim/tmux session | cursor movement, alt screen, scroll regions |
+| `sessions/bulk-ascii.raw` | `cat` a large source file | Bulk shell output |
+| `sessions/heavy-sgr.raw` | Recursive colored directory listing | SGR and palette changes |
+| `sessions/interactive.raw` | vim or tmux session | Cursor movement, alternate screen, scroll regions |
 
-### Replay harness
+## Replay harness
 
-To use recorded sessions for PGO, add a replay benchmark or test that feeds
-the raw bytes through the parser:
+Add recordings to a replay benchmark or test rather than profiling them only
+through a live window. The harness should feed the bytes through the real
+parser, performer, grid, scrollback, and renderer paths in the same chunk sizes
+used by PTY reads, for example:
 
 ```rust
 let data = std::fs::read("sessions/bulk-ascii.raw").unwrap();
-let mut grid = Grid::new(cols, rows);
-let mut parser = Parser::new();
-// ... set up scrollback, performer
-
-for chunk in data.chunks(65536) {
+for chunk in data.chunks(64 * 1024) {
     parser.parse(chunk, &mut performer);
 }
 ```
 
-This exercises the real hot path with real byte patterns, fully automatable,
-no display needed.
-
-## Full PGO + BOLT workflow
-
-For maximum optimization (additional 2-5% on top of PGO):
-
-```bash
-cargo install cargo-pgo
-
-# 1. PGO profiling
-cargo pgo bench
-
-# 2. (Optional) manual session profiling — profiles accumulate
-cargo pgo build
-./target/dist/tty  # use it, then exit
-
-# 3. PGO + BOLT
-cargo pgo bolt build --with-pgo
-./target/dist/tty-bolt-instrumented  # use it, then exit
-cargo pgo bolt optimize --with-pgo
-```
-
-## Notes
-
-- Profiles accumulate in `target/pgo-profiles/` — multiple runs merge automatically.
-- Instrumented binaries are slow — budget extra time for profiling runs.
-- Stale profiles are worse than none — regenerate after significant code changes.
-- BOLT instrumentation mode works in CI (no hardware perf counters needed).
+For renderer work, preserve the resulting dirty rows and frame boundaries so
+the replay can compare full rendering with damage-driven rendering. A useful
+replay harness should also verify that optimized paths produce the same final
+grid and pixels as the reference path.

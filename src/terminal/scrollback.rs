@@ -23,6 +23,14 @@ impl Scrollback {
         self.len
     }
 
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(crate) fn debug_buffer_capacities(&self) -> (usize, usize, usize) {
+        let row_capacity = self.buf.iter().map(Vec::capacity).sum();
+        let max_row_capacity = self.buf.iter().map(Vec::capacity).max().unwrap_or(0);
+        (self.buf.capacity(), row_capacity, max_row_capacity)
+    }
+
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.len == 0
