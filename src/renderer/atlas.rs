@@ -1,6 +1,3 @@
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
-
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
@@ -42,11 +39,9 @@ pub struct Atlas {
     // Next allocation slot. Every slot reserves two cell columns so wide
     // glyphs cannot overlap the following slot or run past the texture edge.
     next_slot: u32,
-    // LRU: slot → last used frame
+    // LRU: slot → last access sequence
     usage: Vec<u64>,
     frame: u64,
-    // Min-heap for O(log n) LRU eviction (lazy deletion)
-    lru_heap: BinaryHeap<Reverse<(u64, u32)>>,
     // Slots 0..ascii_end are pinned (never evicted)
     ascii_end: u32,
     // Direct lookup for ASCII (0x00..0x7F) — bypasses HashMap and LRU
@@ -88,7 +83,6 @@ impl Atlas {
             next_slot: 0,
             usage: vec![0; (cols * rows) as usize],
             frame: 0,
-            lru_heap: BinaryHeap::with_capacity(512),
             ascii_end: 0,
             ascii_table: [AtlasPos::default(); 128],
         }
@@ -131,12 +125,12 @@ impl Atlas {
         wide: bool,
         rasterizer: &R,
     ) -> AtlasPos {
+        self.frame = self.frame.wrapping_add(1);
         let key = GlyphKey { codepoint, wide };
 
         if let Some(pos) = self.map.get(&key) {
             let slot = pos.y as u32 * self.cols + pos.x as u32 / 2;
             self.usage[slot as usize] = self.frame;
-            self.lru_heap.push(Reverse((self.frame, slot)));
             return *pos;
         }
 
@@ -198,27 +192,25 @@ impl Atlas {
         };
         self.map.insert(key, pos);
         self.usage[slot as usize] = self.frame;
-        self.lru_heap.push(Reverse((self.frame, slot)));
         pos
     }
 
     fn evict_lru(&mut self) -> u32 {
-        // Pop stale entries until we find a valid, non-pinned LRU slot
-        while let Some(Reverse((frame, slot))) = self.lru_heap.pop() {
-            if slot < self.ascii_end {
-                continue; // pinned
+        let mut slot = self.ascii_end;
+        let mut oldest = u64::MAX;
+        for candidate in self.ascii_end..self.usage.len() as u32 {
+            if self.usage[candidate as usize] < oldest {
+                oldest = self.usage[candidate as usize];
+                slot = candidate;
             }
-            if self.usage[slot as usize] != frame {
-                continue; // stale — slot was accessed more recently
-            }
-            // Found the real LRU slot
+        }
+
+        if slot < self.usage.len() as u32 {
             let grid_x = (slot % self.cols) * 2;
             let grid_y = slot / self.cols;
             self.map
                 .retain(|_, pos| !(pos.x == grid_x as u8 && pos.y == grid_y as u8));
-            return slot;
         }
-        // Fallback: shouldn't happen unless every slot is pinned
-        self.ascii_end
+        slot
     }
 }

@@ -777,8 +777,7 @@ impl DebugLogger {
 
         for (index, terminal) in terminals.iter().enumerate() {
             let app = &terminal.app;
-            let (cells, chars, alt_cells, alt_chars) =
-                app.shared.grid.debug_buffer_capacities();
+            let (cells, chars, alt_cells, alt_chars) = app.shared.grid.debug_buffer_capacities();
             let (scrollback_vec, scrollback_rows, scrollback_max_row) =
                 app.shared.scrollback.debug_buffer_capacities();
             let (osc, dcs) = app.parser.debug_buffer_capacities();
