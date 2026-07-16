@@ -77,10 +77,7 @@ fn nearby_colors_can_use_named_entries() {
 
 #[test]
 fn nearby_colors_do_not_collapse_named_entries() {
-    assert_ne!(
-        rgb_to_palette(172, 66, 66),
-        rgb_to_palette(144, 169, 89)
-    );
+    assert_ne!(rgb_to_palette(172, 66, 66), rgb_to_palette(144, 169, 89));
 }
 
 #[test]

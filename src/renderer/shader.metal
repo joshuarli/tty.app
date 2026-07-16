@@ -40,8 +40,10 @@ constant ushort FLAG_HIDDEN     = 0x0400;
 constant ushort FLAG_DIM        = 0x0200;
 constant ushort FLAG_TILED_SKIP = 0x8000;
 
-inline half4 dim_color(half4 color) {
-    return half4(color.rgb * 0.66h, color.a);
+inline half4 palette_color(device const half4* palette, uchar index, ushort flags) {
+    half4 color = palette[index];
+    if (flags & FLAG_DIM) color = half4(color.rgb * 0.66h, color.a);
+    return color;
 }
 
 // ── Box drawing lookup ──────────────────────────────────────────────
@@ -255,9 +257,8 @@ kernel void render(
 
     // Wide continuation — the cell carries the owner's colors and atlas coords
     if (cell.flags & FLAG_WIDE_CONT) {
-        half4 fg = palette[cell.fg_index];
+        half4 fg = palette_color(palette, cell.fg_index, cell.flags);
         half4 bg = palette[cell.bg_index];
-        if (cell.flags & FLAG_DIM) fg = dim_color(fg);
         if (cell.flags & FLAG_INVERSE) { half4 tmp = fg; fg = bg; bg = tmp; }
         if (cell.flags & FLAG_HIDDEN) fg = bg;
         // Offset px to sample the right half of the wide glyph
@@ -271,9 +272,8 @@ kernel void render(
     }
 
     // Resolve fg/bg from palette
-    half4 fg = palette[cell.fg_index];
+    half4 fg = palette_color(palette, cell.fg_index, cell.flags);
     half4 bg = palette[cell.bg_index];
-    if (cell.flags & FLAG_DIM) fg = dim_color(fg);
 
     // Hidden: make fg match bg
     if (cell.flags & FLAG_HIDDEN) {
@@ -385,17 +385,15 @@ kernel void render_tiled(
         shared_atlas_y = cell.atlas_y;
 
         if (cell.flags & FLAG_WIDE_CONT) {
-            half4 fg = palette[cell.fg_index];
+            half4 fg = palette_color(palette, cell.fg_index, cell.flags);
             half4 bg = palette[cell.bg_index];
-            if (cell.flags & FLAG_DIM) fg = dim_color(fg);
             if (cell.flags & FLAG_INVERSE) { half4 tmp = fg; fg = bg; bg = tmp; }
             if (cell.flags & FLAG_HIDDEN) fg = bg;
             shared_fg = fg;
             shared_bg = bg;
         } else {
-            half4 fg = palette[cell.fg_index];
+            half4 fg = palette_color(palette, cell.fg_index, cell.flags);
             half4 bg = palette[cell.bg_index];
-            if (cell.flags & FLAG_DIM) fg = dim_color(fg);
             if (cell.flags & FLAG_HIDDEN) {
                 fg = bg;
             }
@@ -554,17 +552,15 @@ kernel void render_tiled_list(
         shared_atlas_y = cell.atlas_y;
 
         if (cell.flags & FLAG_WIDE_CONT) {
-            half4 fg = palette[cell.fg_index];
+            half4 fg = palette_color(palette, cell.fg_index, cell.flags);
             half4 bg = palette[cell.bg_index];
-            if (cell.flags & FLAG_DIM) fg = dim_color(fg);
             if (cell.flags & FLAG_INVERSE) { half4 tmp = fg; fg = bg; bg = tmp; }
             if (cell.flags & FLAG_HIDDEN) fg = bg;
             shared_fg = fg;
             shared_bg = bg;
         } else {
-            half4 fg = palette[cell.fg_index];
+            half4 fg = palette_color(palette, cell.fg_index, cell.flags);
             half4 bg = palette[cell.bg_index];
-            if (cell.flags & FLAG_DIM) fg = dim_color(fg);
             if (cell.flags & FLAG_HIDDEN) fg = bg;
             if (cell.flags & FLAG_INVERSE) {
                 half4 tmp = fg;

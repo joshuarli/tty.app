@@ -4496,6 +4496,46 @@ fn bench_metal_tiled(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_metal_color(c: &mut Criterion) {
+    let mut group = c.benchmark_group("metal_color");
+    let mut baseline = MetalBaseline::new();
+    let cell_count = METAL_COLS as usize * METAL_ROWS as usize;
+    let dirty_rows = (0..METAL_ROWS as usize).collect::<Vec<_>>();
+    let make_frame = |flags| MetalFrame {
+        cells: vec![
+            Cell {
+                codepoint: 0x2500,
+                flags,
+                fg_index: 1,
+                bg_index: 0,
+                atlas_x: 0,
+                atlas_y: 0,
+            };
+            cell_count
+        ],
+        dirty_rows: dirty_rows.clone(),
+        cursor_row: 0,
+        cursor_col: 0,
+        cursor_visible: false,
+    };
+
+    for (label, frame) in [
+        ("normal", make_frame(CellFlags::empty())),
+        ("dim", make_frame(CellFlags::DIM)),
+    ] {
+        group.bench_function(label, |b| {
+            b.iter_custom(|iters| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iters {
+                    elapsed += baseline.run_tiled(std::slice::from_ref(&frame)).wall_time;
+                }
+                elapsed
+            });
+        });
+    }
+    group.finish();
+}
+
 fn bench_metal_tiled_damage(c: &mut Criterion) {
     let mut group = c.benchmark_group("metal_tiled_damage");
     let mut baseline = MetalBaseline::new();
@@ -4693,6 +4733,7 @@ criterion_group! {
         bench_process_rss,
         bench_metal_baseline,
         bench_metal_tiled,
+        bench_metal_color,
         bench_metal_tiled_damage,
         bench_metal_replay,
         bench_metal_damage,

@@ -94,7 +94,7 @@ impl MetalCore {
             device
                 .newBufferWithBytes_length_options(
                     NonNull::new(palette_data.as_ptr() as *mut c_void).unwrap(),
-                    (256 * 4 * mem::size_of::<u16>()) as usize,
+                    (palette_data.len() * mem::size_of::<u16>()) as usize,
                     MTLResourceOptions::StorageModeShared,
                 )
                 .expect("failed to create palette buffer")
@@ -162,22 +162,44 @@ impl MetalCore {
     }
 
     fn build_palette_buffer() -> Vec<u16> {
-        let mut data = Vec::with_capacity(256 * 4);
+        let mut data = Vec::with_capacity(config::PALETTE.len() * 4);
         for &rgb in config::PALETTE.iter() {
-            let r = ((rgb >> 16) & 0xFF) as f32 / 255.0;
-            let g = ((rgb >> 8) & 0xFF) as f32 / 255.0;
-            let b = (rgb & 0xFF) as f32 / 255.0;
-            data.push(Self::f32_to_f16(r));
-            data.push(Self::f32_to_f16(g));
-            data.push(Self::f32_to_f16(b));
-            data.push(Self::f32_to_f16(1.0));
+            data.extend(Self::palette_entry(rgb));
         }
         data
+    }
+
+    fn palette_entry(rgb: u32) -> [u16; 4] {
+        let r = ((rgb >> 16) & 0xFF) as f32 / 255.0;
+        let g = ((rgb >> 8) & 0xFF) as f32 / 255.0;
+        let b = (rgb & 0xFF) as f32 / 255.0;
+        [
+            Self::f32_to_f16(r),
+            Self::f32_to_f16(g),
+            Self::f32_to_f16(b),
+            Self::f32_to_f16(1.0),
+        ]
     }
 }
 
 impl Default for MetalCore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MetalCore;
+    use crate::config;
+
+    #[test]
+    fn palette_buffer_contains_palette_entries() {
+        let data = MetalCore::build_palette_buffer();
+        assert_eq!(data.len(), config::PALETTE.len() * 4);
+
+        let normal = &data[4..8];
+        assert_eq!(normal[3], MetalCore::f32_to_f16(1.0));
+        assert_ne!(normal[..3], [0, 0, 0]);
     }
 }

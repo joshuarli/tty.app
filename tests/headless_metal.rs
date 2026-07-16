@@ -1,5 +1,9 @@
 use std::ffi::c_void;
+use std::fmt::Write as _;
+use std::fs;
 use std::mem::size_of;
+use std::path::PathBuf;
+use std::process::Command;
 use std::ptr::NonNull;
 
 use objc2::rc::Retained;
@@ -7,8 +11,14 @@ use objc2::runtime::ProtocolObject;
 use objc2_metal::*;
 
 use tty::config;
+use tty::parser::Parser;
+use tty::performer::TermPerformer;
+use tty::renderer::atlas::Atlas;
 use tty::renderer::core::MetalCore;
+use tty::renderer::font::FontRasterizer;
 use tty::terminal::cell::{Cell, CellFlags};
+use tty::terminal::grid::Grid;
+use tty::terminal::scrollback::Scrollback;
 
 #[repr(C)]
 struct ShaderUniforms {
@@ -540,6 +550,31 @@ fn bold_preserves_color() {
 }
 
 #[test]
+fn dim_uses_arithmetic_foreground_scaling() {
+    let normal = Cell {
+        codepoint: 0x2500,
+        flags: CellFlags::empty(),
+        fg_index: 1,
+        bg_index: 0,
+        atlas_x: 0,
+        atlas_y: 0,
+    };
+    let dim = Cell {
+        flags: CellFlags::DIM,
+        ..normal
+    };
+    let (normal_pixels, out_w, _) = single_cell_test(normal, 8, 16, 0, 0, 0, 0);
+    let (dim_pixels, _, _) = single_cell_test(dim, 8, 16, 0, 0, 0, 0);
+    let normal_fg = pixel_bgra(&normal_pixels, 0, 8, out_w);
+    let dim_fg = pixel_bgra(&dim_pixels, 0, 8, out_w);
+
+    assert_eq!(normal_fg, pal_to_bgra(config::PALETTE[1]));
+    assert!(dim_fg.0 < normal_fg.0, "dim foreground should be darker");
+    assert!(dim_fg.2 < normal_fg.2, "dim foreground should be darker");
+    assert_eq!(dim_fg.3, normal_fg.3);
+}
+
+#[test]
 fn hidden_matches_background() {
     // HIDDEN: fg = bg, so the box line should be invisible (bg color)
     let cell = Cell {
@@ -714,6 +749,157 @@ fn selected_inverts_like_inverse() {
         pal_to_bgra(config::PALETTE[0]),
         "selected box line black"
     );
+}
+
+#[test]
+fn truecolor_gradient_writes_ppm_and_matches_quantized_palette() {
+    let ctx = setup();
+    let rasterizer = FontRasterizer::new(config::FONT_FAMILY, config::FONT_SIZE, 2.0);
+    let cell_width = rasterizer.metrics.cell_width;
+    let cell_height = rasterizer.metrics.cell_height;
+    let mut atlas = Atlas::new(ctx.core.device(), cell_width, cell_height);
+    atlas.preload_ascii(&rasterizer);
+
+    let cols = 128u16;
+    let rows = 8u16;
+    let mut grid = Grid::new(cols, rows);
+    grid.set_ascii_atlas(&atlas.ascii_table_raw());
+    let mut scrollback = Scrollback::new(0);
+    let mut response_buf = Vec::new();
+    let mut fixture = String::new();
+
+    for row in 0..rows {
+        for col in 0..cols {
+            let i = col;
+            let value = if row % 2 == 0 { i } else { 255 - i };
+            let (r, g, b) = match row {
+                0 | 1 => (value, 0, 0),
+                2 | 3 => (0, value, 0),
+                4 | 5 => (0, 0, value),
+                6 | 7 => rainbow_color(value),
+                _ => unreachable!(),
+            };
+            write!(fixture, "\x1b[48;2;{r};{g};{b}m ").unwrap();
+        }
+        if row + 1 < rows {
+            fixture.push_str("\r\n");
+        }
+    }
+
+    let mut parser = Parser::new();
+    let mut performer = TermPerformer::new(
+        &mut grid,
+        &mut scrollback,
+        &mut atlas,
+        &rasterizer,
+        &mut response_buf,
+    );
+    parser.parse(fixture.as_bytes(), &mut performer);
+
+    let mut cells = Vec::with_capacity(cols as usize * rows as usize);
+    for row in 0..rows {
+        cells.extend_from_slice(grid.row_slice(row));
+    }
+
+    let out_w = cols as u32 * cell_width;
+    let out_h = rows as u32 * cell_height;
+    let uniforms = ShaderUniforms {
+        cols: cols as u32,
+        rows: rows as u32,
+        cell_width,
+        cell_height,
+        atlas_cell_width: cell_width,
+        atlas_cell_height: cell_height,
+        padding: 0,
+        padding_top: 0,
+        cursor_row: 0,
+        cursor_col: 0,
+        cursor_visible: 0,
+        frame_bg: 0,
+        damage_origin_x: 0,
+        damage_origin_y: 0,
+    };
+    let pixels = render_pixels(&ctx, &cells, &uniforms, out_w, out_h);
+
+    const PPM_CELL_SCALE: u32 = 4;
+    let ppm_w = cols as u32 * PPM_CELL_SCALE;
+    let ppm_h = rows as u32 * PPM_CELL_SCALE;
+    let mut ppm = format!("P6\n{ppm_w} {ppm_h}\n255\n").into_bytes();
+    for row in 0..rows {
+        for _ in 0..PPM_CELL_SCALE {
+            for col in 0..cols {
+                let x = col as u32 * cell_width + cell_width / 2;
+                let y = row as u32 * cell_height + cell_height / 2;
+                let pixel = pixel_bgra(&pixels, x, y, out_w);
+                for _ in 0..PPM_CELL_SCALE {
+                    ppm.extend_from_slice(&[pixel.2, pixel.1, pixel.0]);
+                }
+            }
+        }
+    }
+    let path = std::env::var_os("TTY_TRUECOLOR_PPM")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("target/truecolor-fixture.ppm"));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(&path, &ppm).unwrap();
+
+    let golden_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/truecolor-fixture.ppm.gz");
+    let golden = Command::new("gunzip")
+        .arg("-c")
+        .arg(&golden_path)
+        .output()
+        .expect("gunzip must be installed to read the truecolor fixture");
+    assert!(
+        golden.status.success(),
+        "gunzip failed for {}: {}",
+        golden_path.display(),
+        String::from_utf8_lossy(&golden.stderr)
+    );
+    assert_eq!(golden.stdout, ppm, "rendered truecolor fixture changed");
+
+    let mut seen = [false; 256];
+    for row in 0..rows {
+        for col in 0..cols {
+            let i = col;
+            let value = if row % 2 == 0 { i } else { 255 - i };
+            let (r, g, b) = match row {
+                0 | 1 => (value, 0, 0),
+                2 | 3 => (0, value, 0),
+                4 | 5 => (0, 0, value),
+                6 | 7 => rainbow_color(value),
+                _ => unreachable!(),
+            };
+            let palette_index = config::rgb_to_palette(r as u8, g as u8, b as u8);
+            let x = col as u32 * cell_width + cell_width / 2;
+            let y = row as u32 * cell_height + cell_height / 2;
+            assert_eq!(
+                pixel_bgra(&pixels, x, y, out_w),
+                pal_to_bgra(config::PALETTE[palette_index as usize]),
+                "truecolor pixel at row {row}, col {col}"
+            );
+            seen[palette_index as usize] = true;
+        }
+    }
+    assert!(seen.into_iter().filter(|seen| *seen).count() > 32);
+}
+
+fn rainbow_color(value: u16) -> (u16, u16, u16) {
+    let h = value / 43;
+    let f = value - 43 * h;
+    let t = f * 255 / 43;
+    let q = 255 - t;
+    match h {
+        0 => (255, t, 0),
+        1 => (q, 255, 0),
+        2 => (0, 255, t),
+        3 => (0, q, 255),
+        4 => (t, 0, 255),
+        5 => (255, 0, q),
+        _ => (0, 0, 0),
+    }
 }
 
 #[test]
