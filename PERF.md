@@ -32,6 +32,21 @@ frame. The reference full-frame shader is commonly around 0.6–1.2 ms. CPU row
 preparation and cell upload are generally microseconds and are not the current
 dominant cost.
 
+The benchmark suite now emphasizes representative workloads rather than
+isolated operations:
+
+- canonical 148×44 terminal size, matching the primary development machine;
+- full-screen redraws, one-row updates, and sparse multi-row updates;
+- selection changes, resize, synchronized full redraw, and scroll workloads;
+- bold/Unicode/wide-character work through the existing end-to-end fixtures;
+- renderer wall time, GPU time, command encoding, upload bytes, allocations,
+  and headless resource estimates.
+
+The old parser, SIMD, grid, pipeline, scrollback, hash-table, and atlas-LRU
+microbenchmarks are no longer Criterion targets. They were too narrow and
+noisy to guide renderer or memory decisions; the representative workloads and
+allocation audit retain the useful end-to-end signal.
+
 The release startup benchmark currently reports approximately:
 
 ```text
@@ -118,6 +133,38 @@ tmux replay and 1.130 ms for the sparse replay. These timings include the
 shader's one-cell load optimization and exclude the retained-surface blit.
 The retained active-cell numbers remain in the benchmark suite for comparison,
 but are not used by the production renderer.
+
+The current representative Metal workload run measured, for three-frame
+sequences at 148×44, approximately 156 KiB uploaded for a full redraw, 3.5 KiB
+for a one-row update, 20.8 KiB for sparse multi-row updates, and 17.3 KiB for a
+selection update. GPU and wall times vary with scheduler load, so these values
+are baselines for regression comparison rather than fixed performance claims.
+
+The full Criterion run shows the current bottleneck clearly:
+
+```text
+canonical CPU parse                 16.25 µs
+cell-tiled dense frame               1.085 ms
+cell-tiled sparse frame              1.085 ms
+reference full-frame shader          0.603 ms
+cell-tiled damage research path      1.099 ms
+```
+
+The practical three-frame renderer cases are roughly 3.25–3.5 ms per frame,
+while upload preparation remains around microseconds. Sparse updates therefore
+do not currently reduce the dominant GPU cost: production still renders the
+whole 148×44 surface. The next optimization target should be the cell-tiled
+compute path and its threadgroup/branching overhead, measured against the
+reference shader for pixel equivalence. More CPU upload bookkeeping is not
+worth pursuing until it changes end-to-end GPU or wall time.
+
+A focused experiment changed each cell team to 16×16 pixel subgroups while
+preserving the same output and border behavior. Pixel-equivalence tests passed,
+but canonical 148×44 tiled time regressed from about 1.085 ms to 1.500 ms per
+frame, a 38% increase, for both dense and sparse replays. The experiment was
+reverted. The larger font-sized threadgroups are therefore the current choice
+on this GPU; smaller groups should not be revisited without a different kernel
+design or hardware target.
 
 The intrusive LRU result does not justify its extra metadata: it made the hot
 lookup path about 3.7× slower to save less than a microsecond on a rare

@@ -164,17 +164,6 @@ impl Grid {
         }
     }
 
-    #[cfg(debug_assertions)]
-    #[allow(dead_code)]
-    pub(crate) fn debug_buffer_capacities(&self) -> (usize, usize, usize, usize) {
-        (
-            self.cells.capacity(),
-            self.chars.capacity(),
-            self.alt_cells.capacity(),
-            self.alt_chars.capacity(),
-        )
-    }
-
     /// Reset terminal state for a replay while retaining cell and row storage.
     #[allow(dead_code)]
     pub fn reset(&mut self) {

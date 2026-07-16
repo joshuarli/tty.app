@@ -3,6 +3,8 @@
 //! Tracks wall time (criterion) and heap allocations (counting allocator).
 //! Run: `cargo bench`
 
+#![expect(dead_code)]
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::ffi::c_void;
 use std::hint::black_box;
@@ -2117,6 +2119,102 @@ fn bench_tui_redraw(c: &mut Criterion) {
             });
         });
     }
+
+    group.finish();
+}
+
+fn bench_representative_workloads(c: &mut Criterion) {
+    let mut group = c.benchmark_group("representative_workloads");
+
+    let canonical = make_tmux_pane_redraw(2, 148, 44);
+    group.throughput(Throughput::Bytes(canonical.len() as u64));
+    group.bench_function("canonical_148x44", |b| {
+        b.iter(|| {
+            let mut grid = Grid::new(148, 44);
+            let mut scrollback = Scrollback::new(1000);
+            parse_bytes(&mut grid, &mut scrollback, &canonical);
+            black_box(&grid);
+        });
+    });
+
+    let redraw = make_fullscreen_redraw(2, 148, 44);
+    group.throughput(Throughput::Bytes(redraw.len() as u64));
+    group.bench_function("full_redraw_148x44", |b| {
+        b.iter(|| {
+            let mut grid = Grid::new(148, 44);
+            let mut scrollback = Scrollback::new(1000);
+            parse_bytes(&mut grid, &mut scrollback, &redraw);
+            black_box(&grid);
+        });
+    });
+
+    let sparse = b"\x1b[22;1Hstatus updated\x1b[K";
+    group.throughput(Throughput::Bytes(sparse.len() as u64));
+    group.bench_function("one_row_update_148x44", |b| {
+        let mut grid = Grid::new(148, 44);
+        let mut scrollback = Scrollback::new(0);
+        parse_bytes(
+            &mut grid,
+            &mut scrollback,
+            &make_tmux_pane_redraw(1, 148, 44),
+        );
+        grid.clear_dirty();
+        b.iter(|| {
+            parse_bytes(&mut grid, &mut scrollback, sparse);
+            black_box(&grid);
+            grid.clear_dirty();
+        });
+    });
+
+    group.bench_function("selection_update_148x44", |b| {
+        let mut grid = Grid::new(148, 44);
+        let mut scrollback = Scrollback::new(0);
+        parse_bytes(
+            &mut grid,
+            &mut scrollback,
+            &make_tmux_pane_redraw(1, 148, 44),
+        );
+        b.iter(|| {
+            for row in 8..12 {
+                for col in 10..40 {
+                    let cell = grid.cell_mut(row, col);
+                    cell.flags.toggle(CellFlags::SELECTED);
+                }
+                grid.mark_dirty(row);
+            }
+            black_box(&grid);
+        });
+    });
+
+    group.bench_function("resize_to_148x44", |b| {
+        b.iter(|| {
+            let mut grid = Grid::new(120, 40);
+            let mut scrollback = Scrollback::new(1000);
+            parse_bytes(
+                &mut grid,
+                &mut scrollback,
+                &make_tmux_pane_redraw(1, 120, 40),
+            );
+            grid.resize(148, 44);
+            black_box(&grid);
+        });
+    });
+
+    let synchronized = [
+        b"\x1b[?2026h".as_slice(),
+        make_fullscreen_redraw(1, 148, 44).as_slice(),
+        b"\x1b[?2026l".as_slice(),
+    ]
+    .concat();
+    group.throughput(Throughput::Bytes(synchronized.len() as u64));
+    group.bench_function("synchronized_full_redraw_148x44", |b| {
+        b.iter(|| {
+            let mut grid = Grid::new(148, 44);
+            let mut scrollback = Scrollback::new(1000);
+            parse_bytes(&mut grid, &mut scrollback, &synchronized);
+            black_box(&grid);
+        });
+    });
 
     group.finish();
 }
@@ -4613,6 +4711,90 @@ fn bench_metal_tiled(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_metal_workloads(c: &mut Criterion) {
+    let mut group = c.benchmark_group("metal_workloads");
+    let mut baseline = MetalBaseline::new();
+    let base_frames = load_metal_frames(
+        "target/tmux-less-44x148-both.typescript",
+        &baseline.ascii_table(),
+    );
+    let base = base_frames
+        .last()
+        .expect("canonical replay has a final frame");
+
+    macro_rules! metal_workload {
+        ($name:expr, $update:expr) => {{
+            let mut frames = Vec::with_capacity(3);
+            for _ in 0..3 {
+                let mut frame = MetalFrame {
+                    cells: base.cells.clone(),
+                    dirty_rows: Vec::new(),
+                    cursor_row: base.cursor_row,
+                    cursor_col: base.cursor_col,
+                    cursor_visible: true,
+                };
+                ($update)(&mut frame);
+                frames.push(frame);
+            }
+            let stats = baseline.run_tiled(&frames);
+            eprintln!(
+                "metal_workload label={} frames={} upload_bytes={} upload_ms={:.3} encode_ms={:.3} wall_ms={:.3} gpu_ms={:.3}",
+                $name,
+                stats.frames,
+                stats.upload_bytes,
+                stats.upload_time.as_secs_f64() * 1000.0,
+                stats.encode_time.as_secs_f64() * 1000.0,
+                stats.wall_time.as_secs_f64() * 1000.0,
+                stats.gpu_time_ns / 1_000_000.0,
+            );
+            group.throughput(Throughput::Elements(frames.len() as u64));
+            group.bench_function($name, |b| {
+                b.iter_custom(|iters| {
+                    let mut elapsed = Duration::ZERO;
+                    for _ in 0..iters {
+                        elapsed += baseline.run_tiled(&frames).wall_time;
+                    }
+                    elapsed
+                });
+            });
+        }};
+    }
+
+    metal_workload!("full_redraw", |frame: &mut MetalFrame| {
+        frame.dirty_rows = (0..METAL_ROWS as usize).collect();
+        for cell in &mut frame.cells {
+            cell.codepoint = b'x' as u16;
+        }
+    });
+    metal_workload!("one_row_update", |frame: &mut MetalFrame| {
+        frame.dirty_rows = vec![22];
+        for cell in &mut frame.cells[22 * METAL_COLS as usize..23 * METAL_COLS as usize] {
+            cell.codepoint = b'y' as u16;
+        }
+    });
+    metal_workload!("sparse_multi_row_update", |frame: &mut MetalFrame| {
+        frame.dirty_rows = vec![1, 2, 3, 40, 41, 42];
+        for row in &frame.dirty_rows {
+            for cell in
+                &mut frame.cells[*row * METAL_COLS as usize..(*row + 1) * METAL_COLS as usize]
+            {
+                cell.codepoint = b'!' as u16;
+            }
+        }
+    });
+    metal_workload!("selection_update", |frame: &mut MetalFrame| {
+        for row in 10..15 {
+            for col in 10..40 {
+                let index = row * METAL_COLS as usize + col;
+                frame.cells[index].flags.insert(CellFlags::SELECTED);
+            }
+            frame.dirty_rows.push(row);
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_metal_color(c: &mut Criterion) {
     let mut group = c.benchmark_group("metal_color");
     let mut baseline = MetalBaseline::new();
@@ -4837,21 +5019,15 @@ criterion_group! {
         .warm_up_time(std::time::Duration::from_millis(500))
         .measurement_time(std::time::Duration::from_secs(1));
     targets =
-        bench_parser,
-        bench_simd,
-        bench_grid,
-        bench_pipeline,
-        bench_scrollback,
         bench_end_to_end,
         bench_alloc_audit,
         bench_tui_redraw,
-        bench_slow_paths,
-        bench_atlas_hash,
-        bench_atlas_lru,
+        bench_representative_workloads,
         bench_startup_budget,
         bench_process_rss,
         bench_metal_baseline,
         bench_metal_tiled,
+        bench_metal_workloads,
         bench_metal_color,
         bench_metal_tiled_damage,
         bench_metal_replay,

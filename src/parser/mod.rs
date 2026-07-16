@@ -39,12 +39,6 @@ impl Parser {
         self.utf8.reset();
     }
 
-    #[cfg(debug_assertions)]
-    #[allow(dead_code)]
-    pub(crate) fn debug_buffer_capacities(&self) -> (usize, usize) {
-        self.state_machine.debug_buffer_capacities()
-    }
-
     /// Parse a chunk of bytes, calling methods on the performer.
     pub fn parse<P: Perform>(&mut self, data: &[u8], performer: &mut P) {
         let len = data.len();

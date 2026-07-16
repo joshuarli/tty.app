@@ -58,8 +58,7 @@ fn all_non_grayscale_values_in_color_cube_range() {
 
 #[test]
 fn non_grayscale_maps_to_cube() {
-    let idx = rgb_to_palette(255, 128, 64);
-    assert!(idx <= u8::MAX);
+    let _idx = rgb_to_palette(255, 128, 64);
 }
 
 #[test]

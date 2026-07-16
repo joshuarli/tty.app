@@ -41,12 +41,6 @@ impl StateMachine {
         }
     }
 
-    #[cfg(debug_assertions)]
-    #[allow(dead_code)]
-    pub(crate) fn debug_buffer_capacities(&self) -> (usize, usize) {
-        (self.osc_data.capacity(), self.dcs_data.capacity())
-    }
-
     /// Return to the ground state without releasing OSC/DCS buffers.
     #[allow(dead_code)]
     pub fn reset(&mut self) {

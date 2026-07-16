@@ -365,8 +365,6 @@ kernel void render_tiled(
     threadgroup bool shared_skip;
     threadgroup ushort shared_codepoint;
     threadgroup ushort shared_flags;
-    threadgroup uchar shared_fg_index;
-    threadgroup uchar shared_bg_index;
     threadgroup uchar shared_atlas_x;
     threadgroup uchar shared_atlas_y;
     threadgroup half4 shared_fg;
@@ -377,8 +375,6 @@ kernel void render_tiled(
         shared_skip = (cell.flags & FLAG_TILED_SKIP) != 0;
         shared_codepoint = cell.codepoint;
         shared_flags = cell.flags;
-        shared_fg_index = cell.fg_index;
-        shared_bg_index = cell.bg_index;
         shared_atlas_x = cell.atlas_x;
         shared_atlas_y = cell.atlas_y;
 

@@ -13,10 +13,6 @@ mod unicode;
 mod window;
 
 use std::ffi::c_void;
-#[cfg(debug_assertions)]
-use std::fs::{File, OpenOptions};
-#[cfg(debug_assertions)]
-use std::io::Write;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -724,86 +720,6 @@ struct Terminal {
     app: App,
 }
 
-struct DebugLogger {
-    #[cfg(debug_assertions)]
-    file: Option<File>,
-    #[cfg(debug_assertions)]
-    started: Instant,
-    #[cfg(debug_assertions)]
-    last_log: Instant,
-}
-
-impl DebugLogger {
-    fn new() -> Self {
-        #[cfg(debug_assertions)]
-        {
-            let file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("debug.log")
-                .ok();
-            let now = Instant::now();
-            let mut logger = Self {
-                file,
-                started: now,
-                last_log: now,
-            };
-            logger.write_line("start");
-            logger
-        }
-
-        #[cfg(not(debug_assertions))]
-        {
-            Self {}
-        }
-    }
-
-    #[cfg(debug_assertions)]
-    fn write_line(&mut self, line: &str) {
-        if let Some(file) = &mut self.file {
-            let _ = writeln!(file, "{line}");
-            let _ = file.flush();
-        }
-    }
-
-    #[cfg(debug_assertions)]
-    fn log(&mut self, terminals: &[Terminal]) {
-        if self.last_log.elapsed().as_secs() < 1 {
-            return;
-        }
-        self.last_log = Instant::now();
-
-        for (index, terminal) in terminals.iter().enumerate() {
-            let app = &terminal.app;
-            let (cells, chars, alt_cells, alt_chars) = app.shared.grid.debug_buffer_capacities();
-            let (scrollback_vec, scrollback_rows, scrollback_max_row) =
-                app.shared.scrollback.debug_buffer_capacities();
-            let (osc, dcs) = app.parser.debug_buffer_capacities();
-            self.write_line(&format!(
-                "t={:.1}s term={index} cols={} rows={} grid_cells_cap={} grid_chars_cap={} alt_cells_cap={} alt_chars_cap={} scrollback_len={} scrollback_vec_cap={} scrollback_row_caps={} scrollback_max_row_cap={} osc_cap={} dcs_cap={} response_cap={} pty_cap={}",
-                self.started.elapsed().as_secs_f64(),
-                app.shared.grid.cols,
-                app.shared.grid.rows,
-                cells,
-                chars,
-                alt_cells,
-                alt_chars,
-                app.shared.scrollback.len(),
-                scrollback_vec,
-                scrollback_rows,
-                scrollback_max_row,
-                osc,
-                dcs,
-                app.shared.response_buf.capacity(),
-                app.pty_buf.capacity(),
-            ));
-        }
-    }
-
-    #[cfg(not(debug_assertions))]
-    fn log(&mut self, _terminals: &[Terminal]) {}
-}
-
 unsafe extern "C-unwind" fn pty_read_callback(
     descriptor: *mut CFFileDescriptor,
     flags: usize,
@@ -978,7 +894,6 @@ fn main() {
     pty_sources.register(terminals[0].app.pty_fd());
 
     let mut state_events = Vec::new();
-    let mut debug_logger = DebugLogger::new();
 
     loop {
         let (idle, quit) = objc2::rc::autoreleasepool(|_| {
@@ -1128,8 +1043,6 @@ fn main() {
         if quit || terminals.is_empty() {
             break;
         }
-
-        debug_logger.log(&terminals);
 
         // When idle, block until AppKit or a PTY run-loop source wakes us.
         if idle {
