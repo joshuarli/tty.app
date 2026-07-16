@@ -48,8 +48,10 @@ fn preload_ascii_populates_table() {
     let mut atlas = Atlas::new(&device, 8, 16);
     atlas.preload_ascii(&rasterizer);
 
-    let a = atlas.get_ascii(b'A');
+    let a = atlas.get_ascii(b'A', false);
     assert!(a.x != 0 || a.y != 0);
+    let bold_a = atlas.get_ascii(b'A', true);
+    assert_ne!((a.x, a.y), (bold_a.x, bold_a.y));
 }
 
 #[test]
@@ -128,6 +130,21 @@ fn wide_glyph_at_slot_boundary_fits_atlas() {
 }
 
 #[test]
+fn narrow_glyphs_share_the_atlas_row() {
+    let device = device();
+    let rasterizer = MockRasterizer {
+        cell_width: 512,
+        cell_height: 512,
+    };
+    let mut atlas = Atlas::new(&device, 512, 512);
+
+    let first = atlas.get_or_insert(0x41, false, false, &rasterizer);
+    let second = atlas.get_or_insert(0x42, false, false, &rasterizer);
+    assert_eq!(first.y, second.y);
+    assert_eq!(second.x, first.x + 1);
+}
+
+#[test]
 fn ascii_table_raw_matches_preload() {
     let device = device();
     let rasterizer = MockRasterizer {
@@ -139,11 +156,11 @@ fn ascii_table_raw_matches_preload() {
 
     let table = atlas.ascii_table_raw();
     // 0x20 (space) is at slot 0 = position (0, 0); check 0x21 instead
-    let excl = atlas.get_ascii(b'!');
+    let excl = atlas.get_ascii(b'!', false);
     assert_eq!(table[b'!' as usize], [excl.x, excl.y]);
     assert!(excl.x != 0 || excl.y != 0);
 
-    let space = atlas.get_ascii(b' ');
+    let space = atlas.get_ascii(b' ', false);
     assert_eq!(table[b' ' as usize], [space.x, space.y]);
 }
 
@@ -190,8 +207,8 @@ fn eviction_preserves_ascii_when_large_enough() {
         atlas.get_or_insert(cp, false, false, &rasterizer);
     }
 
-    let _space = atlas.get_ascii(b' ');
+    let _space = atlas.get_ascii(b' ', false);
     // space is at slot 0 = position (0, 0) — acceptable
-    let a = atlas.get_ascii(b'A');
+    let a = atlas.get_ascii(b'A', false);
     assert!(a.x != 0 || a.y != 0, "A should be at non-zero position");
 }

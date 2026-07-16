@@ -101,6 +101,7 @@ pub struct Grid {
 
     // Atlas lookup table for ASCII (set once after atlas preload, never changes)
     ascii_atlas: [[u8; 2]; 128],
+    bold_ascii_atlas: [[u8; 2]; 128],
     // Atlas position for space character (used by blank cells)
     pub space_atlas: [u8; 2],
 
@@ -154,6 +155,7 @@ impl Grid {
             sync_start: None,
             saved_cursor: SavedCursor::default(),
             ascii_atlas: [[0; 2]; 128],
+            bold_ascii_atlas: [[0; 2]; 128],
             space_atlas: [0, 0],
             alt_cells: Vec::new(),
             alt_chars: Vec::new(),
@@ -216,6 +218,10 @@ impl Grid {
     pub fn set_ascii_atlas(&mut self, table: &[[u8; 2]; 128]) {
         self.ascii_atlas = *table;
         self.space_atlas = table[b' ' as usize];
+    }
+
+    pub fn set_bold_ascii_atlas(&mut self, table: &[[u8; 2]; 128]) {
+        self.bold_ascii_atlas = *table;
     }
 
     /// Map a logical row to the start index in the cells vec.
@@ -624,7 +630,11 @@ impl Grid {
             let base = self.row_start(row) + col;
             for j in 0..n {
                 let b = bytes[i + j];
-                let ap = self.ascii_atlas[b as usize];
+                let ap = if attr.flags.contains(CellFlags::BOLD) {
+                    self.bold_ascii_atlas[b as usize]
+                } else {
+                    self.ascii_atlas[b as usize]
+                };
                 let cell = &mut self.cells[base + j];
                 cell.codepoint = b as u16;
                 cell.flags = attr.flags;

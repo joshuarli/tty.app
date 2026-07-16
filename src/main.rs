@@ -123,6 +123,7 @@ impl App {
 
         let mut grid = Grid::new(cols as u16, rows as u16);
         grid.set_ascii_atlas(&atlas.ascii_table_raw());
+        grid.set_bold_ascii_atlas(&atlas.bold_ascii_table_raw());
         let scrollback = Scrollback::new(config::SCROLLBACK_LINES);
 
         let pty = Pty::spawn(
@@ -925,6 +926,7 @@ fn run_startup_bench() {
     let t = Instant::now();
     let mut grid = Grid::new(cols as u16, rows as u16);
     grid.set_ascii_atlas(&atlas.ascii_table_raw());
+    grid.set_bold_ascii_atlas(&atlas.bold_ascii_table_raw());
     let _scrollback = Scrollback::new(config::SCROLLBACK_LINES);
     let grid_ms = t.elapsed().as_secs_f64() * 1000.0;
 

@@ -59,19 +59,14 @@ impl<'a> Perform for TermPerformer<'a> {
                 self.grid.last_atlas = [pos.x, pos.y];
             }
         } else {
-            let bold = self.grid.attr.flags.contains(CellFlags::BOLD);
-            if bold {
-                for &b in bytes {
-                    self.print(b as char);
-                }
-            } else {
-                // Fast path: bulk write — atlas coords resolved inside Grid from ascii_atlas
-                self.grid.write_ascii_run(bytes);
-                if let Some(&last) = bytes.last() {
-                    self.grid.last_char = last as char;
-                    let ap = self.atlas.get_ascii(last);
-                    self.grid.last_atlas = [ap.x, ap.y];
-                }
+            // Fast path: bulk write — atlas coords resolved inside Grid from the
+            // regular or bold ASCII table.
+            self.grid.write_ascii_run(bytes);
+            if let Some(&last) = bytes.last() {
+                self.grid.last_char = last as char;
+                let bold = self.grid.attr.flags.contains(CellFlags::BOLD);
+                let ap = self.atlas.get_ascii(last, bold);
+                self.grid.last_atlas = [ap.x, ap.y];
             }
         }
     }

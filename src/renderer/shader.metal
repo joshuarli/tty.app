@@ -362,10 +362,7 @@ kernel void render_tiled(
     uint px = thread_id.x;
     uint py = thread_id.y;
 
-    if (cells[row * uni.cols + col].flags & FLAG_TILED_SKIP) {
-        return;
-    }
-
+    threadgroup bool shared_skip;
     threadgroup ushort shared_codepoint;
     threadgroup ushort shared_flags;
     threadgroup uchar shared_fg_index;
@@ -377,6 +374,7 @@ kernel void render_tiled(
 
     if (thread_id.x == 0 && thread_id.y == 0) {
         CellData cell = cells[row * uni.cols + col];
+        shared_skip = (cell.flags & FLAG_TILED_SKIP) != 0;
         shared_codepoint = cell.codepoint;
         shared_flags = cell.flags;
         shared_fg_index = cell.fg_index;
@@ -412,6 +410,10 @@ kernel void render_tiled(
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (shared_skip) {
+        return;
+    }
 
     ushort flags = shared_flags;
     uint gid_x = uni.padding + col * uni.cell_width + px;

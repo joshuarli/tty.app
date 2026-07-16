@@ -60,6 +60,11 @@ pub struct MetalRenderer {
 
     // Atlas texture
     pub atlas_texture: Retained<ProtocolObject<dyn MTLTexture>>,
+    // Retained frame surface used by the dirty-cell path. CAMetal drawables
+    // are presentation targets and are not assumed to preserve contents.
+    framebuffer: Retained<ProtocolObject<dyn MTLTexture>>,
+    active_cell_buffers: [Retained<ProtocolObject<dyn MTLBuffer>>; NUM_BUFFERS],
+    surface_valid: bool,
 
     // Grid dimensions
     pub cols: u32,
@@ -67,6 +72,8 @@ pub struct MetalRenderer {
     pub cell_width: u32,
     pub cell_height: u32,
     pub scale_factor: f64,
+    drawable_width: u32,
+    drawable_height: u32,
 
     // Track whether we need to render (deferred frame or previous drawable miss)
     pub(crate) needs_render: bool,
@@ -159,6 +166,36 @@ impl MetalRenderer {
             .newTextureWithDescriptor(&atlas_desc)
             .expect("failed to create atlas texture");
 
+        let framebuffer_desc = unsafe {
+            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                MTLPixelFormat::BGRA8Unorm,
+                width as usize,
+                height as usize,
+                false,
+            )
+        };
+        framebuffer_desc.setStorageMode(MTLStorageMode::Shared);
+        framebuffer_desc.setUsage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
+        let framebuffer = device
+            .newTextureWithDescriptor(&framebuffer_desc)
+            .expect("failed to create retained framebuffer");
+
+        let active_buffer_size = cols as usize * rows as usize * mem::size_of::<u32>();
+        let active_cell_buffers = [
+            device
+                .newBufferWithLength_options(
+                    active_buffer_size,
+                    MTLResourceOptions::StorageModeShared,
+                )
+                .expect("failed to create active cell buffer"),
+            device
+                .newBufferWithLength_options(
+                    active_buffer_size,
+                    MTLResourceOptions::StorageModeShared,
+                )
+                .expect("failed to create active cell buffer"),
+        ];
+
         MetalRenderer {
             core,
             layer,
@@ -168,11 +205,16 @@ impl MetalRenderer {
             pending: [bitvec![1; rows as usize], bitvec![1; rows as usize]],
             uniform_buffer,
             atlas_texture,
+            framebuffer,
+            active_cell_buffers,
+            surface_valid: false,
             cols,
             rows,
             cell_width,
             cell_height,
             scale_factor,
+            drawable_width: width,
+            drawable_height: height,
             needs_render: true,
             prev_cursor_row: 0,
             prev_cursor_col: 0,
@@ -190,8 +232,8 @@ impl MetalRenderer {
         viewport_offset: usize,
         cursor_visible: bool,
     ) -> bool {
-        // The current production path does not retain a framebuffer, so consume
-        // semantic scroll hints rather than letting them survive into a later frame.
+        // The renderer retains pixels, but semantic scroll hints still require
+        // specialized surface copies that are intentionally not enabled here.
         let _ = grid.take_scroll_hint();
 
         // Merge grid dirty rows into both per-buffer pending bitsets
@@ -206,13 +248,19 @@ impl MetalRenderer {
         }
         grid.clear_dirty();
 
-        // Cursor is a uniform overlay — detect position/visibility changes
+        // Cursor is a uniform overlay — detect position/visibility changes.
+        // A retained surface must redraw both rows touched by the cursor.
         let cursor_row = grid.cursor_row as u32;
         let cursor_col = grid.cursor_col as u32;
+        let old_cursor_row = self.prev_cursor_row;
         let cursor_changed = cursor_row != self.prev_cursor_row
             || cursor_col != self.prev_cursor_col
             || cursor_visible != self.prev_cursor_visible;
         if cursor_changed {
+            for pending in &mut self.pending {
+                pending.set(old_cursor_row as usize, true);
+                pending.set(cursor_row as usize, true);
+            }
             self.prev_cursor_row = cursor_row;
             self.prev_cursor_col = cursor_col;
             self.prev_cursor_visible = cursor_visible;
@@ -237,8 +285,18 @@ impl MetalRenderer {
         let row_bytes = cols * CELL_SIZE;
         let dst_stride = self.cols as usize * CELL_SIZE;
         let dst_base = self.cell_buffers[cur].contents().as_ptr() as *mut u8;
+        let active_base = self.active_cell_buffers[cur].contents().as_ptr() as *mut u32;
+        let mut active_count = 0usize;
         for (row, pending) in self.pending[cur].iter().enumerate() {
             if *pending {
+                for col in 0..self.cols as usize {
+                    unsafe {
+                        active_base
+                            .add(active_count)
+                            .write((row * self.cols as usize + col) as u32);
+                    }
+                    active_count += 1;
+                }
                 // Source row from scrollback or grid based on viewport offset
                 let src: &[Cell] = if viewport_offset > 0 && row < viewport_offset {
                     // This visible row comes from scrollback history
@@ -266,6 +324,21 @@ impl MetalRenderer {
             }
         }
         self.pending[cur].fill(false);
+
+        // If drawable acquisition failed after the first upload, the surface
+        // is still uninitialized but the current buffer has no pending rows.
+        // Rebuild the full active list for the retry.
+        if active_count == 0 && !self.surface_valid {
+            for index in 0..self.cols as usize * self.rows as usize {
+                unsafe {
+                    active_base.add(index).write(index as u32);
+                }
+            }
+            active_count = self.cols as usize * self.rows as usize;
+        }
+        if active_count == 0 {
+            return false;
+        }
 
         autoreleasepool(|_| {
             let drawable = match self.layer.nextDrawable() {
@@ -314,9 +387,13 @@ impl MetalRenderer {
                 .computeCommandEncoder()
                 .expect("failed to create compute command encoder");
 
-            encoder.setComputePipelineState(self.core.tiled_pipeline());
+            if self.surface_valid {
+                encoder.setComputePipelineState(self.core.tiled_list_pipeline());
+            } else {
+                encoder.setComputePipelineState(self.core.tiled_pipeline());
+            }
             unsafe {
-                encoder.setTexture_atIndex(Some(&texture), 0);
+                encoder.setTexture_atIndex(Some(&self.framebuffer), 0);
                 encoder.setTexture_atIndex(Some(&self.atlas_texture), 1);
                 encoder.setBuffer_offset_atIndex(
                     Some(&self.cell_buffers[self.current_buffer]),
@@ -325,12 +402,27 @@ impl MetalRenderer {
                 );
                 encoder.setBuffer_offset_atIndex(Some(self.core.palette_buffer()), 0, 1);
                 encoder.setBuffer_offset_atIndex(Some(&self.uniform_buffer), 0, 2);
+                if self.surface_valid {
+                    encoder.setBuffer_offset_atIndex(
+                        Some(&self.active_cell_buffers[self.current_buffer]),
+                        0,
+                        3,
+                    );
+                }
             }
 
             encoder.dispatchThreadgroups_threadsPerThreadgroup(
                 MTLSize {
-                    width: self.cols as usize,
-                    height: self.rows as usize,
+                    width: if self.surface_valid {
+                        active_count
+                    } else {
+                        self.cols as usize
+                    },
+                    height: if self.surface_valid {
+                        1
+                    } else {
+                        self.rows as usize
+                    },
                     depth: 1,
                 },
                 MTLSize {
@@ -340,6 +432,28 @@ impl MetalRenderer {
                 },
             );
             encoder.endEncoding();
+
+            let blit = command_buffer
+                .blitCommandEncoder()
+                .expect("failed to create framebuffer blit encoder");
+            unsafe {
+                blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
+                    &self.framebuffer,
+                    0,
+                    0,
+                    MTLOrigin { x: 0, y: 0, z: 0 },
+                    MTLSize {
+                        width: self.drawable_width as usize,
+                        height: self.drawable_height as usize,
+                        depth: 1,
+                    },
+                    &texture,
+                    0,
+                    0,
+                    MTLOrigin { x: 0, y: 0, z: 0 },
+                );
+            }
+            blit.endEncoding();
 
             // Mark buffer as in-flight before commit
             self.buffer_ready[self.current_buffer].store(false, Ordering::Release);
@@ -363,6 +477,7 @@ impl MetalRenderer {
             // (new dirty rows or cursor change). This lazy convergence avoids
             // back-to-back renders that exhaust Metal's 3-drawable pool.
             self.current_buffer = (self.current_buffer + 1) % NUM_BUFFERS;
+            self.surface_valid = true;
             self.needs_render = false;
 
             true
@@ -373,6 +488,8 @@ impl MetalRenderer {
     /// NOTE: width/height are already in physical pixels (from winit).
     pub fn resize(&mut self, width: u32, height: u32, scale: f64) {
         self.scale_factor = scale;
+        self.drawable_width = width;
+        self.drawable_height = height;
         self.layer
             .setDrawableSize(CGSize::new(width as f64, height as f64));
         self.layer.setContentsScale(scale);
@@ -409,12 +526,47 @@ impl MetalRenderer {
                 )
                 .expect("failed to create cell buffer"),
         ];
+        let active_buffer_size = self.cols as usize * self.rows as usize * mem::size_of::<u32>();
+        self.active_cell_buffers = [
+            self.core
+                .device()
+                .newBufferWithLength_options(
+                    active_buffer_size,
+                    MTLResourceOptions::StorageModeShared,
+                )
+                .expect("failed to create active cell buffer"),
+            self.core
+                .device()
+                .newBufferWithLength_options(
+                    active_buffer_size,
+                    MTLResourceOptions::StorageModeShared,
+                )
+                .expect("failed to create active cell buffer"),
+        ];
+        let framebuffer_desc = unsafe {
+            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                MTLPixelFormat::BGRA8Unorm,
+                width as usize,
+                height as usize,
+                false,
+            )
+        };
+        framebuffer_desc.setStorageMode(MTLStorageMode::Shared);
+        framebuffer_desc.setUsage(MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite);
+        self.framebuffer = self
+            .core
+            .device()
+            .newTextureWithDescriptor(&framebuffer_desc)
+            .expect("failed to resize retained framebuffer");
         // Mark all rows pending in both buffers after resize
         self.pending = [
             bitvec![1; self.rows as usize],
             bitvec![1; self.rows as usize],
         ];
+        self.prev_cursor_row = 0;
+        self.prev_cursor_col = 0;
         self.needs_render = true;
+        self.surface_valid = false;
     }
 
     pub fn device(&self) -> &ProtocolObject<dyn MTLDevice> {

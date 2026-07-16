@@ -764,6 +764,7 @@ fn truecolor_gradient_writes_ppm_and_matches_quantized_palette() {
     let rows = 8u16;
     let mut grid = Grid::new(cols, rows);
     grid.set_ascii_atlas(&atlas.ascii_table_raw());
+    grid.set_bold_ascii_atlas(&atlas.bold_ascii_table_raw());
     let mut scrollback = Scrollback::new(0);
     let mut response_buf = Vec::new();
     let mut fixture = String::new();

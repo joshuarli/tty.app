@@ -25,6 +25,7 @@ use tty::renderer::atlas::Atlas;
 use tty::renderer::core::MetalCore;
 use tty::renderer::font::FontRasterizer;
 use tty::renderer::metal::Uniforms;
+use tty::renderer::{Rasterize, font::RasterizedGlyph};
 use tty::terminal::cell::{Cell, CellFlags};
 use tty::terminal::grid::{Grid, ScrollHint, TermMode};
 use tty::terminal::scrollback::Scrollback;
@@ -34,6 +35,29 @@ use tty::terminal::scrollback::Scrollback;
 // ---------------------------------------------------------------------------
 
 struct CountingAlloc;
+
+struct BenchRasterizer {
+    width: u32,
+    height: u32,
+}
+
+impl Rasterize for BenchRasterizer {
+    fn rasterize(&self, _codepoint: u32, _bold: bool) -> Option<RasterizedGlyph> {
+        Some(RasterizedGlyph {
+            data: vec![128; (self.width * self.height) as usize],
+            width: self.width,
+            height: self.height,
+        })
+    }
+
+    fn rasterize_wide(&self, _codepoint: u32, _bold: bool) -> Option<RasterizedGlyph> {
+        Some(RasterizedGlyph {
+            data: vec![128; (self.width * 2 * self.height) as usize],
+            width: self.width * 2,
+            height: self.height,
+        })
+    }
+}
 
 static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 static ALLOC_BYTES: AtomicUsize = AtomicUsize::new(0);
@@ -1337,6 +1361,23 @@ fn bench_grid(c: &mut Criterion) {
         });
     });
 
+    group.bench_function(format!("write_bold_ascii_run_{cols}x{rows}"), |b| {
+        b.iter(|| {
+            let mut grid = Grid::new(cols, rows);
+            grid.set_bold_ascii_atlas(&[[1, 1]; 128]);
+            grid.attr.flags.insert(CellFlags::BOLD);
+            for _ in 0..rows {
+                grid.write_ascii_run(&line);
+                grid.cursor_col = 0;
+                grid.cursor_pending_wrap = false;
+                if grid.cursor_row < grid.rows - 1 {
+                    grid.cursor_row += 1;
+                }
+            }
+            black_box(&grid);
+        });
+    });
+
     // scroll_up — bulk scrolling
     for &n in &[1, 10] {
         group.bench_function(format!("scroll_up_{n}_80x24"), |b| {
@@ -2591,6 +2632,35 @@ fn bench_atlas_hash(c: &mut Criterion) {
 fn bench_process_rss(_c: &mut Criterion) {
     let rss = process_max_rss_bytes();
     eprintln!("  [rss] process_max_rss: {}", human_bytes(rss));
+}
+
+fn bench_atlas_lru(c: &mut Criterion) {
+    let device = objc2_metal::MTLCreateSystemDefaultDevice().expect("Metal device required");
+    let rasterizer = BenchRasterizer {
+        width: 256,
+        height: 16,
+    };
+    let mut atlas = Atlas::new(&device, 256, 16);
+    for codepoint in 0..512 {
+        atlas.get_or_insert(codepoint, false, false, &rasterizer);
+    }
+
+    let mut group = c.benchmark_group("atlas_lru");
+    group.bench_function("hit_10k", |b| {
+        b.iter(|| {
+            for codepoint in 0..10_000u32 {
+                black_box(atlas.get_or_insert(codepoint % 512, false, false, &rasterizer));
+            }
+        });
+    });
+    group.bench_function("evict_one", |b| {
+        let mut codepoint = 512u32;
+        b.iter(|| {
+            black_box(atlas.get_or_insert(codepoint, false, false, &rasterizer));
+            codepoint = codepoint.wrapping_add(1);
+        });
+    });
+    group.finish();
 }
 
 const METAL_COLS: u16 = 148;
@@ -4730,6 +4800,7 @@ criterion_group! {
         bench_tui_redraw,
         bench_slow_paths,
         bench_atlas_hash,
+        bench_atlas_lru,
         bench_process_rss,
         bench_metal_baseline,
         bench_metal_tiled,
