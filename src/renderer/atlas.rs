@@ -37,7 +37,8 @@ pub struct Atlas {
     cols: u32,
     rows: u32,
     map: FxHashMap<GlyphKey, AtlasPos>,
-    // Next cell to inspect when allocating a glyph.
+    // Next allocation slot. Every slot reserves two cell columns so wide
+    // glyphs cannot overlap the following slot or run past the texture edge.
     next_slot: u32,
     // Slots 0..ascii_end are pinned (never evicted)
     ascii_end: u32,
@@ -48,8 +49,6 @@ pub struct Atlas {
     lru_prev: Vec<u32>,
     lru_next: Vec<u32>,
     slot_keys: Vec<Option<GlyphKey>>,
-    slot_widths: Vec<u8>,
-    occupied: Vec<bool>,
     // Direct lookup for ASCII (0x00..0x7F) — bypasses HashMap and LRU
     ascii_table: [AtlasPos; 128],
     bold_ascii_table: [AtlasPos; 128],
@@ -74,9 +73,10 @@ impl Atlas {
             .newTextureWithDescriptor(&desc)
             .expect("failed to create atlas texture");
 
-        // Narrow glyphs occupy one cell; wide glyphs claim two adjacent cells.
-        // Positions remain expressed in cell columns for the shader.
-        let cols = ATLAS_SIZE / cell_width;
+        // Every slot is two cells wide because wide glyphs are uploaded as a
+        // double-cell bitmap. Positions remain expressed in cell columns for
+        // the shader, so allocated x coordinates are even.
+        let cols = ATLAS_SIZE / (cell_width * 2);
         let rows = ATLAS_SIZE / cell_height;
 
         Atlas {
@@ -93,8 +93,6 @@ impl Atlas {
             lru_prev: vec![u32::MAX; (cols * rows) as usize],
             lru_next: vec![u32::MAX; (cols * rows) as usize],
             slot_keys: vec![None; (cols * rows) as usize],
-            slot_widths: vec![0; (cols * rows) as usize],
-            occupied: vec![false; (cols * rows) as usize],
             ascii_table: [AtlasPos::default(); 128],
             bold_ascii_table: [AtlasPos::default(); 128],
         }
@@ -169,7 +167,7 @@ impl Atlas {
 
         if let Some(pos) = self.map.get(&key) {
             let pos = *pos;
-            let slot = pos.y as u32 * self.cols + pos.x as u32;
+            let slot = pos.y as u32 * self.cols + pos.x as u32 / 2;
             self.touch_lru(slot);
             return pos;
         }
@@ -188,15 +186,15 @@ impl Atlas {
     }
 
     fn insert(&mut self, key: GlyphKey, glyph: &RasterizedGlyph) -> AtlasPos {
-        let width = if key.wide { 2 } else { 1 };
-        let slot = loop {
-            if let Some(slot) = self.find_free_slot(width) {
-                break slot;
-            }
-            self.evict_lru();
+        let slot = if self.next_slot < self.cols * self.rows {
+            let s = self.next_slot;
+            self.next_slot += 1;
+            s
+        } else {
+            self.evict_lru()
         };
 
-        let grid_x = slot % self.cols;
+        let grid_x = (slot % self.cols) * 2;
         let grid_y = slot / self.cols;
 
         // Upload glyph data to atlas texture
@@ -207,7 +205,10 @@ impl Atlas {
                 z: 0,
             },
             size: objc2_metal::MTLSize {
-                width: glyph.width.min(self.cell_width * width) as usize,
+                width: glyph
+                    .width
+                    .min(self.cell_width * if key.wide { 2 } else { 1 })
+                    as usize,
                 height: glyph.height.min(self.cell_height) as usize,
                 depth: 1,
             },
@@ -229,34 +230,8 @@ impl Atlas {
         };
         self.map.insert(key, pos);
         self.slot_keys[slot as usize] = Some(key);
-        self.slot_widths[slot as usize] = width as u8;
-        self.occupied[slot as usize] = true;
-        if width == 2 {
-            self.occupied[slot as usize + 1] = true;
-        }
         self.push_lru_front(slot);
         pos
-    }
-
-    fn find_free_slot(&mut self, width: u32) -> Option<u32> {
-        let capacity = self.cols * self.rows;
-        if capacity == 0 {
-            return None;
-        }
-        let start = self.next_slot.max(self.ascii_end) % capacity;
-        for offset in 0..capacity {
-            let slot = (start + offset) % capacity;
-            let x = slot % self.cols;
-            if x + width > self.cols || self.occupied[slot as usize] {
-                continue;
-            }
-            if width == 2 && self.occupied[slot as usize + 1] {
-                continue;
-            }
-            self.next_slot = (slot + width) % capacity;
-            return Some(slot);
-        }
-        None
     }
 
     fn evict_lru(&mut self) -> u32 {
@@ -267,12 +242,6 @@ impl Atlas {
             .take()
             .expect("evictable atlas slot has no key");
         self.map.remove(&key);
-        let width = self.slot_widths[slot as usize] as u32;
-        self.slot_widths[slot as usize] = 0;
-        self.occupied[slot as usize] = false;
-        if width == 2 {
-            self.occupied[slot as usize + 1] = false;
-        }
         slot
     }
 

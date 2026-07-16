@@ -130,7 +130,7 @@ fn wide_glyph_at_slot_boundary_fits_atlas() {
 }
 
 #[test]
-fn narrow_glyphs_share_the_atlas_row() {
+fn narrow_glyphs_reserve_wide_slots() {
     let device = device();
     let rasterizer = MockRasterizer {
         cell_width: 512,
@@ -141,7 +141,7 @@ fn narrow_glyphs_share_the_atlas_row() {
     let first = atlas.get_or_insert(0x41, false, false, &rasterizer);
     let second = atlas.get_or_insert(0x42, false, false, &rasterizer);
     assert_eq!(first.y, second.y);
-    assert_eq!(second.x, first.x + 1);
+    assert_eq!(second.x, first.x + 2);
 }
 
 #[test]
