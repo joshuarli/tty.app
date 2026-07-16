@@ -10,6 +10,7 @@ use core_text::font::{self as ct_font, CTFont};
 use core_text::font_descriptor::kCTFontOrientationDefault;
 
 const HACK_REGULAR_TTF: &[u8] = include_bytes!("../../vendor/hack/Hack-Regular.ttf");
+const HACK_BOLD_TTF: &[u8] = include_bytes!("../../vendor/hack/Hack-Bold.ttf");
 
 /// Rasterized glyph data (grayscale alpha).
 pub struct RasterizedGlyph {
@@ -28,6 +29,7 @@ pub struct FontMetrics {
 
 pub struct FontRasterizer {
     ct_font: CTFont,
+    bold_font: CTFont,
     // Explicit fallback fonts checked in order when the primary font lacks a glyph.
     // Using an explicit list avoids CTFontCreateForString whose cascade behaviour
     // differs between CLI (cargo run) and GUI app bundle contexts for user-installed fonts.
@@ -49,10 +51,16 @@ impl FontRasterizer {
     pub fn new(family: &str, size: f64, scale: f64) -> Self {
         let font_size = size * scale;
         let ct_font = if family == "Hack" {
-            Self::embedded_hack(font_size)
+            Self::embedded_hack(font_size, false)
         } else {
             ct_font::new_from_name(family, font_size)
-                .unwrap_or_else(|_| Self::embedded_hack(font_size))
+                .unwrap_or_else(|_| Self::embedded_hack(font_size, false))
+        };
+        let bold_font = if family == "Hack" {
+            Self::embedded_hack(font_size, true)
+        } else {
+            ct_font::new_from_name(&format!("{family} Bold"), font_size)
+                .unwrap_or_else(|_| Self::embedded_hack(font_size, true))
         };
 
         let ascent = ct_font.ascent();
@@ -97,15 +105,22 @@ impl FontRasterizer {
 
         Self {
             ct_font,
+            bold_font,
             fallback_fonts,
             metrics,
         }
     }
 
-    fn embedded_hack(font_size: f64) -> CTFont {
-        // SAFETY: HACK_REGULAR_TTF is a static include and outlives the data provider.
-        let provider = unsafe { CGDataProvider::from_slice(HACK_REGULAR_TTF) };
-        let cg_font = CGFont::from_data_provider(provider).expect("failed to load embedded Hack");
+    fn embedded_hack(font_size: f64, bold: bool) -> CTFont {
+        let data = if bold {
+            HACK_BOLD_TTF
+        } else {
+            HACK_REGULAR_TTF
+        };
+        // SAFETY: the font data is a static include and outlives the data provider.
+        let provider = unsafe { CGDataProvider::from_slice(data) };
+        let cg_font =
+            CGFont::from_data_provider(provider).expect("failed to load embedded Hack font");
         ct_font::new_from_CGFont(&cg_font, font_size)
     }
 
@@ -115,14 +130,15 @@ impl FontRasterizer {
     /// For non-ASCII, the embedded primary font is checked before system fallbacks.
     /// The embedded font avoids the installed-font cascade behaviour that previously
     /// made Hack report unsupported glyphs as present in GUI app bundle contexts.
-    fn font_for_codepoint(&self, codepoint: u32) -> Option<&CTFont> {
+    fn font_for_codepoint(&self, codepoint: u32, bold: bool) -> Option<&CTFont> {
+        let primary = if bold { &self.bold_font } else { &self.ct_font };
         // ASCII fast path: primary font always has these.
         if codepoint < 0x80 {
-            return None; // use self.ct_font
+            return Some(primary);
         }
 
-        if Self::font_has_glyph(&self.ct_font, codepoint) {
-            return None;
+        if Self::font_has_glyph(primary, codepoint) {
+            return Some(primary);
         }
 
         self.fallback_fonts
@@ -153,14 +169,18 @@ impl FontRasterizer {
 
     /// Rasterize a single codepoint into an R8 alpha bitmap.
     /// Returns None if the glyph is missing from all fonts.
-    pub fn rasterize(&self, codepoint: u32) -> Option<RasterizedGlyph> {
-        let font = self.font_for_codepoint(codepoint).unwrap_or(&self.ct_font);
+    pub fn rasterize(&self, codepoint: u32, bold: bool) -> Option<RasterizedGlyph> {
+        let font = self
+            .font_for_codepoint(codepoint, bold)
+            .unwrap_or(&self.ct_font);
         self.rasterize_with_font(font, codepoint, self.metrics.cell_width)
     }
 
     /// Rasterize a wide (double-width) codepoint.
-    pub fn rasterize_wide(&self, codepoint: u32) -> Option<RasterizedGlyph> {
-        let font = self.font_for_codepoint(codepoint).unwrap_or(&self.ct_font);
+    pub fn rasterize_wide(&self, codepoint: u32, bold: bool) -> Option<RasterizedGlyph> {
+        let font = self
+            .font_for_codepoint(codepoint, bold)
+            .unwrap_or(&self.ct_font);
         self.rasterize_with_font(font, codepoint, self.metrics.cell_width * 2)
     }
 
@@ -266,11 +286,11 @@ impl FontRasterizer {
 }
 
 impl Rasterize for FontRasterizer {
-    fn rasterize(&self, codepoint: u32) -> Option<RasterizedGlyph> {
-        self.rasterize(codepoint)
+    fn rasterize(&self, codepoint: u32, bold: bool) -> Option<RasterizedGlyph> {
+        self.rasterize(codepoint, bold)
     }
 
-    fn rasterize_wide(&self, codepoint: u32) -> Option<RasterizedGlyph> {
-        self.rasterize_wide(codepoint)
+    fn rasterize_wide(&self, codepoint: u32, bold: bool) -> Option<RasterizedGlyph> {
+        self.rasterize_wide(codepoint, bold)
     }
 }

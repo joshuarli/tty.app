@@ -5,6 +5,6 @@ pub mod metal;
 
 /// Font rasterization interface (enables mock rasterizers in tests).
 pub trait Rasterize {
-    fn rasterize(&self, codepoint: u32) -> Option<font::RasterizedGlyph>;
-    fn rasterize_wide(&self, codepoint: u32) -> Option<font::RasterizedGlyph>;
+    fn rasterize(&self, codepoint: u32, bold: bool) -> Option<font::RasterizedGlyph>;
+    fn rasterize_wide(&self, codepoint: u32, bold: bool) -> Option<font::RasterizedGlyph>;
 }

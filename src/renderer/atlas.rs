@@ -19,6 +19,7 @@ const ATLAS_SIZE: u32 = 2048;
 pub struct GlyphKey {
     pub codepoint: u32,
     pub wide: bool,
+    pub bold: bool,
 }
 
 /// Position of a glyph in the atlas grid.
@@ -94,8 +95,9 @@ impl Atlas {
             let key = GlyphKey {
                 codepoint: cp,
                 wide: false,
+                bold: false,
             };
-            if let Some(glyph) = rasterizer.rasterize(cp) {
+            if let Some(glyph) = rasterizer.rasterize(cp, false) {
                 let pos = self.insert(key, &glyph);
                 self.ascii_table[cp as usize] = pos;
             }
@@ -123,10 +125,15 @@ impl Atlas {
         &mut self,
         codepoint: u32,
         wide: bool,
+        bold: bool,
         rasterizer: &R,
     ) -> AtlasPos {
         self.frame = self.frame.wrapping_add(1);
-        let key = GlyphKey { codepoint, wide };
+        let key = GlyphKey {
+            codepoint,
+            wide,
+            bold,
+        };
 
         if let Some(pos) = self.map.get(&key) {
             let slot = pos.y as u32 * self.cols + pos.x as u32 / 2;
@@ -136,9 +143,9 @@ impl Atlas {
 
         // Rasterize
         let glyph = if wide {
-            rasterizer.rasterize_wide(codepoint)
+            rasterizer.rasterize_wide(codepoint, bold)
         } else {
-            rasterizer.rasterize(codepoint)
+            rasterizer.rasterize(codepoint, bold)
         };
 
         match glyph {

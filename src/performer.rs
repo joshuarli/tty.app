@@ -50,18 +50,28 @@ impl<'a> Perform for TermPerformer<'a> {
                 } else {
                     b as char
                 };
-                let pos = self.atlas.get_or_insert(ch as u32, false, self.rasterizer);
+                let bold = self.grid.attr.flags.contains(CellFlags::BOLD);
+                let pos = self
+                    .atlas
+                    .get_or_insert(ch as u32, false, bold, self.rasterizer);
                 self.grid.write_char(ch, pos.x, pos.y);
                 self.grid.last_char = ch;
                 self.grid.last_atlas = [pos.x, pos.y];
             }
         } else {
-            // Fast path: bulk write — atlas coords resolved inside Grid from ascii_atlas
-            self.grid.write_ascii_run(bytes);
-            if let Some(&last) = bytes.last() {
-                self.grid.last_char = last as char;
-                let ap = self.atlas.get_ascii(last);
-                self.grid.last_atlas = [ap.x, ap.y];
+            let bold = self.grid.attr.flags.contains(CellFlags::BOLD);
+            if bold {
+                for &b in bytes {
+                    self.print(b as char);
+                }
+            } else {
+                // Fast path: bulk write — atlas coords resolved inside Grid from ascii_atlas
+                self.grid.write_ascii_run(bytes);
+                if let Some(&last) = bytes.last() {
+                    self.grid.last_char = last as char;
+                    let ap = self.atlas.get_ascii(last);
+                    self.grid.last_atlas = [ap.x, ap.y];
+                }
             }
         }
     }
@@ -71,14 +81,16 @@ impl<'a> Perform for TermPerformer<'a> {
         let wide = is_wide(cp);
 
         if wide {
-            let pos = self.atlas.get_or_insert(cp, true, self.rasterizer);
+            let bold = self.grid.attr.flags.contains(CellFlags::BOLD);
+            let pos = self.atlas.get_or_insert(cp, true, bold, self.rasterizer);
             self.grid.write_wide_char(c, pos.x, pos.y);
             self.grid.last_char = c;
             self.grid.last_atlas = [pos.x, pos.y];
         } else if is_zero_width(cp) {
             // Zero-width combining marks — ignore for v1
         } else {
-            let pos = self.atlas.get_or_insert(cp, false, self.rasterizer);
+            let bold = self.grid.attr.flags.contains(CellFlags::BOLD);
+            let pos = self.atlas.get_or_insert(cp, false, bold, self.rasterizer);
             self.grid.write_char(c, pos.x, pos.y);
             self.grid.last_char = c;
             self.grid.last_atlas = [pos.x, pos.y];

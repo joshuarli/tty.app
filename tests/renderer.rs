@@ -13,7 +13,7 @@ struct MockRasterizer {
 }
 
 impl Rasterize for MockRasterizer {
-    fn rasterize(&self, _codepoint: u32) -> Option<RasterizedGlyph> {
+    fn rasterize(&self, _codepoint: u32, _bold: bool) -> Option<RasterizedGlyph> {
         let w = self.cell_width as usize;
         let h = self.cell_height as usize;
         Some(RasterizedGlyph {
@@ -23,7 +23,7 @@ impl Rasterize for MockRasterizer {
         })
     }
 
-    fn rasterize_wide(&self, _codepoint: u32) -> Option<RasterizedGlyph> {
+    fn rasterize_wide(&self, _codepoint: u32, _bold: bool) -> Option<RasterizedGlyph> {
         let w = (self.cell_width * 2) as usize;
         let h = self.cell_height as usize;
         Some(RasterizedGlyph {
@@ -61,8 +61,8 @@ fn get_or_insert_returns_cached_position() {
     };
     let mut atlas = Atlas::new(&device, 8, 16);
 
-    let pos1 = atlas.get_or_insert(0x41, false, &rasterizer);
-    let pos2 = atlas.get_or_insert(0x41, false, &rasterizer);
+    let pos1 = atlas.get_or_insert(0x41, false, false, &rasterizer);
+    let pos2 = atlas.get_or_insert(0x41, false, false, &rasterizer);
     assert_eq!(pos1.x, pos2.x);
     assert_eq!(pos1.y, pos2.y);
 }
@@ -76,8 +76,8 @@ fn different_codepoints_get_different_slots() {
     };
     let mut atlas = Atlas::new(&device, 8, 16);
 
-    let pos_a = atlas.get_or_insert(0x41, false, &rasterizer);
-    let pos_b = atlas.get_or_insert(0x42, false, &rasterizer);
+    let pos_a = atlas.get_or_insert(0x41, false, false, &rasterizer);
+    let pos_b = atlas.get_or_insert(0x42, false, false, &rasterizer);
     assert!(pos_a.x != pos_b.x || pos_a.y != pos_b.y);
 }
 
@@ -99,8 +99,8 @@ fn wide_glyph_gets_slot() {
     };
     let mut atlas = Atlas::new(&device, 8, 16);
 
-    let pos1 = atlas.get_or_insert(0x4E00, true, &rasterizer);
-    let pos2 = atlas.get_or_insert(0x4E00, true, &rasterizer);
+    let pos1 = atlas.get_or_insert(0x4E00, true, false, &rasterizer);
+    let pos2 = atlas.get_or_insert(0x4E00, true, false, &rasterizer);
     // Wide glyph should get a valid insert and cache hit
     assert_eq!(pos1.x, pos2.x);
     assert_eq!(pos1.y, pos2.y);
@@ -120,9 +120,9 @@ fn wide_glyph_at_slot_boundary_fits_atlas() {
     // With one-cell slots, this wide insert lands in the final atlas column
     // and triggers AGX's Region width OOB assertion.
     for cp in 0x41..0x44 {
-        atlas.get_or_insert(cp, false, &rasterizer);
+        atlas.get_or_insert(cp, false, false, &rasterizer);
     }
-    let pos = atlas.get_or_insert(0x4E00, true, &rasterizer);
+    let pos = atlas.get_or_insert(0x4E00, true, false, &rasterizer);
 
     assert!(pos.x as u32 + 2 <= 2048 / cell_w);
 }
@@ -160,16 +160,16 @@ fn evict_lru_when_full() {
 
     // Fill all 8 double-cell slots (2048/512 = 4 cell columns, so 2×4 = 8)
     for cp in 0x41u32..0x51 {
-        atlas.get_or_insert(cp, false, &rasterizer);
+        atlas.get_or_insert(cp, false, false, &rasterizer);
     }
 
     // Insert 16 more — should not panic (eviction handles all slots)
     for cp in 0x51u32..0x61 {
-        atlas.get_or_insert(cp, false, &rasterizer);
+        atlas.get_or_insert(cp, false, false, &rasterizer);
     }
 
     // Inserts after overflow should succeed (position returns valid coords)
-    let pos = atlas.get_or_insert(0x61, false, &rasterizer);
+    let pos = atlas.get_or_insert(0x61, false, false, &rasterizer);
     assert!(pos.x < 4, "x out of range: {}", pos.x);
     assert!(pos.y < 4, "y out of range: {}", pos.y);
 }
@@ -187,7 +187,7 @@ fn eviction_preserves_ascii_when_large_enough() {
 
     // Insert enough non-ASCII to trigger eviction if nothing were pinned
     for cp in 0x80u32..0x200 {
-        atlas.get_or_insert(cp, false, &rasterizer);
+        atlas.get_or_insert(cp, false, false, &rasterizer);
     }
 
     let _space = atlas.get_ascii(b' ');
