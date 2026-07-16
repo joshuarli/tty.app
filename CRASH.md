@@ -224,6 +224,7 @@ early and the loop processes the new data.
 
 This prevents main-thread starvation under continuous PTY output: the loop
 still drains PTY and events eagerly, but rendering is rate-limited so the
-GPU has time to complete each command buffer. The 60 Hz hard-coded interval
-is conservative for ProMotion (120 Hz) but correct; querying `NSScreen` for
-the actual refresh rate is a future optimization.
+GPU has time to complete each command buffer. The frame interval is derived
+from `NSScreen.maximumFramesPerSecond` (querying the view's window's screen
+in `MetalRenderer::new()`), falling back to 60 Hz if the screen reports 0
+or is unavailable.

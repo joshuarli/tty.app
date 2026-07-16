@@ -7,7 +7,8 @@ use bitvec::prelude::*;
 use block2::RcBlock;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
-use objc2_app_kit::NSView;
+use objc2::msg_send;
+use objc2_app_kit::{NSView, NSWindow, NSScreen};
 use objc2_core_foundation::CGSize;
 use objc2_metal::*;
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
@@ -79,9 +80,20 @@ pub struct MetalRenderer {
 
     // Frame rate gate — don't dispatch faster than display refresh
     next_frame: Option<Instant>,
+    frame_interval: std::time::Duration,
 }
 
 impl MetalRenderer {
+    fn display_refresh_interval(view: &NSView) -> std::time::Duration {
+        let fps: i64 = unsafe {
+            let window: Option<&NSWindow> = msg_send![view, window];
+            let screen: Option<&NSScreen> = window.and_then(|w| msg_send![w, screen]);
+            screen.map_or(0, |s| msg_send![s, maximumFramesPerSecond])
+        };
+        let rate = if fps > 0 { fps as f64 } else { 60.0 };
+        std::time::Duration::from_secs_f64(1.0 / rate)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         view: &NSView,
@@ -182,6 +194,7 @@ impl MetalRenderer {
             prev_cursor_col: 0,
             prev_cursor_visible: true,
             next_frame: None,
+            frame_interval: Self::display_refresh_interval(view),
         }
     }
 
@@ -379,7 +392,7 @@ impl MetalRenderer {
             // back-to-back renders that exhaust Metal's 3-drawable pool.
             self.current_buffer = (self.current_buffer + 1) % NUM_BUFFERS;
             self.next_frame =
-                Some(Instant::now() + std::time::Duration::from_secs_f64(1.0 / 60.0));
+                Some(Instant::now() + self.frame_interval);
             self.needs_render = false;
 
             true
