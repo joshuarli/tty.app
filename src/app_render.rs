@@ -28,5 +28,5 @@ pub fn render_frame<R: Renderer + ?Sized>(
     // render_frame returns true when GPU work was dispatched, false when idle.
     // A deferred render (GPU buffer busy) is not idle — we want to retry promptly.
     let dispatched = renderer.render_frame(grid, scrollback, viewport_offset, *cursor_visible);
-    !dispatched && !renderer.needs_render()
+    !dispatched && !renderer.needs_render() && renderer.frame_deadline().is_none()
 }

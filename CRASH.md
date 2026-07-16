@@ -11,6 +11,13 @@ normal macOS window switching.
 The issue has so far only been observed on the current M1 Max machine. The
 same macOS version does not show the problem on an M1 Air or M1 Pro.
 
+The M1 Max is the only test machine with a ProMotion (120 Hz) display. At
+120 Hz, Metal's drawable pool (typically 3 frames) is consumed in ~25 ms
+instead of ~50 ms at 60 Hz, making in-flight buffer contention far more
+likely. This explains the machine-specific reproduction: the other machines
+operate at 60 Hz where the GPU has twice as long to complete each frame
+before the pool empties.
+
 ## Headless reproduction
 
 The existing headless Metal benchmark was used with output captured from two
@@ -198,3 +205,25 @@ Instead of spinning, the event loop blocks until the scheduled `Frame` timer
 fires at the next display refresh boundary. The GPU has an entire refresh
 interval to complete, and PTY data accumulated during that interval is
 coalesced into a single render pass.
+
+## Frame gate implementation (2026-07-16)
+
+The frame gate is implemented in `MetalRenderer` via `next_frame: Option<Instant>`.
+After a successful dispatch, `next_frame` is set to `now + 1/60s`. On the next
+`render_frame()` call, the gate returns early without touching grid dirty rows
+if we're still within the interval. The gate is cleared on resize and when the
+GPU buffer is busy, ensuring prompt retry when the buffer frees.
+
+`app_render::render_frame` treats a frame-gated render as not-idle (returns
+false), so the main loop knows work is pending. The main loop collects
+`frame_deadline()` from all focused renderers and computes a minimum wait
+duration. When no PTY data or events are pending, it calls
+`CFRunLoopRunInMode` with that duration instead of spinning. If PTY data
+arrives during the wait (via the wake pipe run-loop source), the wait returns
+early and the loop processes the new data.
+
+This prevents main-thread starvation under continuous PTY output: the loop
+still drains PTY and events eagerly, but rendering is rate-limited so the
+GPU has time to complete each command buffer. The 60 Hz hard-coded interval
+is conservative for ProMotion (120 Hz) but correct; querying `NSScreen` for
+the actual refresh rate is a future optimization.

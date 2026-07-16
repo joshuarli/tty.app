@@ -422,6 +422,10 @@ impl App {
         )
     }
 
+    fn frame_deadline(&self) -> Option<std::time::Instant> {
+        self.renderer.frame_deadline()
+    }
+
     fn copy_selection(&self) {
         if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
             let mut text = String::new();
@@ -1047,7 +1051,7 @@ fn main() {
     let mut state_events = Vec::new();
 
     loop {
-        let (idle, quit, render_deferred, got_any_pty_data, got_events, sent_deferred_mouse) =
+        let (idle, quit, got_any_pty_data, got_events, sent_deferred_mouse, min_frame_deadline) =
             objc2::rc::autoreleasepool(|_| {
             // Apply terminal state produced by each PTY worker.
             let mut got_any_pty_data = false;
@@ -1178,25 +1182,31 @@ fn main() {
 
             // Render all terminals
             let mut all_idle = true;
+            let mut min_frame_deadline: Option<std::time::Instant> = None;
             for t in terminals.iter_mut() {
                 if t.win.is_focused() {
                     all_idle &= t.app.render();
+                    if let Some(dl) = t.app.frame_deadline() {
+                        min_frame_deadline = Some(match min_frame_deadline {
+                            Some(existing) => existing.min(dl),
+                            None => dl,
+                        });
+                    }
                 }
             }
 
-            let render_deferred = !all_idle;
             let idle = !got_any_pty_data
                 && !sent_deferred_mouse
                 && !got_events
-                && !render_deferred;
+                && all_idle;
             pty_sources.enable_callbacks();
             (
                 idle,
                 quit,
-                render_deferred,
                 got_any_pty_data,
                 got_events,
                 sent_deferred_mouse,
+                min_frame_deadline,
             )
         });
 
@@ -1206,8 +1216,17 @@ fn main() {
 
         if idle {
             pty_sources.wait(f64::MAX);
-        } else if render_deferred && !got_any_pty_data && !got_events && !sent_deferred_mouse {
-            pty_sources.wait(1.0 / 60.0);
+        } else {
+            let pending = got_any_pty_data || got_events || sent_deferred_mouse;
+            if !pending {
+                if let Some(deadline) = min_frame_deadline {
+                    let now = std::time::Instant::now();
+                    if deadline > now {
+                        let wait = (deadline - now).as_secs_f64();
+                        pty_sources.wait(wait);
+                    }
+                }
+            }
         }
     }
 }

@@ -1,6 +1,7 @@
 use std::mem;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use bitvec::prelude::*;
 use block2::RcBlock;
@@ -75,6 +76,9 @@ pub struct MetalRenderer {
     prev_cursor_row: u32,
     prev_cursor_col: u32,
     prev_cursor_visible: bool,
+
+    // Frame rate gate — don't dispatch faster than display refresh
+    next_frame: Option<Instant>,
 }
 
 impl MetalRenderer {
@@ -177,6 +181,7 @@ impl MetalRenderer {
             prev_cursor_row: 0,
             prev_cursor_col: 0,
             prev_cursor_visible: true,
+            next_frame: None,
         }
     }
 
@@ -193,6 +198,15 @@ impl MetalRenderer {
         // The renderer retains pixels, but semantic scroll hints still require
         // specialized surface copies that are intentionally not enabled here.
         let _ = grid.take_scroll_hint();
+
+        // Frame rate gate — don't dispatch faster than display refresh.
+        // The gate is cleared on resize and on buffer-busy deferrals so we
+        // retry promptly when the GPU catches up.
+        if let Some(next) = self.next_frame {
+            if Instant::now() < next {
+                return false;
+            }
+        }
 
         // Merge grid dirty rows into both per-buffer pending bitsets
         let cur = self.current_buffer;
@@ -228,6 +242,7 @@ impl MetalRenderer {
         // iteration. This keeps the event loop non-blocking so PTY data continues
         // to be drained while the GPU catches up.
         if !self.buffer_ready[cur].load(Ordering::Acquire) {
+            self.next_frame = None;
             self.needs_render = true;
             return false;
         }
@@ -363,6 +378,8 @@ impl MetalRenderer {
             // (new dirty rows or cursor change). This lazy convergence avoids
             // back-to-back renders that exhaust Metal's 3-drawable pool.
             self.current_buffer = (self.current_buffer + 1) % NUM_BUFFERS;
+            self.next_frame =
+                Some(Instant::now() + std::time::Duration::from_secs_f64(1.0 / 60.0));
             self.needs_render = false;
 
             true
@@ -415,6 +432,7 @@ impl MetalRenderer {
             bitvec![1; self.rows as usize],
         ];
         self.needs_render = true;
+        self.next_frame = None;
     }
 
     pub fn device(&self) -> &ProtocolObject<dyn MTLDevice> {
@@ -459,5 +477,9 @@ impl Renderer for MetalRenderer {
 
     fn needs_render(&self) -> bool {
         self.needs_render
+    }
+
+    fn frame_deadline(&self) -> Option<Instant> {
+        self.next_frame
     }
 }

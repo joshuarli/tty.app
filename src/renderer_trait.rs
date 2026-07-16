@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::terminal::grid::Grid;
 use crate::terminal::scrollback::Scrollback;
 
@@ -25,4 +27,9 @@ pub trait Renderer {
     fn cell_height(&self) -> u32;
     fn scale_factor(&self) -> f64;
     fn needs_render(&self) -> bool;
+
+    /// When the next render is allowed by the frame rate gate, if any.
+    fn frame_deadline(&self) -> Option<Instant> {
+        None
+    }
 }
