@@ -11,6 +11,7 @@ bitflags::bitflags! {
         const ITALIC     = 0x0100;
         const DIM        = 0x0200;
         const HIDDEN     = 0x0400;
+        const TRUECOLOR_BG = 0x0800;
     }
 }
 

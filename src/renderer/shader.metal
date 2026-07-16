@@ -39,10 +39,19 @@ constant ushort FLAG_BOLD       = 0x0080;
 constant ushort FLAG_HIDDEN     = 0x0400;
 constant ushort FLAG_DIM        = 0x0200;
 constant ushort FLAG_TILED_SKIP = 0x8000;
+constant ushort FLAG_TRUECOLOR_BG = 0x0800;
 
 inline half4 palette_color(device const half4* palette, uchar index, ushort flags) {
     half4 color = palette[index];
     if (flags & FLAG_DIM) color = half4(color.rgb * 0.66h, color.a);
+    return color;
+}
+
+inline half4 background_color(device const half4* palette, uchar index, ushort flags) {
+    half4 color = palette[index];
+    if (flags & FLAG_TRUECOLOR_BG) {
+        color = mix(palette[0], color, 0.5h);
+    }
     return color;
 }
 
@@ -258,7 +267,7 @@ kernel void render(
     // Wide continuation — the cell carries the owner's colors and atlas coords
     if (cell.flags & FLAG_WIDE_CONT) {
         half4 fg = palette_color(palette, cell.fg_index, cell.flags);
-        half4 bg = palette[cell.bg_index];
+        half4 bg = background_color(palette, cell.bg_index, cell.flags);
         if (cell.flags & FLAG_INVERSE) { half4 tmp = fg; fg = bg; bg = tmp; }
         if (cell.flags & FLAG_HIDDEN) fg = bg;
         // Offset px to sample the right half of the wide glyph
@@ -273,7 +282,7 @@ kernel void render(
 
     // Resolve fg/bg from palette
     half4 fg = palette_color(palette, cell.fg_index, cell.flags);
-    half4 bg = palette[cell.bg_index];
+    half4 bg = background_color(palette, cell.bg_index, cell.flags);
 
     // Hidden: make fg match bg
     if (cell.flags & FLAG_HIDDEN) {
@@ -380,14 +389,14 @@ kernel void render_tiled(
 
         if (cell.flags & FLAG_WIDE_CONT) {
             half4 fg = palette_color(palette, cell.fg_index, cell.flags);
-            half4 bg = palette[cell.bg_index];
+            half4 bg = background_color(palette, cell.bg_index, cell.flags);
             if (cell.flags & FLAG_INVERSE) { half4 tmp = fg; fg = bg; bg = tmp; }
             if (cell.flags & FLAG_HIDDEN) fg = bg;
             shared_fg = fg;
             shared_bg = bg;
         } else {
             half4 fg = palette_color(palette, cell.fg_index, cell.flags);
-            half4 bg = palette[cell.bg_index];
+            half4 bg = background_color(palette, cell.bg_index, cell.flags);
             if (cell.flags & FLAG_HIDDEN) {
                 fg = bg;
             }
@@ -551,14 +560,14 @@ kernel void render_tiled_list(
 
         if (cell.flags & FLAG_WIDE_CONT) {
             half4 fg = palette_color(palette, cell.fg_index, cell.flags);
-            half4 bg = palette[cell.bg_index];
+            half4 bg = background_color(palette, cell.bg_index, cell.flags);
             if (cell.flags & FLAG_INVERSE) { half4 tmp = fg; fg = bg; bg = tmp; }
             if (cell.flags & FLAG_HIDDEN) fg = bg;
             shared_fg = fg;
             shared_bg = bg;
         } else {
             half4 fg = palette_color(palette, cell.fg_index, cell.flags);
-            half4 bg = palette[cell.bg_index];
+            half4 bg = background_color(palette, cell.bg_index, cell.flags);
             if (cell.flags & FLAG_HIDDEN) fg = bg;
             if (cell.flags & FLAG_INVERSE) {
                 half4 tmp = fg;

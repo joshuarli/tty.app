@@ -306,6 +306,7 @@ pub fn sgr(
                             i += 1;
                             if i < params.len() {
                                 grid.attr.bg_index = params[i] as u8;
+                                grid.attr.flags.remove(CellFlags::TRUECOLOR_BG);
                             }
                         }
                         2 if i + 3 < params.len() => {
@@ -314,6 +315,7 @@ pub fn sgr(
                                 params[i + 2] as u8,
                                 params[i + 3] as u8,
                             );
+                            grid.attr.flags.insert(CellFlags::TRUECOLOR_BG);
                             i += 3;
                         }
                         2 => {}
@@ -356,8 +358,14 @@ pub fn sgr_single(grid: &mut Grid, code: u16) {
         29 => grid.attr.flags.remove(CellFlags::STRIKE),
         30..=37 => grid.attr.fg_index = (code - 30) as u8,
         39 => grid.attr.fg_index = 7,
-        40..=47 => grid.attr.bg_index = (code - 40) as u8,
-        49 => grid.attr.bg_index = 0,
+        40..=47 => {
+            grid.attr.bg_index = (code - 40) as u8;
+            grid.attr.flags.remove(CellFlags::TRUECOLOR_BG);
+        }
+        49 => {
+            grid.attr.bg_index = 0;
+            grid.attr.flags.remove(CellFlags::TRUECOLOR_BG);
+        }
         90..=97 => grid.attr.fg_index = (code - 90 + 8) as u8,
         100..=107 => grid.attr.bg_index = (code - 100 + 8) as u8,
         _ => {}
@@ -370,6 +378,7 @@ pub fn color_256(grid: &mut Grid, fg: bool, index: u16) {
         grid.attr.fg_index = index as u8;
     } else {
         grid.attr.bg_index = index as u8;
+        grid.attr.flags.remove(CellFlags::TRUECOLOR_BG);
     }
 }
 
@@ -380,6 +389,7 @@ pub fn color_rgb(grid: &mut Grid, fg: bool, r: u16, g: u16, b: u16) {
         grid.attr.fg_index = index;
     } else {
         grid.attr.bg_index = index;
+        grid.attr.flags.insert(CellFlags::TRUECOLOR_BG);
     }
 }
 

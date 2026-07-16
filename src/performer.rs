@@ -245,6 +245,7 @@ impl<'a> Perform for TermPerformer<'a> {
                     // Background color: 48:5:N or 48:2:[CS]:R:G:B
                     if subs.len() >= 3 && subs[1] == 5 {
                         self.grid.attr.bg_index = subs[2] as u8;
+                        self.grid.attr.flags.remove(CellFlags::TRUECOLOR_BG);
                     } else if subs.len() >= 5 && subs[1] == 2 {
                         let (r, g, b) = if subs.len() >= 6 {
                             (subs[3] as u8, subs[4] as u8, subs[5] as u8)
@@ -252,6 +253,7 @@ impl<'a> Perform for TermPerformer<'a> {
                             (subs[2] as u8, subs[3] as u8, subs[4] as u8)
                         };
                         self.grid.attr.bg_index = config::rgb_to_palette(r, g, b);
+                        self.grid.attr.flags.insert(CellFlags::TRUECOLOR_BG);
                     }
                 }
                 58 => {

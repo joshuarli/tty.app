@@ -80,6 +80,16 @@ fn nearby_colors_do_not_collapse_named_entries() {
 }
 
 #[test]
+fn muted_diff_backgrounds_retain_color() {
+    let added = rgb_to_palette(33, 58, 43);
+    let deleted = rgb_to_palette(74, 34, 29);
+
+    assert_ne!(added, 0);
+    assert_ne!(deleted, 0);
+    assert_ne!(added, deleted);
+}
+
+#[test]
 fn grayscale_boundary_behavior() {
     assert_eq!(rgb_to_palette(8, 8, 8), 232);
     assert_eq!(rgb_to_palette(9, 9, 9), 232);

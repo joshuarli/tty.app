@@ -368,6 +368,15 @@ fn pal_to_bgra(rgb: u32) -> (u8, u8, u8, u8) {
     (b, g, r, 255)
 }
 
+fn blend_bgra(a: (u8, u8, u8, u8), b: (u8, u8, u8, u8)) -> (u8, u8, u8, u8) {
+    (
+        (a.0 as u16 + b.0 as u16).div_ceil(2) as u8,
+        (a.1 as u16 + b.1 as u16).div_ceil(2) as u8,
+        (a.2 as u16 + b.2 as u16).div_ceil(2) as u8,
+        255,
+    )
+}
+
 /// One-cell grid with the given cell content.
 fn single_cell_test(
     cell: Cell,
@@ -876,10 +885,23 @@ fn truecolor_gradient_writes_ppm_and_matches_quantized_palette() {
             let palette_index = config::rgb_to_palette(r as u8, g as u8, b as u8);
             let x = col as u32 * cell_width + cell_width / 2;
             let y = row as u32 * cell_height + cell_height / 2;
-            assert_eq!(
-                pixel_bgra(&pixels, x, y, out_w),
-                pal_to_bgra(config::PALETTE[palette_index as usize]),
-                "truecolor pixel at row {row}, col {col}"
+            let expected = if cells[row as usize * cols as usize + col as usize]
+                .flags
+                .contains(CellFlags::TRUECOLOR_BG)
+            {
+                blend_bgra(
+                    pal_to_bgra(config::PALETTE[0]),
+                    pal_to_bgra(config::PALETTE[palette_index as usize]),
+                )
+            } else {
+                pal_to_bgra(config::PALETTE[palette_index as usize])
+            };
+            let actual = pixel_bgra(&pixels, x, y, out_w);
+            assert!(
+                actual.0.abs_diff(expected.0) <= 1
+                    && actual.1.abs_diff(expected.1) <= 1
+                    && actual.2.abs_diff(expected.2) <= 1,
+                "truecolor pixel at row {row}, col {col}: actual {actual:?}, expected {expected:?}"
             );
             seen[palette_index as usize] = true;
         }

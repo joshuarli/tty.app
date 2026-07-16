@@ -77,8 +77,15 @@ pub const PALETTE: [u32; 256] = {
 pub fn rgb_to_palette(r: u8, g: u8, b: u8) -> u8 {
     let mut best_index = 0;
     let mut best_distance = u32::MAX;
+    let chroma = r.max(g).max(b) - r.min(g).min(b);
 
     for (index, &rgb) in PALETTE.iter().enumerate() {
+        // Muted colored backgrounds should retain their hue instead of
+        // collapsing into the terminal's black or grayscale entries. This is
+        // especially important for dark diff backgrounds such as #213a2b.
+        if chroma > 8 && matches!(index, 0 | 8 | 16 | 232..=255) {
+            continue;
+        }
         let pr = ((rgb >> 16) & 0xFF) as i32;
         let pg = ((rgb >> 8) & 0xFF) as i32;
         let pb = (rgb & 0xFF) as i32;
