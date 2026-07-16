@@ -29,6 +29,18 @@ pub struct AtlasPos {
     pub y: u8, // grid row
 }
 
+pub trait GlyphAtlas {
+    fn get_or_insert<R: Rasterize + ?Sized>(
+        &mut self,
+        codepoint: u32,
+        wide: bool,
+        bold: bool,
+        rasterizer: &R,
+    ) -> AtlasPos;
+
+    fn get_ascii(&self, cp: u8, bold: bool) -> AtlasPos;
+}
+
 /// Glyph texture atlas with grid-based packing.
 pub struct Atlas {
     pub texture: Retained<ProtocolObject<dyn MTLTexture>>,
@@ -142,7 +154,7 @@ impl Atlas {
     }
 
     /// Look up or rasterize a glyph, returning its atlas position.
-    pub fn get_or_insert<R: Rasterize>(
+    pub fn get_or_insert<R: Rasterize + ?Sized>(
         &mut self,
         codepoint: u32,
         wide: bool,
@@ -241,5 +253,21 @@ impl Atlas {
                 .retain(|_, pos| !(pos.x == grid_x as u8 && pos.y == grid_y as u8));
         }
         slot
+    }
+}
+
+impl GlyphAtlas for Atlas {
+    fn get_or_insert<R: Rasterize + ?Sized>(
+        &mut self,
+        codepoint: u32,
+        wide: bool,
+        bold: bool,
+        rasterizer: &R,
+    ) -> AtlasPos {
+        Self::get_or_insert(self, codepoint, wide, bold, rasterizer)
+    }
+
+    fn get_ascii(&self, cp: u8, bold: bool) -> AtlasPos {
+        Self::get_ascii(self, cp, bold)
     }
 }

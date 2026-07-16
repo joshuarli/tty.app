@@ -203,6 +203,41 @@ impl Grid {
         self.main_cursor = SavedCursor::default();
     }
 
+    /// Copy terminal state into a render snapshot without sharing mutable storage.
+    pub fn copy_from(&mut self, source: &Self) {
+        self.cells.clone_from(&source.cells);
+        self.chars.clone_from(&source.chars);
+        self.has_non_bmp = source.has_non_bmp;
+        self.cols = source.cols;
+        self.rows = source.rows;
+        self.dirty.clone_from(&source.dirty);
+        self.scroll_dirty.clone_from(&source.scroll_dirty);
+        self.scroll_hint = source.scroll_hint;
+        self.ring_offset = source.ring_offset;
+        self.cursor_row = source.cursor_row;
+        self.cursor_col = source.cursor_col;
+        self.cursor_pending_wrap = source.cursor_pending_wrap;
+        self.attr = source.attr;
+        self.mode = source.mode;
+        self.scroll_top = source.scroll_top;
+        self.scroll_bottom = source.scroll_bottom;
+        self.charset_g0 = source.charset_g0;
+        self.charset_g1 = source.charset_g1;
+        self.active_charset = source.active_charset;
+        self.tab_stops.clone_from(&source.tab_stops);
+        self.saved_cursor = source.saved_cursor;
+        self.last_char = source.last_char;
+        self.last_atlas = source.last_atlas;
+        self.sync_start = source.sync_start;
+        self.ascii_atlas = source.ascii_atlas;
+        self.bold_ascii_atlas = source.bold_ascii_atlas;
+        self.space_atlas = source.space_atlas;
+        self.alt_cells.clone_from(&source.alt_cells);
+        self.alt_chars.clone_from(&source.alt_chars);
+        self.alt_ring_offset = source.alt_ring_offset;
+        self.main_cursor = source.main_cursor;
+    }
+
     /// Set the ASCII atlas lookup table (called once after atlas preload).
     pub fn set_ascii_atlas(&mut self, table: &[[u8; 2]; 128]) {
         self.ascii_atlas = *table;

@@ -24,7 +24,7 @@ use tty::parser::perform::Perform;
 use tty::parser::simd::SimdScanner;
 use tty::performer::TermPerformer;
 use tty::pty::Pty;
-use tty::renderer::atlas::Atlas;
+use tty::renderer::atlas::{Atlas, GlyphAtlas};
 use tty::renderer::core::MetalCore;
 use tty::renderer::font::FontRasterizer;
 use tty::renderer::metal::Uniforms;
@@ -42,6 +42,24 @@ struct CountingAlloc;
 struct BenchRasterizer {
     width: u32,
     height: u32,
+}
+
+struct WorkerTestAtlas;
+
+impl GlyphAtlas for WorkerTestAtlas {
+    fn get_or_insert<R: Rasterize + ?Sized>(
+        &mut self,
+        _codepoint: u32,
+        _wide: bool,
+        _bold: bool,
+        _rasterizer: &R,
+    ) -> tty::renderer::atlas::AtlasPos {
+        tty::renderer::atlas::AtlasPos::default()
+    }
+
+    fn get_ascii(&self, _cp: u8, _bold: bool) -> tty::renderer::atlas::AtlasPos {
+        tty::renderer::atlas::AtlasPos::default()
+    }
 }
 
 impl Rasterize for BenchRasterizer {
@@ -4063,6 +4081,169 @@ impl MetalBaseline {
     }
 }
 
+fn worker_test_is_wide(cp: u32) -> bool {
+    matches!(
+        cp,
+        0x1100..=0x115F
+            | 0x2E80..=0x303E
+            | 0x3041..=0x33BF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0xA4CF
+            | 0xA960..=0xA97C
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE10..=0xFE6F
+            | 0xFF01..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x20000..=0x2FA1F
+            | 0x1F000..=0x1F02F
+            | 0x1F0A0..=0x1F0FF
+            | 0x1F300..=0x1F9FF
+            | 0x1FA00..=0x1FA6F
+            | 0x1FA70..=0x1FAFF
+    )
+}
+
+fn resolve_worker_test_glyphs(grid: &mut Grid, atlas: &mut Atlas, rasterizer: &FontRasterizer) {
+    let rows: Vec<u16> = grid.dirty.iter_ones().map(|row| row as u16).collect();
+    for row in rows {
+        for col in 0..grid.cols {
+            let cell = grid.cell(row, col);
+            if cell.flags.contains(CellFlags::WIDE_CONT) {
+                continue;
+            }
+            let codepoint = grid.char_at(row, col) as u32;
+            if codepoint < 0x80 {
+                continue;
+            }
+            let pos = atlas.get_or_insert(
+                codepoint,
+                worker_test_is_wide(codepoint),
+                cell.flags.contains(CellFlags::BOLD),
+                rasterizer,
+            );
+            let cell = grid.cell_mut(row, col);
+            cell.atlas_x = pos.x;
+            cell.atlas_y = pos.y;
+            if cell.flags.contains(CellFlags::WIDE) && col + 1 < grid.cols {
+                let continuation = grid.cell_mut(row, col + 1);
+                continuation.atlas_x = pos.x;
+                continuation.atlas_y = pos.y;
+            }
+        }
+    }
+}
+
+fn assert_worker_handoff_matches_direct(data: &[u8]) {
+    let mut baseline = MetalBaseline::new();
+    let ascii_table = baseline.ascii_table();
+    let bold_ascii_table = baseline.atlas.bold_ascii_table_raw();
+
+    let mut direct_parser = Parser::new();
+    let mut worker_parser = Parser::new();
+    let mut direct_grid = Grid::new(METAL_COLS, METAL_ROWS);
+    let mut worker_grid = Grid::new(METAL_COLS, METAL_ROWS);
+    let mut handoff_grid = Grid::new(METAL_COLS, METAL_ROWS);
+    for grid in [&mut direct_grid, &mut worker_grid, &mut handoff_grid] {
+        grid.set_ascii_atlas(&ascii_table);
+        grid.set_bold_ascii_atlas(&bold_ascii_table);
+    }
+    let mut direct_scrollback = Scrollback::new(config::SCROLLBACK_LINES);
+    let mut worker_scrollback = Scrollback::new(config::SCROLLBACK_LINES);
+    let mut handoff_scrollback = Scrollback::new(config::SCROLLBACK_LINES);
+    let mut direct_response = Vec::new();
+    let mut worker_response = Vec::new();
+    let worker_rasterizer = BenchRasterizer {
+        width: 1,
+        height: 1,
+    };
+    let mut direct_atlas = WorkerTestAtlas;
+    let mut worker_atlas = WorkerTestAtlas;
+
+    for (chunk_index, chunk) in data.chunks(METAL_REPLAY_CHUNK).enumerate() {
+        {
+            let mut performer = TermPerformer::new(
+                &mut direct_grid,
+                &mut direct_scrollback,
+                &mut direct_atlas,
+                &worker_rasterizer,
+                &mut direct_response,
+            );
+            direct_parser.parse(chunk, &mut performer);
+        }
+        direct_response.clear();
+
+        {
+            let mut performer = TermPerformer::new(
+                &mut worker_grid,
+                &mut worker_scrollback,
+                &mut worker_atlas,
+                &worker_rasterizer,
+                &mut worker_response,
+            );
+            worker_parser.parse(chunk, &mut performer);
+        }
+        worker_response.clear();
+
+        let main_dirty = handoff_grid.dirty.clone();
+        handoff_grid.copy_from(&worker_grid);
+        handoff_scrollback.copy_from(&worker_scrollback);
+        worker_grid.clear_dirty();
+        let _ = worker_grid.take_scroll_hint();
+        for row in main_dirty.iter_ones() {
+            handoff_grid.mark_dirty(row as u16);
+        }
+        resolve_worker_test_glyphs(&mut direct_grid, &mut baseline.atlas, &baseline.rasterizer);
+        resolve_worker_test_glyphs(&mut handoff_grid, &mut baseline.atlas, &baseline.rasterizer);
+
+        let mut direct_stats = MetalRunStats::default();
+        let mut handoff_stats = MetalRunStats::default();
+        baseline.run_grid_frame(&direct_grid, &mut direct_stats);
+        let direct_pixels = baseline.readback();
+        baseline.run_grid_frame(&handoff_grid, &mut handoff_stats);
+        let handoff_pixels = baseline.readback();
+        if direct_pixels != handoff_pixels {
+            let first_diff = direct_pixels
+                .chunks_exact(4)
+                .zip(handoff_pixels.chunks_exact(4))
+                .position(|(direct, handoff)| direct != handoff)
+                .expect("pixel buffers differ");
+            let cell_diff = (0..METAL_ROWS).find_map(|row| {
+                (0..METAL_COLS).find_map(|col| {
+                    let direct = direct_grid.cell(row, col);
+                    let handoff = handoff_grid.cell(row, col);
+                    (direct.codepoint != handoff.codepoint
+                        || direct.flags != handoff.flags
+                        || direct.fg_index != handoff.fg_index
+                        || direct.bg_index != handoff.bg_index
+                        || direct.atlas_x != handoff.atlas_x
+                        || direct.atlas_y != handoff.atlas_y)
+                        .then_some((row, col, direct, handoff))
+                })
+            });
+            let pixel_x = first_diff % METAL_PHYSICAL_WIDTH as usize;
+            let pixel_y = first_diff / METAL_PHYSICAL_WIDTH as usize;
+            panic!(
+                "worker handoff diverged at chunk {chunk_index}, pixel ({pixel_x},{pixel_y}), cell_diff={cell_diff:?}, direct_rgba={:?}, handoff_rgba={:?}, direct_hash={:016x}, handoff_hash={:016x}",
+                &direct_pixels[first_diff * 4..first_diff * 4 + 4],
+                &handoff_pixels[first_diff * 4..first_diff * 4 + 4],
+                pixel_hash(&direct_pixels),
+                pixel_hash(&handoff_pixels),
+            );
+        }
+        direct_grid.clear_dirty();
+        handoff_grid.clear_dirty();
+    }
+}
+
+fn worker_handoff_regression_data() -> Vec<u8> {
+    let setup = b"hello";
+    let mut data = vec![0u8; METAL_REPLAY_CHUNK - setup.len()];
+    data[..setup.len()].copy_from_slice(setup);
+    data.extend_from_slice(b"\x1b[1;6H!");
+    data
+}
+
 fn load_metal_frames(path: &str, ascii_table: &[[u8; 2]; 128]) -> Vec<MetalFrame> {
     let data = std::fs::read(path).unwrap_or_else(|error| {
         panic!("failed to read {path}: {error}; run scripts/record-tmux-less.sh both and sparse")
@@ -4889,6 +5070,12 @@ fn bench_metal_replay(c: &mut Criterion) {
                 "failed to read {path}: {error}; run scripts/record-tmux-less.sh both and sparse"
             )
         });
+        if label == "tmux_less_both" {
+            if let Ok(regression_data) = std::fs::read("target/btop-u150-two-pane.raw") {
+                assert_worker_handoff_matches_direct(&regression_data);
+            }
+            assert_worker_handoff_matches_direct(&worker_handoff_regression_data());
+        }
         print_metal_replay(label, path, &mut baseline, &mut replay, &data);
         group.throughput(Throughput::Bytes(data.len() as u64));
         group.bench_function(BenchmarkId::new(label, "44x148"), |b| {

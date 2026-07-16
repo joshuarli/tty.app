@@ -171,6 +171,67 @@ lookup path about 3.7× slower to save less than a microsecond on a rare
 full-atlas eviction. The timestamp policy is the better memory-conscious
 default.
 
+## PTY offthread (commit 9a42892)
+
+PTY reading and parsing was moved from the main thread to a dedicated worker
+thread. The worker now owns its own parser, grid, and scrollback; a
+`WakePipe` (non-blocking pipe pair) signals the main thread when data is
+available. The main thread copies the worker state into the render grid each
+frame via `sync_worker`, then resolves atlas positions for non-ASCII glyphs
+on the main thread.
+
+The worker uses a no-op `GlyphAtlas` implementation (no atlas lookups or GPU
+access) and a no-op `Rasterize` implementation. This keeps the worker
+entirely offline from Metal and the renderer; only the main thread touches
+the GPU.
+
+The `GlyphAtlas` trait extracted from `Atlas` allows this split without
+conditionally compiling the performer. The trait is lightweight and does not
+add measurable overhead to the existing atlas hot paths.
+
+### Binary size
+
+```text
+before (19a8b35):  1,307,008 bytes
+after  (9a42892):  1,334,176 bytes  (+27,168 bytes, +2.1%)
+```
+
+### Startup bench (does not include worker spawn)
+
+The `--startup-bench` measurement is unchanged within noise — it does not
+exercise the worker path. The production startup adds an additional grid, an
+additional scrollback, a WakePipe, and a thread spawn.
+
+### Additional allocations (production startup, 151×47)
+
+```text
+duplicate grid cells:  ~57 KiB  (7,097 × 8 bytes)
+duplicate grid chars:  ~28 KiB  (7,097 × 4 bytes)
+duplicate scrollback:  lazy-allocated (minimal at startup)
+WakePipe:              2 fds
+```
+
+Total additional resident memory is approximately 85 KiB plus thread-kernel
+overhead. It is not expected to grow meaningfully with larger terminal sizes.
+
+### Criterion benchmarks
+
+Parser, grid, SIMD, and metal-replay benchmarks are unchanged — they exercise
+the same direct parsing paths as before. The metal replay suite now includes
+an `assert_worker_handoff_matches_direct` correctness check that verifies
+pixel equivalence between the direct and worker-handoff paths, but this does
+not affect the benchmark timing.
+
+### Main loop impact
+
+The worker reduces main-thread work: parsing and PTY I/O no longer compete
+with rendering and event handling. The per-frame cost is a mutex lock on the
+worker state, a combined grid+scrollback copy, dirty-state merge, and a
+single pass of glyph atlas resolution for non-ASCII cells. Dirty-row
+coalescing from the main grid survives the handoff: rows that were already
+dirty before `sync_worker` remain dirty after. This avoids re-uploading cells
+that would have been uploaded anyway.
+
 ## Design decisions
 
 Keep:

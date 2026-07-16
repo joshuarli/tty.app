@@ -3,7 +3,8 @@ use crate::parser::charset::translate_dec_special;
 use crate::parser::csi_fast::CsiFastParser;
 use crate::parser::perform::Perform;
 use crate::perform_shared;
-use crate::renderer::atlas::Atlas;
+use crate::renderer::Rasterize;
+use crate::renderer::atlas::{Atlas, GlyphAtlas};
 use crate::renderer::font::FontRasterizer;
 use crate::terminal::cell::CellFlags;
 use crate::terminal::grid::{Grid, TermMode};
@@ -11,21 +12,21 @@ use crate::terminal::scrollback::Scrollback;
 use crate::unicode::{is_wide, is_zero_width};
 
 /// The performer that bridges parser actions to grid mutations.
-pub struct TermPerformer<'a> {
+pub struct TermPerformer<'a, A: GlyphAtlas = Atlas, R: Rasterize + ?Sized = FontRasterizer> {
     pub(crate) grid: &'a mut Grid,
     pub(crate) scrollback: &'a mut Scrollback,
-    pub(crate) atlas: &'a mut Atlas,
-    pub(crate) rasterizer: &'a FontRasterizer,
+    pub(crate) atlas: &'a mut A,
+    pub(crate) rasterizer: &'a R,
     pub(crate) response_buf: &'a mut Vec<u8>,
 }
 
-impl<'a> TermPerformer<'a> {
+impl<'a, A: GlyphAtlas, R: Rasterize + ?Sized> TermPerformer<'a, A, R> {
     #[allow(dead_code)]
     pub fn new(
         grid: &'a mut Grid,
         scrollback: &'a mut Scrollback,
-        atlas: &'a mut Atlas,
-        rasterizer: &'a FontRasterizer,
+        atlas: &'a mut A,
+        rasterizer: &'a R,
         response_buf: &'a mut Vec<u8>,
     ) -> Self {
         Self {
@@ -38,7 +39,7 @@ impl<'a> TermPerformer<'a> {
     }
 }
 
-impl<'a> Perform for TermPerformer<'a> {
+impl<'a, A: GlyphAtlas, R: Rasterize + ?Sized> Perform for TermPerformer<'a, A, R> {
     fn print_ascii_run(&mut self, bytes: &[u8]) {
         let use_dec = (self.grid.active_charset == 0 && self.grid.charset_g0 == 1)
             || (self.grid.active_charset == 1 && self.grid.charset_g1 == 1);

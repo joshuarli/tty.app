@@ -18,6 +18,13 @@ impl Scrollback {
         }
     }
 
+    pub fn copy_from(&mut self, source: &Self) {
+        self.buf.clone_from(&source.buf);
+        self.capacity = source.capacity;
+        self.head = source.head;
+        self.len = source.len;
+    }
+
     /// Number of rows currently stored.
     pub fn len(&self) -> usize {
         self.len

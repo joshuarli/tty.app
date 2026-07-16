@@ -13,7 +13,10 @@ mod unicode;
 mod window;
 
 use std::ffi::c_void;
-use std::sync::Arc;
+use std::io::ErrorKind;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::Instant;
 
 use objc2::MainThreadMarker;
@@ -28,19 +31,22 @@ use crate::clipboard::{base64_decode, clipboard_has_image, get_clipboard, set_cl
 
 use crate::parser::Parser;
 use crate::performer::TermPerformer;
-use crate::pty::Pty;
-use crate::renderer::atlas::Atlas;
+use crate::pty::{Pty, WakePipe};
+use crate::renderer::Rasterize;
+use crate::renderer::atlas::{Atlas, AtlasPos, GlyphAtlas};
 use crate::renderer::font::FontRasterizer;
+use crate::renderer::font::RasterizedGlyph;
 use crate::renderer::metal::MetalRenderer;
 use crate::renderer_trait::Renderer;
 use crate::terminal::cell::CellFlags;
 use crate::terminal::grid::{Grid, TermMode};
 use crate::terminal::scrollback::Scrollback;
+use crate::unicode::is_wide;
 use crate::window::{
     Event, Key, Modifiers, MouseButton, NativeWindow, init_app, new_window_requested,
 };
 
-/// Shared state between I/O thread and main thread.
+/// Terminal state exchanged between the PTY worker and main thread.
 struct SharedState {
     grid: Grid,
     scrollback: Scrollback,
@@ -56,7 +62,10 @@ struct App {
     atlas: Atlas,
     shared: SharedState,
     pty: Arc<Pty>,
-    parser: Parser,
+    worker_state: Arc<Mutex<SharedState>>,
+    worker_wake: Arc<WakePipe>,
+    worker_stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
     modifiers: Modifiers,
     cursor_visible: bool,
     alive: bool,
@@ -75,9 +84,114 @@ struct App {
 
     // Accumulated scroll delta (in logical points) for fractional accumulation
     scroll_accumulator: f64,
+}
 
-    // Reusable PTY read buffer (avoids 64KB stack alloc per frame)
-    pty_buf: Vec<u8>,
+struct WorkerAtlas;
+
+impl GlyphAtlas for WorkerAtlas {
+    fn get_or_insert<R: Rasterize + ?Sized>(
+        &mut self,
+        _codepoint: u32,
+        _wide: bool,
+        _bold: bool,
+        _rasterizer: &R,
+    ) -> AtlasPos {
+        AtlasPos::default()
+    }
+
+    fn get_ascii(&self, _cp: u8, _bold: bool) -> AtlasPos {
+        AtlasPos::default()
+    }
+}
+
+struct WorkerRasterizer;
+
+impl Rasterize for WorkerRasterizer {
+    fn rasterize(&self, _codepoint: u32, _bold: bool) -> Option<RasterizedGlyph> {
+        None
+    }
+
+    fn rasterize_wide(&self, _codepoint: u32, _bold: bool) -> Option<RasterizedGlyph> {
+        None
+    }
+}
+
+const PTY_READ_BUDGET: usize = 256 * 1024;
+const PTY_READ_BUFFER: usize = 64 * 1024;
+
+fn spawn_pty_worker(
+    pty: Arc<Pty>,
+    state: Arc<Mutex<SharedState>>,
+    wake: Arc<WakePipe>,
+    stop: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut parser = Parser::new();
+        let mut atlas = WorkerAtlas;
+        let rasterizer = WorkerRasterizer;
+        let mut read_buf = vec![0u8; PTY_READ_BUFFER];
+
+        loop {
+            if stop.load(Ordering::Acquire) {
+                return;
+            }
+
+            let mut total = 0;
+            let mut read_data = false;
+            let mut dead = false;
+
+            while total < PTY_READ_BUDGET {
+                match pty.read(&mut read_buf) {
+                    Ok(0) => {
+                        dead = true;
+                        break;
+                    }
+                    Ok(n) => {
+                        read_data = true;
+                        total += n;
+                        let mut worker = state.lock().unwrap();
+                        let worker = &mut *worker;
+                        let mut response_buf = std::mem::take(&mut worker.response_buf);
+                        {
+                            let mut performer = TermPerformer::new(
+                                &mut worker.grid,
+                                &mut worker.scrollback,
+                                &mut atlas,
+                                &rasterizer,
+                                &mut response_buf,
+                            );
+                            parser.parse(&read_buf[..n], &mut performer);
+                        }
+                        worker.response_buf = response_buf;
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                    Err(_) => {
+                        dead = true;
+                        break;
+                    }
+                }
+            }
+
+            if dead {
+                state.lock().unwrap().alive = false;
+                wake.notify();
+                return;
+            }
+
+            if read_data {
+                wake.notify();
+            }
+
+            let mut pollfd = libc::pollfd {
+                fd: pty.fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            unsafe {
+                libc::poll(&mut pollfd, 1, 50);
+            }
+        }
+    })
 }
 
 impl App {
@@ -120,7 +234,11 @@ impl App {
         let mut grid = Grid::new(cols as u16, rows as u16);
         grid.set_ascii_atlas(&atlas.ascii_table_raw());
         grid.set_bold_ascii_atlas(&atlas.bold_ascii_table_raw());
+        let mut worker_grid = Grid::new(cols as u16, rows as u16);
+        worker_grid.set_ascii_atlas(&atlas.ascii_table_raw());
+        worker_grid.set_bold_ascii_atlas(&atlas.bold_ascii_table_raw());
         let scrollback = Scrollback::new(config::SCROLLBACK_LINES);
+        let worker_scrollback = Scrollback::new(config::SCROLLBACK_LINES);
 
         let pty = Pty::spawn(
             cols as u16,
@@ -130,6 +248,20 @@ impl App {
         )
         .expect("failed to spawn PTY");
         let pty = Arc::new(pty);
+        let worker_state = Arc::new(Mutex::new(SharedState {
+            grid: worker_grid,
+            scrollback: worker_scrollback,
+            response_buf: Vec::new(),
+            alive: true,
+        }));
+        let worker_wake = Arc::new(WakePipe::new().expect("failed to create PTY wake pipe"));
+        let worker_stop = Arc::new(AtomicBool::new(false));
+        let worker = Some(spawn_pty_worker(
+            pty.clone(),
+            worker_state.clone(),
+            worker_wake.clone(),
+            worker_stop.clone(),
+        ));
 
         Self {
             renderer,
@@ -142,7 +274,10 @@ impl App {
                 alive: true,
             },
             pty,
-            parser: Parser::new(),
+            worker_state,
+            worker_wake,
+            worker_stop,
+            worker,
             modifiers: Modifiers::default(),
             cursor_visible: true,
             alive: true,
@@ -154,69 +289,75 @@ impl App {
             cursor_pos: (0.0, 0.0),
             viewport_offset: 0,
             scroll_accumulator: 0.0,
-            pty_buf: vec![0u8; 65536],
         }
     }
 
-    fn pty_fd(&self) -> std::os::fd::RawFd {
-        self.pty.fd()
+    fn wake_fd(&self) -> std::os::fd::RawFd {
+        self.worker_wake.read_fd()
     }
 
     fn is_alive(&self) -> bool {
         self.alive && self.shared.alive
     }
 
-    /// Returns true if any PTY data was read.
-    ///
-    /// Reads at most `budget` bytes per call to prevent infinite-output
-    /// commands (like `yes`) from starving the render/event loop.
-    fn process_pty_output(&mut self, win: &NativeWindow, budget: usize) -> bool {
-        let mut got_data = false;
-        let mut total = 0;
-
-        loop {
-            match self.pty.read(&mut self.pty_buf) {
-                Ok(0) => {
-                    // EOF — shell exited
-                    self.shared.alive = false;
-                    break;
-                }
-                Ok(n) => {
-                    got_data = true;
-                    total += n;
-                    let mut response_buf = std::mem::take(&mut self.shared.response_buf);
-                    {
-                        let mut performer = TermPerformer {
-                            grid: &mut self.shared.grid,
-                            scrollback: &mut self.shared.scrollback,
-                            atlas: &mut self.atlas,
-                            rasterizer: &self.rasterizer,
-                            response_buf: &mut response_buf,
-                        };
-                        self.parser.parse(&self.pty_buf[..n], &mut performer);
-                    }
-                    self.shared.response_buf = response_buf;
-                    if total >= budget {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    if e.kind() == std::io::ErrorKind::WouldBlock {
-                        break;
-                    }
-                    self.shared.alive = false;
-                    break;
-                }
-            }
+    fn sync_worker(&mut self, win: &NativeWindow) -> bool {
+        let Ok(mut worker) = self.worker_state.try_lock() else {
+            return false;
+        };
+        if !self.worker_wake.drain() {
+            return false;
         }
 
-        // Handle responses
+        let main_dirty = self.shared.grid.dirty.clone();
+        self.shared.grid.copy_from(&worker.grid);
+        self.shared.scrollback.copy_from(&worker.scrollback);
+        self.shared.response_buf = std::mem::take(&mut worker.response_buf);
+        self.shared.alive = worker.alive;
+        worker.grid.clear_dirty();
+        let _ = worker.grid.take_scroll_hint();
+        drop(worker);
+
+        for row in main_dirty.iter_ones() {
+            self.shared.grid.mark_dirty(row as u16);
+        }
+        self.resolve_worker_glyphs();
+        self.update_selection();
+
         let responses = std::mem::take(&mut self.shared.response_buf);
         if !responses.is_empty() {
             self.handle_responses(&responses, win);
         }
+        true
+    }
 
-        got_data
+    fn resolve_worker_glyphs(&mut self) {
+        let rows: Vec<u16> = (0..self.shared.grid.rows).collect();
+        for row in rows {
+            for col in 0..self.shared.grid.cols {
+                let cell = self.shared.grid.cell(row, col);
+                if cell.flags.contains(CellFlags::WIDE_CONT) {
+                    continue;
+                }
+                let codepoint = self.shared.grid.char_at(row, col) as u32;
+                if codepoint < 0x80 {
+                    continue;
+                }
+                let pos = self.atlas.get_or_insert(
+                    codepoint,
+                    is_wide(codepoint),
+                    cell.flags.contains(CellFlags::BOLD),
+                    &self.rasterizer,
+                );
+                let cell = self.shared.grid.cell_mut(row, col);
+                cell.atlas_x = pos.x;
+                cell.atlas_y = pos.y;
+                if cell.flags.contains(CellFlags::WIDE) && col + 1 < self.shared.grid.cols {
+                    let continuation = self.shared.grid.cell_mut(row, col + 1);
+                    continuation.atlas_x = pos.x;
+                    continuation.atlas_y = pos.y;
+                }
+            }
+        }
     }
 
     fn handle_responses(&self, data: &[u8], win: &NativeWindow) {
@@ -443,6 +584,7 @@ impl App {
                 let cols = self.renderer.cols() as u16;
                 let rows = self.renderer.rows() as u16;
                 self.shared.grid.resize(cols, rows);
+                self.worker_state.lock().unwrap().grid.resize(cols, rows);
                 self.pty.resize(
                     cols,
                     rows,
@@ -715,6 +857,15 @@ impl App {
     }
 }
 
+impl Drop for App {
+    fn drop(&mut self) {
+        self.worker_stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 struct Terminal {
     win: NativeWindow,
     app: App,
@@ -891,19 +1042,16 @@ fn main() {
     terminals.push(spawn_terminal(mtm));
 
     let mut pty_sources = PtyRunLoopSources::new();
-    pty_sources.register(terminals[0].app.pty_fd());
+    pty_sources.register(terminals[0].app.wake_fd());
 
     let mut state_events = Vec::new();
 
     loop {
         let (idle, quit) = objc2::rc::autoreleasepool(|_| {
-            // Process PTY output for all terminals.
-            // Budget caps bytes read per frame so infinite-output commands
-            // (like `yes`) can't starve the render/event loop.
-            const PTY_BUDGET: usize = 256 * 1024;
+            // Apply terminal state produced by each PTY worker.
             let mut got_any_pty_data = false;
             for t in terminals.iter_mut() {
-                got_any_pty_data |= t.app.process_pty_output(&t.win, PTY_BUDGET);
+                got_any_pty_data |= t.app.sync_worker(&t.win);
             }
 
             // Coalesce: after receiving data, wait up to 500µs for one more
@@ -913,7 +1061,7 @@ fn main() {
             if got_any_pty_data {
                 pty_sources.wait(0.0005);
                 for t in terminals.iter_mut() {
-                    t.app.process_pty_output(&t.win, PTY_BUDGET);
+                    t.app.sync_worker(&t.win);
                 }
             }
 
@@ -1005,7 +1153,7 @@ fn main() {
             // Spawn new terminal if Cmd+N was pressed or dock menu clicked
             if spawn_pending || new_window_requested() {
                 let t = spawn_terminal(mtm);
-                pty_sources.register(t.app.pty_fd());
+                pty_sources.register(t.app.wake_fd());
                 terminals.push(t);
             }
 
@@ -1013,7 +1161,7 @@ fn main() {
             let dead_fds: Vec<_> = terminals
                 .iter()
                 .filter(|t| !t.app.is_alive())
-                .map(|t| t.app.pty_fd())
+                .map(|t| t.app.wake_fd())
                 .collect();
             for fd in dead_fds {
                 pty_sources.unregister(fd);

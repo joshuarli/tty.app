@@ -7,6 +7,58 @@ use rustix::io::{read, write};
 use rustix::process::{Pid, Signal, kill_process};
 use rustix::termios::{Winsize, tcsetwinsize};
 
+pub struct WakePipe {
+    read: OwnedFd,
+    write: OwnedFd,
+}
+
+impl WakePipe {
+    pub fn new() -> io::Result<Self> {
+        let mut fds = [-1; 2];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let read = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let write = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        set_nonblocking(&read)?;
+        set_nonblocking(&write)?;
+        Ok(Self { read, write })
+    }
+
+    pub fn read_fd(&self) -> RawFd {
+        self.read.as_raw_fd()
+    }
+
+    pub fn notify(&self) {
+        let byte = [1u8];
+        let _ = rustix::io::write(&self.write, &byte);
+    }
+
+    pub fn drain(&self) -> bool {
+        let mut buf = [0u8; 256];
+        let mut notified = false;
+        loop {
+            match rustix::io::read(&self.read, &mut buf) {
+                Ok(0) | Err(rustix::io::Errno::WOULDBLOCK) => return notified,
+                Ok(_) => notified = true,
+                Err(_) => return notified,
+            }
+        }
+    }
+}
+
+fn set_nonblocking(fd: &OwnedFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 pub struct Pty {
     master: OwnedFd,
     child_pid: i32,
