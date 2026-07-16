@@ -69,7 +69,6 @@ impl Pty {
         // so LANG is often unset. Without a UTF-8 locale, programs like Claude
         // Code fall back to ASCII and Unicode glyphs render as underscores.
         Self::set_child_env("TERM", "xterm-256color");
-        Self::set_child_env("COLORTERM", "truecolor");
         Self::set_child_env("TERM_PROGRAM", "tty");
         Self::set_child_env("LANG", "en_US.UTF-8");
 

@@ -7,7 +7,7 @@ bitflags::bitflags! {
         const STRIKE     = 0x0008;
         const INVERSE    = 0x0010;
         const SELECTED   = 0x0040;
-        const BOLD       = 0x0080;  // triggers bright color mapping
+        const BOLD       = 0x0080;  // marks bold text without changing its color
         const ITALIC     = 0x0100;
         const DIM        = 0x0200;
         const HIDDEN     = 0x0400;

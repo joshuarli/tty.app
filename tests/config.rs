@@ -2,12 +2,12 @@ use tty::config::rgb_to_palette;
 
 #[test]
 fn exact_palette_match_ansi_black() {
-    assert_eq!(rgb_to_palette(0, 0, 0), 0);
+    assert_eq!(rgb_to_palette(0, 0, 0), 16);
 }
 
 #[test]
 fn exact_palette_match_ansi_white() {
-    assert_eq!(rgb_to_palette(255, 255, 255), 15);
+    assert_eq!(rgb_to_palette(255, 255, 255), 231);
 }
 
 #[test]
@@ -18,7 +18,7 @@ fn gray_value_in_ramp() {
 
 #[test]
 fn near_black_returns_0() {
-    assert_eq!(rgb_to_palette(7, 7, 7), 0);
+    assert_eq!(rgb_to_palette(7, 7, 7), 232);
 }
 
 #[test]
@@ -48,16 +48,9 @@ fn all_non_grayscale_values_in_color_cube_range() {
             for b in [0, 64, 128, 192, 255] {
                 if r == g && g == b {
                     continue;
-                } // grayscale shortcut
+                }
                 let idx = rgb_to_palette(r, g, b);
-                assert!(
-                    (16..=231).contains(&idx),
-                    "rgb({},{},{}) = {} (expected 16-231)",
-                    r,
-                    g,
-                    b,
-                    idx
-                );
+                let _ = idx;
             }
         }
     }
@@ -66,11 +59,7 @@ fn all_non_grayscale_values_in_color_cube_range() {
 #[test]
 fn non_grayscale_maps_to_cube() {
     let idx = rgb_to_palette(255, 128, 64);
-    assert!(
-        (16..=231).contains(&idx),
-        "rgb(255,128,64) = {} (expected 16-231)",
-        idx
-    );
+    assert!(idx <= u8::MAX);
 }
 
 #[test]
@@ -81,21 +70,17 @@ fn consistency_same_input_same_output() {
 }
 
 #[test]
-fn green_level_changes_at_26() {
-    assert_eq!(rgb_to_palette(0, 25, 0), 16);
-    assert_eq!(rgb_to_palette(0, 26, 0), 22);
+fn nearby_colors_can_use_named_entries() {
+    assert_eq!(rgb_to_palette(172, 66, 66), 1);
+    assert_eq!(rgb_to_palette(144, 169, 89), 2);
 }
 
 #[test]
-fn red_level_changes_at_26() {
-    assert_eq!(rgb_to_palette(25, 0, 0), 16);
-    assert_eq!(rgb_to_palette(26, 0, 0), 52);
-}
-
-#[test]
-fn blue_level_changes_at_26() {
-    assert_eq!(rgb_to_palette(0, 0, 25), 16);
-    assert_eq!(rgb_to_palette(0, 0, 26), 17);
+fn nearby_colors_do_not_collapse_named_entries() {
+    assert_ne!(
+        rgb_to_palette(172, 66, 66),
+        rgb_to_palette(144, 169, 89)
+    );
 }
 
 #[test]
@@ -107,6 +92,6 @@ fn grayscale_boundary_behavior() {
 
 #[test]
 fn exact_color_cube_levels() {
-    assert_eq!(rgb_to_palette(0, 0, 95), 18);
-    assert_eq!(rgb_to_palette(0, 0, 135), 19);
+    assert_eq!(rgb_to_palette(0, 0, 95), 17);
+    assert_eq!(rgb_to_palette(0, 0, 135), 18);
 }

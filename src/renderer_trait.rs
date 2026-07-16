@@ -24,6 +24,5 @@ pub trait Renderer {
     fn cell_width(&self) -> u32;
     fn cell_height(&self) -> u32;
     fn scale_factor(&self) -> f64;
-    fn notch_px(&self) -> u32;
     fn needs_render(&self) -> bool;
 }

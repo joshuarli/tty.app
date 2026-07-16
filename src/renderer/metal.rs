@@ -67,7 +67,6 @@ pub struct MetalRenderer {
     pub cell_width: u32,
     pub cell_height: u32,
     pub scale_factor: f64,
-    pub notch_px: u32,
 
     // Track whether we need to render (deferred frame or previous drawable miss)
     pub(crate) needs_render: bool,
@@ -89,7 +88,6 @@ impl MetalRenderer {
         rows: u32,
         cell_width: u32,
         cell_height: u32,
-        notch_px: u32,
     ) -> Self {
         let core = MetalCore::new_with_tiled();
         let device = core.device();
@@ -175,7 +173,6 @@ impl MetalRenderer {
             cell_width,
             cell_height,
             scale_factor,
-            notch_px,
             needs_render: true,
             prev_cursor_row: 0,
             prev_cursor_col: 0,
@@ -292,7 +289,7 @@ impl MetalRenderer {
                 atlas_cell_width: self.cell_width,
                 atlas_cell_height: self.cell_height,
                 padding,
-                padding_top: self.notch_px.max(padding),
+                padding_top: padding,
                 cursor_row: grid.cursor_row as u32,
                 cursor_col: grid.cursor_col as u32,
                 cursor_visible: if cursor_visible { 1 } else { 0 },
@@ -382,9 +379,8 @@ impl MetalRenderer {
 
         // Recalculate grid dimensions (all in physical pixels already)
         let padding_px = (config::PADDING as f64 * scale) as u32;
-        let padding_top_px = self.notch_px.max(padding_px);
         let usable_w = width - padding_px * 2;
-        let usable_h = height - padding_top_px - padding_px;
+        let usable_h = height - padding_px * 2;
         self.cols = usable_w / self.cell_width;
         self.rows = usable_h / self.cell_height;
 
@@ -459,10 +455,6 @@ impl Renderer for MetalRenderer {
 
     fn scale_factor(&self) -> f64 {
         self.scale_factor
-    }
-
-    fn notch_px(&self) -> u32 {
-        self.notch_px
     }
 
     fn needs_render(&self) -> bool {

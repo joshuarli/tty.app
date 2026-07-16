@@ -11,7 +11,6 @@ struct MockRenderer {
     cell_width: u32,
     cell_height: u32,
     scale_factor: f64,
-    notch_px: u32,
     needs_render: bool,
     blocked: bool,
     render_count: usize,
@@ -27,7 +26,6 @@ impl MockRenderer {
             cell_width,
             cell_height,
             scale_factor: 2.0,
-            notch_px: 0,
             needs_render: false,
             blocked: false,
             render_count: 0,
@@ -64,9 +62,8 @@ impl Renderer for MockRenderer {
 
     fn resize(&mut self, width: u32, height: u32, scale: f64) {
         let padding = (tty::config::PADDING as f64 * scale) as u32;
-        let padding_top = self.notch_px.max(padding);
         self.cols = (width - padding * 2) / self.cell_width;
-        self.rows = (height - padding_top - padding) / self.cell_height;
+        self.rows = (height - padding * 2) / self.cell_height;
         self.scale_factor = scale;
         self.needs_render = true;
     }
@@ -85,9 +82,6 @@ impl Renderer for MockRenderer {
     }
     fn scale_factor(&self) -> f64 {
         self.scale_factor
-    }
-    fn notch_px(&self) -> u32 {
-        self.notch_px
     }
     fn needs_render(&self) -> bool {
         self.needs_render
@@ -240,8 +234,8 @@ fn render_frame_retries_when_renderer_is_temporarily_blocked() {
 fn resize_updates_dimensions() {
     let mut renderer = MockRenderer::new(80, 24, 10, 20);
     renderer.resize(1600, 1200, 2.0);
-    assert_eq!(renderer.cols, 153);
-    assert_eq!(renderer.rows, 56);
+    assert_eq!(renderer.cols, 160);
+    assert_eq!(renderer.rows, 60);
     assert!(renderer.needs_render);
 }
 
@@ -249,9 +243,8 @@ fn resize_updates_dimensions() {
 fn resize_small_dimensions_yields_zero_cols_rows() {
     let mut renderer = MockRenderer::new(80, 24, 10, 20);
     renderer.resize(64, 64, 2.0);
-    // padding_px = 32, usable_w = 64 - 64 = 0
-    assert_eq!(renderer.cols, 0);
-    assert_eq!(renderer.rows, 0);
+    assert_eq!(renderer.cols, 6);
+    assert_eq!(renderer.rows, 3);
 }
 
 #[test]
@@ -262,6 +255,5 @@ fn accessors_return_configured_values() {
     assert_eq!(renderer.cell_width(), 8);
     assert_eq!(renderer.cell_height(), 16);
     assert_eq!(renderer.scale_factor(), 2.0);
-    assert_eq!(renderer.notch_px(), 0);
     assert!(!renderer.needs_render());
 }

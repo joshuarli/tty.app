@@ -307,7 +307,6 @@ pub struct NativeWindow {
     last_frame: NSRect,
     last_scale: f64,
     last_focused: bool,
-    safe_area_top: u32,
     closed: bool,
 }
 
@@ -383,14 +382,6 @@ impl NativeWindow {
             let _: () = objc2::msg_send![ctx_cls, endGrouping];
         }
 
-        // Detect safe area inset for notch (physical pixels)
-        // SAFETY: safeAreaInsets is a valid NSScreen property (macOS 12+).
-        // Returns NSEdgeInsets by value. screen is valid (from mainScreen above).
-        let safe_area_top = unsafe {
-            let insets: objc2_foundation::NSEdgeInsets = objc2::msg_send![&screen, safeAreaInsets];
-            (insets.top * scale) as u32
-        };
-
         let phys_w = (frame.size.width * scale) as u32;
         let phys_h = (frame.size.height * scale) as u32;
         let last_frame = NSRect::new(
@@ -404,7 +395,6 @@ impl NativeWindow {
             last_frame,
             last_scale: scale,
             last_focused: true,
-            safe_area_top,
             closed: false,
         }
     }
@@ -608,10 +598,6 @@ impl NativeWindow {
             (frame.size.width * scale) as u32,
             (frame.size.height * scale) as u32,
         )
-    }
-
-    pub fn safe_area_top(&self) -> u32 {
-        self.safe_area_top
     }
 
     pub fn set_title(&self, title: &str) {

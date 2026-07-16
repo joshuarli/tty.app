@@ -102,9 +102,8 @@ impl App {
         let cell_height = rasterizer.metrics.cell_height;
 
         let padding_px = (config::PADDING as f64 * scale) as u32;
-        let padding_top_px = padding_px.max(win.safe_area_top());
         let cols = (phys_w - padding_px * 2) / cell_width;
-        let rows = (phys_h - padding_top_px - padding_px) / cell_height;
+        let rows = (phys_h - padding_px * 2) / cell_height;
 
         let mut renderer = MetalRenderer::new(
             win.view(),
@@ -115,7 +114,6 @@ impl App {
             rows,
             cell_width,
             cell_height,
-            win.safe_area_top(),
         );
 
         let mut atlas = Atlas::new(renderer.device(), cell_width, cell_height);
@@ -367,9 +365,8 @@ impl App {
     fn pixel_to_cell(&self, x: f64, y: f64) -> (u16, u16) {
         let scale = self.renderer.scale_factor();
         let padding = config::PADDING as f64 * scale;
-        let padding_top = (self.renderer.notch_px() as f64).max(padding);
         let px = x - padding;
-        let py = y - padding_top;
+        let py = y - padding;
         if px < 0.0 || py < 0.0 {
             return (0, 0);
         }
@@ -906,8 +903,6 @@ fn run_startup_bench() {
     let scale = 2.0;
     let phys_w = 2880;
     let phys_h = 1800;
-    let safe_area_top = 0;
-
     let t = Instant::now();
     let device = objc2_metal::MTLCreateSystemDefaultDevice().expect("no Metal device found");
     let metal_ms = t.elapsed().as_secs_f64() * 1000.0;
@@ -919,9 +914,8 @@ fn run_startup_bench() {
     let cell_width = rasterizer.metrics.cell_width;
     let cell_height = rasterizer.metrics.cell_height;
     let padding_px = (config::PADDING as f64 * scale) as u32;
-    let padding_top_px = padding_px.max(safe_area_top);
     let cols = (phys_w - padding_px * 2) / cell_width;
-    let rows = (phys_h - padding_top_px - padding_px) / cell_height;
+    let rows = (phys_h - padding_px * 2) / cell_height;
 
     let t = Instant::now();
     let mut atlas = Atlas::new(&device, cell_width, cell_height);

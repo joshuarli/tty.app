@@ -11,37 +11,37 @@ pub const FONT_SIZE: f64 = 16.0;
 pub const FONT_SMOOTH_WEIGHT: f32 = 0.3;
 
 /// Padding in logical pixels between window edge and cell grid
-pub const PADDING: u32 = 16;
+pub const PADDING: u32 = 0;
 
 /// Maximum scrollback lines
 pub const SCROLLBACK_LINES: usize = 10_000;
 
 /// Default background color (palette index 0) — used for frame padding in shader
-pub const DEFAULT_BG: u32 = 0x00000000;
+pub const DEFAULT_BG: u32 = 0x00181818;
 
 /// xterm-256color palette: ANSI 0-15 (tweaked), 16-231 (6x6x6 cube), 232-255 (grayscale)
 pub const PALETTE: [u32; 256] = {
     let mut p = [0u32; 256];
 
-    // ANSI 0-7 (normal) — Dracula-inspired
-    p[0] = 0x00000000; // black (= background)
-    p[1] = 0x00ff5555; // red
-    p[2] = 0x0050fa7b; // green
-    p[3] = 0x00f1fa8c; // yellow
-    p[4] = 0x00caa9fa; // blue
-    p[5] = 0x00ff79c6; // magenta
-    p[6] = 0x008be9fd; // cyan
-    p[7] = 0x00ffffff; // white (= foreground)
+    // ANSI 0-7 (normal) — Alacritty's default theme
+    p[0] = 0x00181818; // black (= background)
+    p[1] = 0x00ac4242; // red
+    p[2] = 0x0090a959; // green
+    p[3] = 0x00f4bf75; // yellow
+    p[4] = 0x006a9fb5; // blue
+    p[5] = 0x00aa759f; // magenta
+    p[6] = 0x0075b5aa; // cyan
+    p[7] = 0x00d8d8d8; // white (= foreground)
 
     // ANSI 8-15 (bright)
-    p[8] = 0x00666666; // bright black
-    p[9] = 0x00ff6e6e; // bright red
-    p[10] = 0x0069ff94; // bright green
-    p[11] = 0x00ffffa5; // bright yellow
-    p[12] = 0x00d6bfff; // bright blue
-    p[13] = 0x00ff92df; // bright magenta
-    p[14] = 0x00a4ffff; // bright cyan
-    p[15] = 0x00ffffff; // bright white
+    p[8] = 0x006b6b6b; // bright black
+    p[9] = 0x00c55555; // bright red
+    p[10] = 0x00aac474; // bright green
+    p[11] = 0x00feca88; // bright yellow
+    p[12] = 0x0082b8c8; // bright blue
+    p[13] = 0x00c28cb8; // bright magenta
+    p[14] = 0x0093d3c3; // bright cyan
+    p[15] = 0x00f8f8f8; // bright white
 
     // 216 color cube (indices 16-231)
     let levels: [u8; 6] = [0, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
@@ -72,22 +72,25 @@ pub const PALETTE: [u32; 256] = {
     p
 };
 
-/// Map an RGB color to the nearest xterm-256 palette index.
+/// Map an RGB color to the nearest palette entry.
 /// Used when truecolor sequences (38;2;R;G;B) are received — we degrade to palette.
 pub fn rgb_to_palette(r: u8, g: u8, b: u8) -> u8 {
-    // Grayscale shortcut
-    if r == g && g == b {
-        if r < 8 {
-            return 0;
+    let mut best_index = 0;
+    let mut best_distance = u32::MAX;
+
+    for (index, &rgb) in PALETTE.iter().enumerate() {
+        let pr = ((rgb >> 16) & 0xFF) as i32;
+        let pg = ((rgb >> 8) & 0xFF) as i32;
+        let pb = (rgb & 0xFF) as i32;
+        let dr = r as i32 - pr;
+        let dg = g as i32 - pg;
+        let db = b as i32 - pb;
+        let distance = (dr * dr + dg * dg + db * db) as u32;
+        if distance < best_distance {
+            best_distance = distance;
+            best_index = index as u8;
         }
-        if r > 248 {
-            return 15;
-        }
-        return (((r as u16 - 8) * 24 / 240) + 232) as u8;
     }
-    // Map to 6x6x6 color cube (indices 16-231)
-    let ri = ((r as u16 + 25) / 51).min(5);
-    let gi = ((g as u16 + 25) / 51).min(5);
-    let bi = ((b as u16 + 25) / 51).min(5);
-    (16 + 36 * ri + 6 * gi + bi) as u8
+
+    best_index
 }

@@ -516,8 +516,8 @@ fn box_drawing_horizontal_line() {
 }
 
 #[test]
-fn bold_remaps_to_bright() {
-    // fg=1 (dark red) + BOLD → remap to 9 (bright red)
+fn bold_preserves_color() {
+    // Alacritty's default keeps bold text in its original color.
     let cell = Cell {
         codepoint: 0x2500,
         flags: CellFlags::BOLD,
@@ -527,14 +527,14 @@ fn bold_remaps_to_bright() {
         atlas_y: 0,
     };
     let (pixels, out_w, _) = single_cell_test(cell, 8, 16, 0, 0, 0, 0);
-    let expected_fg = pal_to_bgra(config::PALETTE[9]); // bright red, not dark red
+    let expected_fg = pal_to_bgra(config::PALETTE[1]);
 
     let cy = 8u32;
     for x in 0..8 {
         assert_eq!(
             pixel_bgra(&pixels, x, cy, out_w),
             expected_fg,
-            "bold remap at col {x}"
+            "bold color at col {x}"
         );
     }
 }
@@ -643,7 +643,7 @@ fn strikethrough_renders_at_mid() {
 
 #[test]
 fn cursor_inverts_pixel() {
-    // With cursor at (0,0): background → inverted bg (1 - bg = white)
+    // With cursor at (0,0), the background is inverted.
     let cell = Cell {
         codepoint: 0,
         flags: CellFlags::empty(),
@@ -653,40 +653,41 @@ fn cursor_inverts_pixel() {
         atlas_y: 0,
     };
     let (pixels, out_w, _) = single_cell_test(cell, 8, 16, 0, 0, 0, 1);
-    // bg = black → inverted = (1 - 0, 1 - 0, 1 - 0) = white
-    let inverted: (u8, u8, u8, u8) = (255, 255, 255, 255);
+    let bg = pal_to_bgra(config::PALETTE[0]);
+    let inverted = (255 - bg.0, 255 - bg.1, 255 - bg.2, 255);
 
     let ps = in_cell_pixels(&pixels, out_w, 0, 0, 8, 16);
     assert!(
         all_same(&ps, inverted),
-        "cursor inverts entire cell to white"
+        "cursor inverts entire cell background"
     );
 }
 
 #[test]
 fn cursor_inverts_fg_and_box_drawing() {
-    // Box drawing with cursor: box line is fg (white) → inverted → black
+    // Box drawing with cursor: the line and background are both inverted.
     let cell = Cell {
         codepoint: 0x2500,
         flags: CellFlags::empty(),
-        fg_index: 7, // white
-        bg_index: 0, // black
+        fg_index: 7,
+        bg_index: 0,
         atlas_x: 0,
         atlas_y: 0,
     };
     let (pixels, out_w, _) = single_cell_test(cell, 8, 16, 0, 0, 0, 1);
-    // At cursor row/col: color is inverted via 1.0 - color
-    // Box line: white (1,1,1,1) → inverted → black (0,0,0,1)
-    // Background: black (0,0,0,1) → inverted → white (1,1,1,1)
+    let fg = pal_to_bgra(config::PALETTE[7]);
+    let bg = pal_to_bgra(config::PALETTE[0]);
+    let inverted_fg = (255 - fg.0, 255 - fg.1, 255 - fg.2, 255);
+    let inverted_bg = (255 - bg.0, 255 - bg.1, 255 - bg.2, 255);
     assert_eq!(
         pixel_bgra(&pixels, 0, 8, out_w),
-        (0, 0, 0, 255),
-        "cursor inverts box line white→black"
+        inverted_fg,
+        "cursor inverts box line"
     );
     assert_eq!(
         pixel_bgra(&pixels, 0, 0, out_w),
-        (255, 255, 255, 255),
-        "cursor inverts bg black→white"
+        inverted_bg,
+        "cursor inverts background"
     );
 }
 

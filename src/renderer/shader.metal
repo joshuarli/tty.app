@@ -37,7 +37,12 @@ constant ushort FLAG_INVERSE    = 0x0010;
 constant ushort FLAG_SELECTED   = 0x0040;
 constant ushort FLAG_BOLD       = 0x0080;
 constant ushort FLAG_HIDDEN     = 0x0400;
+constant ushort FLAG_DIM        = 0x0200;
 constant ushort FLAG_TILED_SKIP = 0x8000;
+
+inline half4 dim_color(half4 color) {
+    return half4(color.rgb * 0.66h, color.a);
+}
 
 // ── Box drawing lookup ──────────────────────────────────────────────
 // Each entry encodes edge connectivity for U+2500..U+257F
@@ -252,6 +257,7 @@ kernel void render(
     if (cell.flags & FLAG_WIDE_CONT) {
         half4 fg = palette[cell.fg_index];
         half4 bg = palette[cell.bg_index];
+        if (cell.flags & FLAG_DIM) fg = dim_color(fg);
         if (cell.flags & FLAG_INVERSE) { half4 tmp = fg; fg = bg; bg = tmp; }
         if (cell.flags & FLAG_HIDDEN) fg = bg;
         // Offset px to sample the right half of the wide glyph
@@ -264,15 +270,10 @@ kernel void render(
         return;
     }
 
-    // Bold: map palette 0-7 → 8-15 for bright colors
-    uchar fg_idx = cell.fg_index;
-    if ((cell.flags & FLAG_BOLD) && fg_idx < 8) {
-        fg_idx += 8;
-    }
-
     // Resolve fg/bg from palette
-    half4 fg = palette[fg_idx];
+    half4 fg = palette[cell.fg_index];
     half4 bg = palette[cell.bg_index];
+    if (cell.flags & FLAG_DIM) fg = dim_color(fg);
 
     // Hidden: make fg match bg
     if (cell.flags & FLAG_HIDDEN) {
@@ -386,17 +387,15 @@ kernel void render_tiled(
         if (cell.flags & FLAG_WIDE_CONT) {
             half4 fg = palette[cell.fg_index];
             half4 bg = palette[cell.bg_index];
+            if (cell.flags & FLAG_DIM) fg = dim_color(fg);
             if (cell.flags & FLAG_INVERSE) { half4 tmp = fg; fg = bg; bg = tmp; }
             if (cell.flags & FLAG_HIDDEN) fg = bg;
             shared_fg = fg;
             shared_bg = bg;
         } else {
-            uchar fg_idx = cell.fg_index;
-            if ((cell.flags & FLAG_BOLD) && fg_idx < 8) {
-                fg_idx += 8;
-            }
-            half4 fg = palette[fg_idx];
+            half4 fg = palette[cell.fg_index];
             half4 bg = palette[cell.bg_index];
+            if (cell.flags & FLAG_DIM) fg = dim_color(fg);
             if (cell.flags & FLAG_HIDDEN) {
                 fg = bg;
             }
@@ -557,17 +556,15 @@ kernel void render_tiled_list(
         if (cell.flags & FLAG_WIDE_CONT) {
             half4 fg = palette[cell.fg_index];
             half4 bg = palette[cell.bg_index];
+            if (cell.flags & FLAG_DIM) fg = dim_color(fg);
             if (cell.flags & FLAG_INVERSE) { half4 tmp = fg; fg = bg; bg = tmp; }
             if (cell.flags & FLAG_HIDDEN) fg = bg;
             shared_fg = fg;
             shared_bg = bg;
         } else {
-            uchar fg_idx = cell.fg_index;
-            if ((cell.flags & FLAG_BOLD) && fg_idx < 8) {
-                fg_idx += 8;
-            }
-            half4 fg = palette[fg_idx];
+            half4 fg = palette[cell.fg_index];
             half4 bg = palette[cell.bg_index];
+            if (cell.flags & FLAG_DIM) fg = dim_color(fg);
             if (cell.flags & FLAG_HIDDEN) fg = bg;
             if (cell.flags & FLAG_INVERSE) {
                 half4 tmp = fg;

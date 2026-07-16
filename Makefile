@@ -26,12 +26,21 @@ PROF_SCRIPT := $(CURDIR)/scripts/profile.sh
 PROFILE_BENCH_ARGS := --noplot --sample-size 10 --warm-up-time 0.2 --measurement-time 0.5
 PROFILE_RUN_DIR := $(CURDIR)/target/profiling/latest
 
+TYPESCRIPT_BOTH := target/tmux-less-44x148-both.typescript
+TYPESCRIPT_SPARSE := target/tmux-less-44x148-sparse.typescript
+
 prof:
 	$(MAKE) pgo-profile
 	$(MAKE) dist-pgo
 	$(MAKE) bench-pgo
 
-pgo-profile:
+$(TYPESCRIPT_BOTH): scripts/record-tmux-less.sh
+	scripts/record-tmux-less.sh both
+
+$(TYPESCRIPT_SPARSE): scripts/record-tmux-less.sh
+	scripts/record-tmux-less.sh sparse
+
+pgo-profile: $(TYPESCRIPT_BOTH) $(TYPESCRIPT_SPARSE)
 	PROFILE_BENCH_ARGS='$(PROFILE_BENCH_ARGS)' $(PROF_SCRIPT)
 
 dist-pgo: $(PGO_MERGED)
@@ -44,7 +53,7 @@ dist-pgo: $(PGO_MERGED)
 	@echo "==> PGO dist binary: target/$(TARGET)/dist/$(NAME)"
 
 # Benchmark dist vs PGO dist. Requires: critcmp (cargo install critcmp)
-bench-pgo: $(PGO_MERGED)
+bench-pgo: $(PGO_MERGED) $(TYPESCRIPT_BOTH) $(TYPESCRIPT_SPARSE)
 	mkdir -p $(PROFILE_RUN_DIR)
 	cargo bench --bench bench --profile dist -- $(PROFILE_BENCH_ARGS) --save-baseline regular 2>$(PROFILE_RUN_DIR)/bench-pgo-regular.log
 	RUSTFLAGS="-Cprofile-use=$(PGO_MERGED)" \
