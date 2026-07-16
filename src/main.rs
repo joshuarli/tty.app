@@ -899,6 +899,8 @@ fn spawn_terminal(mtm: MainThreadMarker) -> Terminal {
     Terminal { win, app }
 }
 
+const STARTUP_BUDGET_MS: f64 = 40.0;
+
 fn run_startup_bench() {
     let total = Instant::now();
     let scale = 2.0;
@@ -941,6 +943,10 @@ fn run_startup_bench() {
     let pty_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     let total_ms = total.elapsed().as_secs_f64() * 1000.0;
+    assert!(
+        total_ms < STARTUP_BUDGET_MS,
+        "startup benchmark exceeded {STARTUP_BUDGET_MS:.0} ms: {total_ms:.3} ms"
+    );
     println!(
         "startup_bench_headless font=embedded_ttf total_ms={total_ms:.3} metal_ms={metal_ms:.3} rasterizer_ms={rasterizer_ms:.3} atlas_ms={atlas_ms:.3} grid_ms={grid_ms:.3} pty_ms={pty_ms:.3} cols={cols} rows={rows}"
     );

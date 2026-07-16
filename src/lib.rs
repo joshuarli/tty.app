@@ -4,6 +4,7 @@ pub mod config;
 pub mod parser;
 pub mod perform_shared;
 pub mod performer;
+pub mod pty;
 pub mod renderer;
 pub mod terminal;
 pub(crate) mod unicode;

@@ -32,17 +32,29 @@ frame. The reference full-frame shader is commonly around 0.6–1.2 ms. CPU row
 preparation and cell upload are generally microseconds and are not the current
 dominant cost.
 
-The startup benchmark currently reports approximately:
+The release startup benchmark currently reports approximately:
 
 ```text
-font/rasterizer setup:  ~5.9 ms
-regular + bold atlas:   ~4.8 ms
+font/rasterizer setup:  ~4.9 ms
+regular + bold atlas:   ~4.6 ms
 grid setup:              ~0.01 ms
 ```
 
-The atlas lookup benchmark reports approximately 87 µs for 10,000 cached
-lookups and 747 ns for a cached-atlas eviction/insertion cycle, including the
-small benchmark glyph upload.
+The current timestamp-based atlas lookup benchmark reports approximately 38 µs
+for 10,000 cached lookups. An eviction/insertion cycle is about 1.5 µs,
+including the small benchmark glyph upload.
+
+The direct comparison measured 86.7 µs for 10,000 intrusive-LRU hits versus
+23.4 µs for timestamp hits. The intrusive links therefore cost about 63 µs per
+10,000 hits, or roughly 6 ns per cached glyph. Intrusive eviction measured
+about 724 ns versus 1.06 µs for the timestamp model. That eviction comparison
+is directional, but eviction is still a cold path compared with cache hits.
+
+Startup has a hard 40 ms budget. Both `--startup-bench` and the Criterion
+startup benchmark fail if the measured cold setup reaches or exceeds it. The
+latest release measurement is 35.476 ms, leaving about 4.5 ms of headroom. The
+Criterion run measured 3.995 ms after the Metal device was already initialized,
+so the release startup command is the authoritative cold-start number.
 
 ## Memory evidence
 
@@ -63,16 +75,12 @@ time was not consistently better.
 The retained-surface experiment stored one full BGRA framebuffer. It was
 removed from production after measurement.
 
-The current intrusive atlas LRU stores, for every possible fixed slot:
-
-- two `u32` link arrays;
-- an `Option<GlyphKey>` array.
-
-For an 8×16 font cell size the atlas has 16,384 fixed slots. These arrays are
-roughly 256 KiB before allocator overhead, compared with roughly 128 KiB for
-the simpler timestamp array used by the previous design. For a 16×32 cell
-size, the corresponding figures are roughly 64 KiB and 32 KiB. Eviction is a
-cold path, so this memory increase is not justified by the O(1) eviction.
+The timestamp atlas LRU stores one `u64` access timestamp per possible fixed
+slot. For an 8×16 font cell size the atlas has 16,384 fixed slots, or roughly
+128 KiB before allocator overhead. The intrusive alternative used two `u32`
+link arrays and an `Option<GlyphKey>` array, roughly 256 KiB at that size.
+Eviction is a cold path, so the extra memory and hot-path work were not
+justified by O(1) eviction.
 
 The regular/bold ASCII tables add only a few hundred bytes of CPU state. The
 additional bold glyph pixels are small relative to the fixed 4 MiB atlas
@@ -110,6 +118,11 @@ tmux replay and 1.130 ms for the sparse replay. These timings include the
 shader's one-cell load optimization and exclude the retained-surface blit.
 The retained active-cell numbers remain in the benchmark suite for comparison,
 but are not used by the production renderer.
+
+The intrusive LRU result does not justify its extra metadata: it made the hot
+lookup path about 3.7× slower to save less than a microsecond on a rare
+full-atlas eviction. The timestamp policy is the better memory-conscious
+default.
 
 ## Design decisions
 

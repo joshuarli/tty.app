@@ -21,6 +21,7 @@ use tty::parser::Parser;
 use tty::parser::perform::Perform;
 use tty::parser::simd::SimdScanner;
 use tty::performer::TermPerformer;
+use tty::pty::Pty;
 use tty::renderer::atlas::Atlas;
 use tty::renderer::core::MetalCore;
 use tty::renderer::font::FontRasterizer;
@@ -2660,6 +2661,52 @@ fn bench_atlas_lru(c: &mut Criterion) {
             codepoint = codepoint.wrapping_add(1);
         });
     });
+
+    group.finish();
+}
+
+const STARTUP_BUDGET: Duration = Duration::from_millis(40);
+
+fn bench_startup_budget(c: &mut Criterion) {
+    let mut group = c.benchmark_group("startup");
+    group.bench_function("cold_under_40ms", |b| {
+        b.iter_custom(|iters| {
+            let mut elapsed_total = Duration::ZERO;
+            for _ in 0..iters {
+                let start = Instant::now();
+                let device =
+                    objc2_metal::MTLCreateSystemDefaultDevice().expect("Metal device required");
+                let scale = 2.0;
+                let rasterizer = FontRasterizer::new(config::FONT_FAMILY, config::FONT_SIZE, scale);
+                let cell_width = rasterizer.metrics.cell_width;
+                let cell_height = rasterizer.metrics.cell_height;
+                let padding_px = (config::PADDING as f64 * scale) as u32;
+                let cols = (2880 - padding_px * 2) / cell_width;
+                let rows = (1800 - padding_px * 2) / cell_height;
+                let mut atlas = Atlas::new(&device, cell_width, cell_height);
+                atlas.preload_ascii(&rasterizer);
+                let mut grid = Grid::new(cols as u16, rows as u16);
+                grid.set_ascii_atlas(&atlas.ascii_table_raw());
+                grid.set_bold_ascii_atlas(&atlas.bold_ascii_table_raw());
+                let _scrollback = Scrollback::new(config::SCROLLBACK_LINES);
+                let _pty = Pty::spawn(
+                    cols as u16,
+                    rows as u16,
+                    cell_width as u16,
+                    cell_height as u16,
+                )
+                .expect("failed to spawn PTY");
+                let elapsed = start.elapsed();
+                assert!(
+                    elapsed < STARTUP_BUDGET,
+                    "startup benchmark exceeded 40 ms: {:.3} ms",
+                    elapsed.as_secs_f64() * 1000.0
+                );
+                elapsed_total += elapsed;
+            }
+            elapsed_total
+        });
+    });
     group.finish();
 }
 
@@ -4801,6 +4848,7 @@ criterion_group! {
         bench_slow_paths,
         bench_atlas_hash,
         bench_atlas_lru,
+        bench_startup_budget,
         bench_process_rss,
         bench_metal_baseline,
         bench_metal_tiled,
