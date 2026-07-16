@@ -1047,7 +1047,8 @@ fn main() {
     let mut state_events = Vec::new();
 
     loop {
-        let (idle, quit) = objc2::rc::autoreleasepool(|_| {
+        let (idle, quit, render_deferred, got_any_pty_data, got_events, sent_deferred_mouse) =
+            objc2::rc::autoreleasepool(|_| {
             // Apply terminal state produced by each PTY worker.
             let mut got_any_pty_data = false;
             for t in terminals.iter_mut() {
@@ -1183,18 +1184,30 @@ fn main() {
                 }
             }
 
-            let idle = !got_any_pty_data && !sent_deferred_mouse && !got_events && all_idle;
+            let render_deferred = !all_idle;
+            let idle = !got_any_pty_data
+                && !sent_deferred_mouse
+                && !got_events
+                && !render_deferred;
             pty_sources.enable_callbacks();
-            (idle, quit)
+            (
+                idle,
+                quit,
+                render_deferred,
+                got_any_pty_data,
+                got_events,
+                sent_deferred_mouse,
+            )
         });
 
         if quit || terminals.is_empty() {
             break;
         }
 
-        // When idle, block until AppKit or a PTY run-loop source wakes us.
         if idle {
             pty_sources.wait(f64::MAX);
+        } else if render_deferred && !got_any_pty_data && !got_events && !sent_deferred_mouse {
+            pty_sources.wait(1.0 / 60.0);
         }
     }
 }

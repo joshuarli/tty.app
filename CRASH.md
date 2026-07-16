@@ -126,3 +126,75 @@ AppKit thread, but still drains AppKit events and submits Metal work from its
 custom main loop. A deferred Metal render can still leave `needs_render` set and
 cause immediate retry spinning, so a remaining follow-up is to coalesce or
 rate-limit redraw attempts when a buffer or drawable is unavailable.
+
+## Alacritty frame-gate mechanism
+
+Alacritty uses three mechanisms to avoid main-thread starvation under
+continuous PTY output:
+
+### 1. Frame gate (`has_frame`)
+
+`display/window.rs` tracks `has_frame: bool`. It starts true, is set to false
+by `request_frame()` after each draw, and is set back to true when a scheduled
+`Frame` timer fires. The critical effect: a PTY `Wakeup` event only calls
+`request_redraw()` when `has_frame` is available:
+
+```rust
+(EventType::Terminal(TerminalEvent::Wakeup), Some(window_id)) => {
+    window_context.dirty = true;
+    if window_context.display.window.has_frame {
+        window_context.display.window.request_redraw();
+    }
+},
+```
+
+If `has_frame` is false, the terminal stays dirty but no redraw is requested.
+The dirt accumulates and rendering resumes when the frame timer fires:
+
+```rust
+(EventType::Frame, Some(window_id)) => {
+    window_context.display.window.has_frame = true;
+    if window_context.dirty {
+        window_context.display.window.request_redraw();
+    }
+},
+```
+
+### 2. Monitor-synced frame scheduling
+
+`display/mod.rs` `request_frame()` calls `FrameTimer::compute_timeout()` with
+the monitor's refresh interval (e.g. 60 Hz → ~16.7 ms). If the next vblank is
+in the future, it schedules a deferred `Frame` event instead of drawing
+immediately. If we're already late (e.g. after a burst of PTY data), it
+schedules immediately with `Duration::ZERO`:
+
+```rust
+let next_frame = self.last_synced_timestamp + self.refresh_interval;
+if next_frame < now {
+    self.last_synced_timestamp = now - D::from_micros(elapsed_micros % refresh_micros);
+    Duration::ZERO
+} else {
+    self.last_synced_timestamp = next_frame;
+    next_frame - now
+}
+```
+
+This ensures redraws never exceed the display refresh rate. The scheduler feeds
+`ControlFlow::WaitUntil(deadline)` into winit's event loop so the thread blocks
+between frames instead of spinning.
+
+### 3. Non-blocking swap
+
+`SwapInterval::DontWait` disables vsync on swap. The buffer exchange returns
+immediately even if the compositor hasn't consumed the previous frame. Combined
+with the frame gate, this prevents the render path from ever blocking the main
+thread.
+
+### Effect in tty terms
+
+In tty's loop, `needs_render` being true causes an immediate retry with no
+delay. Alacritty's equivalent state is `dirty = true` with `has_frame = false`.
+Instead of spinning, the event loop blocks until the scheduled `Frame` timer
+fires at the next display refresh boundary. The GPU has an entire refresh
+interval to complete, and PTY data accumulated during that interval is
+coalesced into a single render pass.
