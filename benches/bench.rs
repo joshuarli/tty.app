@@ -2813,11 +2813,13 @@ fn bench_startup_budget(c: &mut Criterion) {
                 )
                 .expect("failed to spawn PTY");
                 let elapsed = start.elapsed();
-                assert!(
-                    elapsed < STARTUP_BUDGET,
-                    "startup benchmark exceeded 40 ms: {:.3} ms",
-                    elapsed.as_secs_f64() * 1000.0
-                );
+                if !cfg!(debug_assertions) {
+                    assert!(
+                        elapsed < STARTUP_BUDGET,
+                        "startup benchmark exceeded 40 ms: {:.3} ms",
+                        elapsed.as_secs_f64() * 1000.0
+                    );
+                }
                 elapsed_total += elapsed;
             }
             elapsed_total
@@ -4186,8 +4188,8 @@ fn assert_worker_handoff_matches_direct(data: &[u8]) {
         worker_response.clear();
 
         let main_dirty = handoff_grid.dirty.clone();
-        handoff_grid.copy_from(&worker_grid);
-        handoff_scrollback.copy_from(&worker_scrollback);
+        handoff_grid.copy_dirty_from(&worker_grid);
+        handoff_scrollback.copy_incremental_from(&worker_scrollback);
         worker_grid.clear_dirty();
         let _ = worker_grid.take_scroll_hint();
         for row in main_dirty.iter_ones() {
@@ -4234,6 +4236,109 @@ fn assert_worker_handoff_matches_direct(data: &[u8]) {
         direct_grid.clear_dirty();
         handoff_grid.clear_dirty();
     }
+}
+
+struct WorkerHandoffBench {
+    parser: Parser,
+    worker_grid: Grid,
+    worker_scrollback: Scrollback,
+    handoff_grid: Grid,
+    handoff_scrollback: Scrollback,
+    response_buf: Vec<u8>,
+    rasterizer: BenchRasterizer,
+    atlas: WorkerTestAtlas,
+}
+
+#[derive(Clone, Copy)]
+enum WorkerHandoffMode {
+    Full,
+    Dirty,
+    Direct,
+}
+
+impl WorkerHandoffBench {
+    fn new() -> Self {
+        Self {
+            parser: Parser::new(),
+            worker_grid: Grid::new(METAL_COLS, METAL_ROWS),
+            worker_scrollback: Scrollback::new(config::SCROLLBACK_LINES),
+            handoff_grid: Grid::new(METAL_COLS, METAL_ROWS),
+            handoff_scrollback: Scrollback::new(config::SCROLLBACK_LINES),
+            response_buf: Vec::new(),
+            rasterizer: BenchRasterizer {
+                width: 1,
+                height: 1,
+            },
+            atlas: WorkerTestAtlas,
+        }
+    }
+
+    fn run(&mut self, data: &[u8], mode: WorkerHandoffMode) -> usize {
+        self.parser.reset();
+        self.worker_grid.reset();
+        self.handoff_grid.reset();
+        self.worker_scrollback.clear();
+        self.handoff_scrollback.clear();
+        self.response_buf.clear();
+
+        for chunk in data.chunks(METAL_REPLAY_CHUNK) {
+            {
+                let mut performer = TermPerformer::new(
+                    &mut self.worker_grid,
+                    &mut self.worker_scrollback,
+                    &mut self.atlas,
+                    &self.rasterizer,
+                    &mut self.response_buf,
+                );
+                self.parser.parse(chunk, &mut performer);
+            }
+
+            match mode {
+                WorkerHandoffMode::Full => {
+                    self.handoff_grid.copy_from(&self.worker_grid);
+                    self.handoff_scrollback.copy_from(&self.worker_scrollback);
+                }
+                WorkerHandoffMode::Dirty => {
+                    self.handoff_grid.copy_dirty_from(&self.worker_grid);
+                    self.handoff_scrollback
+                        .copy_incremental_from(&self.worker_scrollback);
+                }
+                WorkerHandoffMode::Direct => {}
+            }
+            self.worker_grid.clear_dirty();
+            self.handoff_grid.clear_dirty();
+            let _ = self.worker_grid.take_scroll_hint();
+        }
+
+        self.handoff_scrollback.len()
+    }
+}
+
+fn make_worker_handoff_workload() -> Vec<u8> {
+    make_ascii(12_000)
+}
+
+fn bench_worker_handoff(c: &mut Criterion) {
+    let mut group = c.benchmark_group("worker_handoff");
+    let data = make_worker_handoff_workload();
+    group.throughput(Throughput::Bytes(data.len() as u64));
+
+    group.bench_function("full_snapshot", |b| {
+        let mut handoff = WorkerHandoffBench::new();
+        b.iter(|| black_box(handoff.run(&data, WorkerHandoffMode::Full)));
+    });
+
+    group.bench_function("dirty_snapshot", |b| {
+        let mut handoff = WorkerHandoffBench::new();
+        b.iter(|| black_box(handoff.run(&data, WorkerHandoffMode::Dirty)));
+    });
+
+    group.bench_function("direct_state", |b| {
+        let mut handoff = WorkerHandoffBench::new();
+        b.iter(|| black_box(handoff.run(&data, WorkerHandoffMode::Direct)));
+    });
+
+    group.finish();
 }
 
 fn worker_handoff_regression_data() -> Vec<u8> {
@@ -5218,6 +5323,7 @@ criterion_group! {
         bench_metal_color,
         bench_metal_tiled_damage,
         bench_metal_replay,
+        bench_worker_handoff,
         bench_metal_damage,
         bench_metal_scroll,
 }

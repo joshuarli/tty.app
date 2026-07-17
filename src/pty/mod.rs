@@ -26,10 +26,6 @@ impl WakePipe {
         Ok(Self { read, write })
     }
 
-    pub fn read_fd(&self) -> RawFd {
-        self.read.as_raw_fd()
-    }
-
     pub fn notify(&self) {
         let byte = [1u8];
         let _ = rustix::io::write(&self.write, &byte);

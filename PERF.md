@@ -65,11 +65,13 @@ The direct comparison measured 86.7 µs for 10,000 intrusive-LRU hits versus
 about 724 ns versus 1.06 µs for the timestamp model. That eviction comparison
 is directional, but eviction is still a cold path compared with cache hits.
 
-Startup has a hard 40 ms budget. Both `--startup-bench` and the Criterion
-startup benchmark fail if the measured cold setup reaches or exceeds it. The
-latest release measurement is 35.476 ms, leaving about 4.5 ms of headroom. The
-Criterion run measured 3.995 ms after the Metal device was already initialized,
-so the release startup command is the authoritative cold-start number.
+Release builds have a hard 40 ms startup budget. Both `--startup-bench` and the
+Criterion startup benchmark enforce it only when built without debug
+assertions; debug/test runs still report timing without failing on the release
+budget. The latest release measurement is 35.476 ms, leaving about 4.5 ms of
+headroom. The Criterion run measured 3.995 ms after the Metal device was
+already initialized, so the release startup command is the authoritative
+cold-start number.
 
 ## Memory evidence
 
@@ -140,6 +142,12 @@ for a one-row update, 20.8 KiB for sparse multi-row updates, and 17.3 KiB for a
 selection update. GPU and wall times vary with scheduler load, so these values
 are baselines for regression comparison rather than fixed performance claims.
 
+The `worker_handoff` Criterion benchmark covers a generated 12,000-line
+scrolling workload. On the current M1 Pro run, full snapshots took about
+14.6 ms per replay, dirty snapshots about 6.5 ms, and direct worker-state
+access about 4.9 ms. The full and dirty cases remain as regression controls for
+the snapshot implementations; the direct case protects the production path.
+
 The full Criterion run shows the current bottleneck clearly:
 
 ```text
@@ -176,9 +184,9 @@ default.
 PTY reading and parsing was moved from the main thread to a dedicated worker
 thread. The worker now owns its own parser, grid, and scrollback; a
 `WakePipe` (non-blocking pipe pair) signals the main thread when data is
-available. The main thread copies the worker state into the render grid each
-frame via `sync_worker`, then resolves atlas positions for non-ASCII glyphs
-on the main thread.
+available. The main thread renders the worker-owned grid and scrollback under
+the mutex, then resolves atlas positions for non-ASCII glyphs on the main
+thread.
 
 The worker uses a no-op `GlyphAtlas` implementation (no atlas lookups or GPU
 access) and a no-op `Rasterize` implementation. This keeps the worker
@@ -199,20 +207,18 @@ after  (9a42892):  1,334,176 bytes  (+27,168 bytes, +2.1%)
 ### Startup bench (does not include worker spawn)
 
 The `--startup-bench` measurement is unchanged within noise — it does not
-exercise the worker path. The production startup adds an additional grid, an
-additional scrollback, a WakePipe, and a thread spawn.
+exercise the worker path. The production startup adds a WakePipe and a thread
+spawn.
 
 ### Additional allocations (production startup, 151×47)
 
 ```text
-duplicate grid cells:  ~57 KiB  (7,097 × 8 bytes)
-duplicate grid chars:  ~28 KiB  (7,097 × 4 bytes)
-duplicate scrollback:  lazy-allocated (minimal at startup)
-WakePipe:              2 fds
+worker grid and scrollback: one terminal-owned copy
+WakePipe:                   2 fds
 ```
 
-Total additional resident memory is approximately 85 KiB plus thread-kernel
-overhead. It is not expected to grow meaningfully with larger terminal sizes.
+The main thread renders the worker-owned terminal under the existing mutex, so
+the snapshot implementation no longer adds a duplicate grid or scrollback.
 
 ### Criterion benchmarks
 
@@ -225,12 +231,12 @@ not affect the benchmark timing.
 ### Main loop impact
 
 The worker reduces main-thread work: parsing and PTY I/O no longer compete
-with rendering and event handling. The per-frame cost is a mutex lock on the
-worker state, a combined grid+scrollback copy, dirty-state merge, and a
-single pass of glyph atlas resolution for non-ASCII cells. Dirty-row
-coalescing from the main grid survives the handoff: rows that were already
-dirty before `sync_worker` remain dirty after. This avoids re-uploading cells
-that would have been uploaded anyway.
+with rendering and event handling. The main thread now locks the worker-owned
+terminal for glyph resolution, UI overlays, and dirty-row upload; it does not
+copy the grid or scrollback. The lock is released when rendering returns,
+before the asynchronous GPU work completes. Worker notifications use a single
+permanent Core Foundation run-loop source plus the coalescing WakePipe; they do
+not re-enable a `CFFileDescriptor` callback on every frame.
 
 ## Design decisions
 

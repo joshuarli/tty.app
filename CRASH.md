@@ -85,14 +85,14 @@ The PTY worker implementation is now in place for manual verification. Each
 terminal has a worker-owned parser, grid, scrollback, and response buffer. The
 worker does not touch AppKit, Metal, CoreText, or the main-thread glyph atlas.
 After parsing a bounded batch, it signals the main thread through a nonblocking
-pipe. The main thread briefly locks the worker state, copies a render snapshot
-of the grid and scrollback, resolves newly seen non-ASCII glyphs in the main
-atlas, handles terminal responses, and returns to normal rendering.
+pipe. The main thread briefly locks the worker-owned terminal, resolves
+non-ASCII glyphs in dirty rows using the main atlas, uploads dirty rows, and
+returns to normal rendering without copying the grid or scrollback.
 
-The worker remains the sole owner of parser state; the snapshot avoids parsing
-the next incremental update on stale state. This adds a bounded memory copy per
-worker notification and one additional grid and scrollback allocation per live
-terminal. Existing library, integration, and headless Metal replay tests pass.
+The worker remains the sole owner of parser state; rendering the same locked
+state avoids parsing the next incremental update on stale data and removes the
+per-notification snapshot copy. Existing library, integration, and headless
+Metal replay tests pass.
 The remaining verification is the original two-pane `btop -u 150` test on the
 M1 Max, followed by checking resize, selection, clipboard responses, and shell
 exit behavior.
@@ -103,8 +103,9 @@ diverges at chunk 1. The deterministic fallback fixture also fails at chunk 1,
 where an incremental update expects content from the previous frame. The
 original swap was not a valid concurrent double buffer: after the worker
 published its current grid, it received the main thread's older grid and
-continued parsing from stale terminal state. The implementation now uses a
-render snapshot instead, and the same headless regression passes.
+continued parsing from stale terminal state. The implementation now keeps one
+worker-owned terminal state and renders it under the mutex; the same headless
+regression passes.
 
 If that improves responsiveness but visual glitches remain, double-buffer the
 uniform buffer alongside the cell buffers and bind the matching per-frame
@@ -219,8 +220,9 @@ false), so the main loop knows work is pending. The main loop collects
 `frame_deadline()` from all focused renderers and computes a minimum wait
 duration. When no PTY data or events are pending, it calls
 `CFRunLoopRunInMode` with that duration instead of spinning. If PTY data
-arrives during the wait (via the wake pipe run-loop source), the wait returns
-early and the loop processes the new data.
+arrives during the wait, the worker signals a permanent no-op run-loop source
+and the wait returns early; the loop then drains the wake pipe and processes
+the new data.
 
 This prevents main-thread starvation under continuous PTY output: the loop
 still drains PTY and events eagerly, but rendering is rate-limited so the
@@ -228,3 +230,13 @@ GPU has time to complete each command buffer. The frame interval is derived
 from `NSScreen.maximumFramesPerSecond` (querying the view's window's screen
 in `MetalRenderer::new()`), falling back to 60 Hz if the screen reports 0
 or is unavailable.
+
+## PTY wake path (2026-07-16)
+
+The PTY worker uses a nonblocking pipe to coalesce terminal-data notifications,
+but the pipe is no longer registered as a `CFFileDescriptor`. Re-enabling a
+`CFFileDescriptor` callback after every frame makes Core Foundation perform a
+fresh readiness check, which showed up as repeated `pselect` work in the hot
+TUI profile. A permanent no-op `CFRunLoopSource` is signaled by the worker and
+wakes the main run loop directly; the main thread then drains the pipe once and
+processes the latest worker state.

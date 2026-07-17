@@ -5,10 +5,10 @@ use std::time::Instant;
 
 use bitvec::prelude::*;
 use block2::RcBlock;
+use objc2::msg_send;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
-use objc2::msg_send;
-use objc2_app_kit::{NSView, NSWindow, NSScreen};
+use objc2_app_kit::{NSScreen, NSView, NSWindow};
 use objc2_core_foundation::CGSize;
 use objc2_metal::*;
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
@@ -215,11 +215,10 @@ impl MetalRenderer {
         // Frame rate gate — don't dispatch faster than display refresh.
         // The gate is cleared on resize and on buffer-busy deferrals so we
         // retry promptly when the GPU catches up.
-        if let Some(next) = self.next_frame {
-            if Instant::now() < next {
+        if let Some(next) = self.next_frame
+            && Instant::now() < next {
                 return false;
             }
-        }
 
         // Merge grid dirty rows into both per-buffer pending bitsets
         let cur = self.current_buffer;
@@ -391,8 +390,7 @@ impl MetalRenderer {
             // (new dirty rows or cursor change). This lazy convergence avoids
             // back-to-back renders that exhaust Metal's 3-drawable pool.
             self.current_buffer = (self.current_buffer + 1) % NUM_BUFFERS;
-            self.next_frame =
-                Some(Instant::now() + self.frame_interval);
+            self.next_frame = Some(Instant::now() + self.frame_interval);
             self.needs_render = false;
 
             true

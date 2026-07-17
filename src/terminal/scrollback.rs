@@ -6,6 +6,7 @@ pub struct Scrollback {
     capacity: usize,
     head: usize, // next write position
     len: usize,  // current number of stored rows
+    generation: u64,
 }
 
 impl Scrollback {
@@ -15,14 +16,59 @@ impl Scrollback {
             capacity,
             head: 0,
             len: 0,
+            generation: 0,
         }
     }
 
+    #[allow(dead_code)]
     pub fn copy_from(&mut self, source: &Self) {
         self.buf.clone_from(&source.buf);
         self.capacity = source.capacity;
         self.head = source.head;
         self.len = source.len;
+        self.generation = source.generation;
+    }
+
+    /// Copy a worker-owned scrollback snapshot while reusing rows that have
+    /// not changed since the previous handoff.
+    #[allow(dead_code)]
+    pub fn copy_incremental_from(&mut self, source: &Self) {
+        if self.capacity != source.capacity
+            || source.generation < self.generation
+            || source.len < self.len
+            || source.buf.len() < self.buf.len()
+        {
+            self.copy_from(source);
+            return;
+        }
+
+        let delta = source.generation - self.generation;
+        if delta == 0 {
+            if self.head != source.head || self.len != source.len {
+                self.copy_from(source);
+            }
+            return;
+        }
+
+        if source.buf.len() < source.capacity {
+            for index in self.buf.len()..source.buf.len() {
+                self.buf.push(source.buf[index].clone());
+            }
+        } else if self.buf.len() < source.buf.len() || delta >= source.capacity as u64 {
+            self.buf.clone_from(&source.buf);
+        } else {
+            let capacity = source.capacity;
+            let changed = delta as usize;
+            let start = (source.head + capacity - changed) % capacity;
+            for offset in 0..changed {
+                let index = (start + offset) % capacity;
+                self.buf[index].clone_from(&source.buf[index]);
+            }
+        }
+
+        self.head = source.head;
+        self.len = source.len;
+        self.generation = source.generation;
     }
 
     /// Number of rows currently stored.
@@ -40,6 +86,7 @@ impl Scrollback {
         self.buf.clear();
         self.head = 0;
         self.len = 0;
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Read row N from the tail (0 = most recent evicted row).
@@ -57,6 +104,7 @@ impl Scrollback {
         if self.capacity == 0 {
             return;
         }
+        self.generation = self.generation.wrapping_add(1);
         if self.buf.len() < self.capacity {
             self.buf.push(cells.to_vec());
             self.len = self.buf.len();

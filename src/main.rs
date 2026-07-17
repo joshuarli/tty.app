@@ -14,7 +14,7 @@ mod window;
 
 use std::ffi::c_void;
 use std::io::ErrorKind;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -22,8 +22,8 @@ use std::time::Instant;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSEventMask, NSEventModifierFlags, NSEventType};
 use objc2_core_foundation::{
-    CFFileDescriptor, CFFileDescriptorContext, CFRetained, CFRunLoop, CFRunLoopSource,
-    kCFFileDescriptorReadCallBack, kCFRunLoopCommonModes, kCFRunLoopDefaultMode,
+    CFRetained, CFRunLoop, CFRunLoopSource, CFRunLoopSourceContext, kCFRunLoopCommonModes,
+    kCFRunLoopDefaultMode,
 };
 use objc2_foundation::NSDefaultRunLoopMode;
 
@@ -60,7 +60,6 @@ struct App {
     renderer: Box<dyn Renderer>,
     rasterizer: FontRasterizer,
     atlas: Atlas,
-    shared: SharedState,
     pty: Arc<Pty>,
     worker_state: Arc<Mutex<SharedState>>,
     worker_wake: Arc<WakePipe>,
@@ -68,6 +67,7 @@ struct App {
     worker: Option<JoinHandle<()>>,
     modifiers: Modifiers,
     cursor_visible: bool,
+    glyphs_need_resolution: bool,
     alive: bool,
 
     // Selection state
@@ -119,10 +119,38 @@ impl Rasterize for WorkerRasterizer {
 const PTY_READ_BUDGET: usize = 256 * 1024;
 const PTY_READ_BUFFER: usize = 64 * 1024;
 
+struct RunLoopWake {
+    run_loop: AtomicPtr<CFRunLoop>,
+    source: AtomicPtr<CFRunLoopSource>,
+}
+
+impl RunLoopWake {
+    fn new(run_loop: &CFRunLoop, source: &CFRunLoopSource) -> Self {
+        Self {
+            run_loop: AtomicPtr::new(run_loop as *const CFRunLoop as *mut CFRunLoop),
+            source: AtomicPtr::new(source as *const CFRunLoopSource as *mut CFRunLoopSource),
+        }
+    }
+
+    fn wake(&self) {
+        let run_loop = self.run_loop.load(Ordering::Acquire);
+        let source = self.source.load(Ordering::Acquire);
+        if !run_loop.is_null() && !source.is_null() {
+            // The run loop and source are retained by PtyRunLoopSources for the app
+            // lifetime; signaling them is safe from the PTY worker thread.
+            unsafe {
+                (&*source).signal();
+                (&*run_loop).wake_up();
+            }
+        }
+    }
+}
+
 fn spawn_pty_worker(
     pty: Arc<Pty>,
     state: Arc<Mutex<SharedState>>,
     wake: Arc<WakePipe>,
+    run_loop_wake: Arc<RunLoopWake>,
     stop: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
@@ -175,11 +203,13 @@ fn spawn_pty_worker(
             if dead {
                 state.lock().unwrap().alive = false;
                 wake.notify();
+                run_loop_wake.wake();
                 return;
             }
 
             if read_data {
                 wake.notify();
+                run_loop_wake.wake();
             }
 
             let mut pollfd = libc::pollfd {
@@ -203,7 +233,7 @@ impl App {
         }
     }
 
-    fn new(win: &NativeWindow) -> Self {
+    fn new(win: &NativeWindow, run_loop_wake: Arc<RunLoopWake>) -> Self {
         let scale = win.scale_factor();
         let (phys_w, phys_h) = win.physical_size();
 
@@ -231,13 +261,9 @@ impl App {
         renderer.atlas_texture = atlas.texture.clone();
         let renderer: Box<dyn Renderer> = Box::new(renderer);
 
-        let mut grid = Grid::new(cols as u16, rows as u16);
-        grid.set_ascii_atlas(&atlas.ascii_table_raw());
-        grid.set_bold_ascii_atlas(&atlas.bold_ascii_table_raw());
         let mut worker_grid = Grid::new(cols as u16, rows as u16);
         worker_grid.set_ascii_atlas(&atlas.ascii_table_raw());
         worker_grid.set_bold_ascii_atlas(&atlas.bold_ascii_table_raw());
-        let scrollback = Scrollback::new(config::SCROLLBACK_LINES);
         let worker_scrollback = Scrollback::new(config::SCROLLBACK_LINES);
 
         let pty = Pty::spawn(
@@ -260,6 +286,7 @@ impl App {
             pty.clone(),
             worker_state.clone(),
             worker_wake.clone(),
+            run_loop_wake,
             worker_stop.clone(),
         ));
 
@@ -267,12 +294,6 @@ impl App {
             renderer,
             rasterizer,
             atlas,
-            shared: SharedState {
-                grid,
-                scrollback,
-                response_buf: Vec::new(),
-                alive: true,
-            },
             pty,
             worker_state,
             worker_wake,
@@ -280,6 +301,7 @@ impl App {
             worker,
             modifiers: Modifiers::default(),
             cursor_visible: true,
+            glyphs_need_resolution: true,
             alive: true,
             selection_start: None,
             selection_end: None,
@@ -292,15 +314,14 @@ impl App {
         }
     }
 
-    fn wake_fd(&self) -> std::os::fd::RawFd {
-        self.worker_wake.read_fd()
-    }
-
     fn is_alive(&self) -> bool {
-        self.alive && self.shared.alive
+        self.alive
     }
 
     fn sync_worker(&mut self, win: &NativeWindow) -> bool {
+        let selection_start = self.selection_start;
+        let selection_end = self.selection_end;
+        let mut prev_sel_rows = self.prev_sel_rows;
         let Ok(mut worker) = self.worker_state.try_lock() else {
             return false;
         };
@@ -308,53 +329,82 @@ impl App {
             return false;
         }
 
-        let main_dirty = self.shared.grid.dirty.clone();
-        self.shared.grid.copy_from(&worker.grid);
-        self.shared.scrollback.copy_from(&worker.scrollback);
-        self.shared.response_buf = std::mem::take(&mut worker.response_buf);
-        self.shared.alive = worker.alive;
-        worker.grid.clear_dirty();
-        let _ = worker.grid.take_scroll_hint();
+        Self::resolve_worker_glyphs(&mut self.atlas, &self.rasterizer, &mut worker.grid);
+        Self::update_selection_locked(
+            selection_start,
+            selection_end,
+            &mut prev_sel_rows,
+            &mut worker.grid,
+        );
+        let responses = std::mem::take(&mut worker.response_buf);
+        let alive = worker.alive;
         drop(worker);
-
-        for row in main_dirty.iter_ones() {
-            self.shared.grid.mark_dirty(row as u16);
-        }
-        self.resolve_worker_glyphs();
-        self.update_selection();
-
-        let responses = std::mem::take(&mut self.shared.response_buf);
+        self.prev_sel_rows = prev_sel_rows;
+        self.glyphs_need_resolution = false;
+        self.alive = self.alive && alive;
         if !responses.is_empty() {
             self.handle_responses(&responses, win);
         }
         true
     }
 
-    fn resolve_worker_glyphs(&mut self) {
-        let rows: Vec<u16> = (0..self.shared.grid.rows).collect();
-        for row in rows {
-            for col in 0..self.shared.grid.cols {
-                let cell = self.shared.grid.cell(row, col);
+    fn resolve_worker_glyphs(atlas: &mut Atlas, rasterizer: &FontRasterizer, grid: &mut Grid) {
+        let evictions_before = atlas.evictions();
+        let dirty_rows: Vec<u16> = grid.dirty.iter_ones().map(|row| row as u16).collect();
+        for row in dirty_rows {
+            for col in 0..grid.cols {
+                let cell = grid.cell(row, col);
                 if cell.flags.contains(CellFlags::WIDE_CONT) {
                     continue;
                 }
-                let codepoint = self.shared.grid.char_at(row, col) as u32;
+                let codepoint = grid.char_at(row, col) as u32;
                 if codepoint < 0x80 {
                     continue;
                 }
-                let pos = self.atlas.get_or_insert(
+                let pos = atlas.get_or_insert(
                     codepoint,
                     is_wide(codepoint),
                     cell.flags.contains(CellFlags::BOLD),
-                    &self.rasterizer,
+                    rasterizer,
                 );
-                let cell = self.shared.grid.cell_mut(row, col);
+                let cell = grid.cell_mut(row, col);
                 cell.atlas_x = pos.x;
                 cell.atlas_y = pos.y;
-                if cell.flags.contains(CellFlags::WIDE) && col + 1 < self.shared.grid.cols {
-                    let continuation = self.shared.grid.cell_mut(row, col + 1);
+                if cell.flags.contains(CellFlags::WIDE) && col + 1 < grid.cols {
+                    let continuation = grid.cell_mut(row, col + 1);
                     continuation.atlas_x = pos.x;
                     continuation.atlas_y = pos.y;
+                }
+            }
+        }
+
+        if atlas.evictions() != evictions_before {
+            grid.mark_all_dirty();
+            let rows = grid.rows;
+            for row in 0..rows {
+                for col in 0..grid.cols {
+                    let cell = grid.cell(row, col);
+                    if cell.flags.contains(CellFlags::WIDE_CONT) {
+                        continue;
+                    }
+                    let codepoint = grid.char_at(row, col) as u32;
+                    if codepoint < 0x80 {
+                        continue;
+                    }
+                    let pos = atlas.get_or_insert(
+                        codepoint,
+                        is_wide(codepoint),
+                        cell.flags.contains(CellFlags::BOLD),
+                        rasterizer,
+                    );
+                    let cell = grid.cell_mut(row, col);
+                    cell.atlas_x = pos.x;
+                    cell.atlas_y = pos.y;
+                    if cell.flags.contains(CellFlags::WIDE) && col + 1 < grid.cols {
+                        let continuation = grid.cell_mut(row, col + 1);
+                        continuation.atlas_x = pos.x;
+                        continuation.atlas_y = pos.y;
+                    }
                 }
             }
         }
@@ -413,10 +463,16 @@ impl App {
 
     /// Returns true if the frame was idle (no GPU work dispatched).
     fn render(&mut self) -> bool {
+        let mut worker = self.worker_state.lock().unwrap();
+        if self.glyphs_need_resolution {
+            Self::resolve_worker_glyphs(&mut self.atlas, &self.rasterizer, &mut worker.grid);
+            self.glyphs_need_resolution = false;
+        }
+        let worker = &mut *worker;
         app_render::render_frame(
             &mut *self.renderer,
-            &mut self.shared.grid,
-            &self.shared.scrollback,
+            &mut worker.grid,
+            &worker.scrollback,
             self.viewport_offset,
             &mut self.cursor_visible,
         )
@@ -428,6 +484,7 @@ impl App {
 
     fn copy_selection(&self) {
         if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
+            let worker = self.worker_state.lock().unwrap();
             let mut text = String::new();
             let (start, end) = if start.1 < end.1 || (start.1 == end.1 && start.0 <= end.0) {
                 (start, end)
@@ -440,15 +497,15 @@ impl App {
                 let to_col = if row == end.1 {
                     end.0 + 1
                 } else {
-                    self.shared.grid.cols
+                    worker.grid.cols
                 };
 
                 for col in from_col..to_col {
-                    let cell = self.shared.grid.cell(row, col);
+                    let cell = worker.grid.cell(row, col);
                     if cell.flags.contains(CellFlags::WIDE_CONT) {
                         continue;
                     }
-                    let ch = self.shared.grid.char_at(row, col);
+                    let ch = worker.grid.char_at(row, col);
                     if ch >= ' ' {
                         text.push(ch);
                     }
@@ -457,7 +514,7 @@ impl App {
                     text.push('\n');
                 }
             }
-
+            drop(worker);
             set_clipboard(&text);
         }
     }
@@ -467,7 +524,13 @@ impl App {
             if text.is_empty() {
                 return;
             }
-            let bracketed = self.shared.grid.mode.contains(TermMode::BRACKETED_PASTE);
+            let bracketed = self
+                .worker_state
+                .lock()
+                .unwrap()
+                .grid
+                .mode
+                .contains(TermMode::BRACKETED_PASTE);
 
             if bracketed {
                 // Strip embedded paste markers to prevent bracketed paste injection attacks.
@@ -514,27 +577,33 @@ impl App {
         }
         let col = (px / self.renderer.cell_width() as f64) as u16;
         let row = (py / self.renderer.cell_height() as f64) as u16;
-        let col = col.min(self.shared.grid.cols.saturating_sub(1));
-        let row = row.min(self.shared.grid.rows.saturating_sub(1));
+        let worker = self.worker_state.lock().unwrap();
+        let col = col.min(worker.grid.cols.saturating_sub(1));
+        let row = row.min(worker.grid.rows.saturating_sub(1));
         (col, row)
     }
 
-    fn clear_selection_flags(&mut self) {
-        if let Some((first, last)) = self.prev_sel_rows {
-            let cols = self.shared.grid.cols as usize;
-            for row in first..=last.min(self.shared.grid.rows - 1) {
-                let start = self.shared.grid.row_start(row);
-                for cell in &mut self.shared.grid.cells[start..start + cols] {
+    fn clear_selection_flags_locked(prev_sel_rows: &mut Option<(u16, u16)>, grid: &mut Grid) {
+        if let Some((first, last)) = *prev_sel_rows {
+            let cols = grid.cols as usize;
+            for row in first..=last.min(grid.rows - 1) {
+                let start = grid.row_start(row);
+                for cell in &mut grid.cells[start..start + cols] {
                     cell.flags.remove(CellFlags::SELECTED);
                 }
-                self.shared.grid.mark_dirty(row);
+                grid.mark_dirty(row);
             }
-            self.prev_sel_rows = None;
+            *prev_sel_rows = None;
         }
     }
 
-    fn update_selection(&mut self) {
-        if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
+    fn update_selection_locked(
+        selection_start: Option<(u16, u16)>,
+        selection_end: Option<(u16, u16)>,
+        prev_sel_rows: &mut Option<(u16, u16)>,
+        grid: &mut Grid,
+    ) {
+        if let (Some(start), Some(end)) = (selection_start, selection_end) {
             // Normalize start/end
             let (start, end) = if start.1 < end.1 || (start.1 == end.1 && start.0 <= end.0) {
                 (start, end)
@@ -543,34 +612,45 @@ impl App {
             };
 
             // Clear only previously selected rows
-            self.clear_selection_flags();
+            Self::clear_selection_flags_locked(prev_sel_rows, grid);
 
             // Set new selection
             for row in start.1..=end.1 {
                 let from_col = if row == start.1 { start.0 } else { 0 };
-                let to_col = if row == end.1 {
-                    end.0
-                } else {
-                    self.shared.grid.cols - 1
-                };
+                let to_col = if row == end.1 { end.0 } else { grid.cols - 1 };
                 for col in from_col..=to_col {
-                    self.shared
-                        .grid
-                        .cell_mut(row, col)
-                        .flags
-                        .insert(CellFlags::SELECTED);
+                    grid.cell_mut(row, col).flags.insert(CellFlags::SELECTED);
                 }
-                self.shared.grid.mark_dirty(row);
+                grid.mark_dirty(row);
             }
-            self.prev_sel_rows = Some((start.1, end.1));
+            *prev_sel_rows = Some((start.1, end.1));
         }
+    }
+
+    fn update_selection(&mut self) {
+        let selection_start = self.selection_start;
+        let selection_end = self.selection_end;
+        let mut prev_sel_rows = self.prev_sel_rows;
+        let mut worker = self.worker_state.lock().unwrap();
+        Self::update_selection_locked(
+            selection_start,
+            selection_end,
+            &mut prev_sel_rows,
+            &mut worker.grid,
+        );
+        drop(worker);
+        self.prev_sel_rows = prev_sel_rows;
     }
 
     fn clear_selection(&mut self) {
         if self.selection_start.is_some() {
             self.selection_start = None;
             self.selection_end = None;
-            self.clear_selection_flags();
+            let mut prev_sel_rows = self.prev_sel_rows;
+            let mut worker = self.worker_state.lock().unwrap();
+            Self::clear_selection_flags_locked(&mut prev_sel_rows, &mut worker.grid);
+            drop(worker);
+            self.prev_sel_rows = prev_sel_rows;
         }
     }
 
@@ -587,8 +667,8 @@ impl App {
                 self.renderer.resize(*w, *h, *scale);
                 let cols = self.renderer.cols() as u16;
                 let rows = self.renderer.rows() as u16;
-                self.shared.grid.resize(cols, rows);
                 self.worker_state.lock().unwrap().grid.resize(cols, rows);
+                self.glyphs_need_resolution = true;
                 self.pty.resize(
                     cols,
                     rows,
@@ -620,12 +700,14 @@ impl App {
                 }
 
                 // Snap back to live view on any keyboard input
-                if self.viewport_offset > 0 {
-                    self.viewport_offset = 0;
-                    self.shared.grid.mark_all_dirty();
-                }
-
-                let term_mode = self.shared.grid.mode;
+                let term_mode = {
+                    let mut worker = self.worker_state.lock().unwrap();
+                    if self.viewport_offset > 0 {
+                        self.viewport_offset = 0;
+                        worker.grid.mark_all_dirty();
+                    }
+                    worker.grid.mode
+                };
 
                 if let Some(bytes) = input::key_to_bytes(key, modifiers, term_mode) {
                     let _ = self.pty.write(&bytes);
@@ -641,11 +723,12 @@ impl App {
             } => {
                 self.cursor_pos = (*x, *y);
                 let cell = self.pixel_to_cell(*x, *y);
-                let mouse_mode = self.shared.grid.mode.intersects(
+                let mode = self.worker_state.lock().unwrap().grid.mode;
+                let mouse_mode = mode.intersects(
                     TermMode::MOUSE_BUTTON | TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL,
                 );
                 if mouse_mode {
-                    let sgr = self.shared.grid.mode.contains(TermMode::MOUSE_SGR);
+                    let sgr = mode.contains(TermMode::MOUSE_SGR);
                     let bytes = input::mouse_to_bytes(
                         Self::mouse_button_code(*button),
                         modifiers,
@@ -672,16 +755,13 @@ impl App {
             } => {
                 self.cursor_pos = (*x, *y);
                 let cell = self.pixel_to_cell(*x, *y);
-                let mouse_mode = self.shared.grid.mode.intersects(
+                let mode = self.worker_state.lock().unwrap().grid.mode;
+                let mouse_mode = mode.intersects(
                     TermMode::MOUSE_BUTTON | TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL,
                 );
                 if mouse_mode {
-                    let sgr = self.shared.grid.mode.contains(TermMode::MOUSE_SGR);
-                    let motion_mode = self
-                        .shared
-                        .grid
-                        .mode
-                        .intersects(TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL);
+                    let sgr = mode.contains(TermMode::MOUSE_SGR);
+                    let motion_mode = mode.intersects(TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL);
                     // tmux's MouseDragEnd binding runs copy-selection based on
                     // wherever the cursor was last moved by a drag event. The
                     // OS-delivered drag stream ends one frame before the button-up,
@@ -728,14 +808,11 @@ impl App {
                 modifiers,
             } => {
                 self.cursor_pos = (*x, *y);
-                let motion_mode = self
-                    .shared
-                    .grid
-                    .mode
-                    .intersects(TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL);
+                let mode = self.worker_state.lock().unwrap().grid.mode;
+                let motion_mode = mode.intersects(TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL);
                 if motion_mode && self.mouse_pressed {
                     let cell = self.pixel_to_cell(*x, *y);
-                    let sgr = self.shared.grid.mode.contains(TermMode::MOUSE_SGR);
+                    let sgr = mode.contains(TermMode::MOUSE_SGR);
                     // button 0 + 32 = motion flag
                     let bytes = input::mouse_to_bytes(
                         32 | Self::mouse_button_code(*button),
@@ -746,7 +823,7 @@ impl App {
                         sgr,
                     );
                     let _ = self.pty.write(&bytes);
-                } else if !self.shared.grid.mode.intersects(
+                } else if !mode.intersects(
                     TermMode::MOUSE_BUTTON | TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL,
                 ) && self.mouse_pressed
                 {
@@ -757,14 +834,25 @@ impl App {
             }
 
             Event::FocusIn => {
-                self.shared.grid.mark_all_dirty();
-                if self.shared.grid.mode.contains(TermMode::FOCUS_EVENTS) {
+                let focus_events = {
+                    let mut worker = self.worker_state.lock().unwrap();
+                    worker.grid.mark_all_dirty();
+                    worker.grid.mode.contains(TermMode::FOCUS_EVENTS)
+                };
+                if focus_events {
                     let _ = self.pty.write(b"\x1B[I");
                 }
             }
 
             Event::FocusOut => {
-                if self.shared.grid.mode.contains(TermMode::FOCUS_EVENTS) {
+                if self
+                    .worker_state
+                    .lock()
+                    .unwrap()
+                    .grid
+                    .mode
+                    .contains(TermMode::FOCUS_EVENTS)
+                {
                     let _ = self.pty.write(b"\x1B[O");
                 }
             }
@@ -802,24 +890,28 @@ impl App {
 
         // Cap per-frame events at terminal height — one full page per frame is
         // plenty, and keeps the PTY buffer from overflowing with tmux redraws.
-        let max_lines = self.shared.grid.rows as u32;
+        let (max_lines, mode, scrollback_len) = {
+            let worker = self.worker_state.lock().unwrap();
+            (
+                worker.grid.rows as u32,
+                worker.grid.mode,
+                worker.scrollback.len(),
+            )
+        };
         let count = lines.unsigned_abs().min(max_lines);
 
         // Subtract only the consumed delta — excess carries to the next frame.
         let sign = if lines > 0 { 1.0 } else { -1.0 };
         self.scroll_accumulator -= count as f64 * cell_height_pts * sign;
 
-        let mouse_mode = self
-            .shared
-            .grid
-            .mode
-            .intersects(TermMode::MOUSE_BUTTON | TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL);
+        let mouse_mode =
+            mode.intersects(TermMode::MOUSE_BUTTON | TermMode::MOUSE_MOTION | TermMode::MOUSE_ALL);
 
-        let alt_screen = self.shared.grid.mode.contains(TermMode::ALT_SCREEN);
+        let alt_screen = mode.contains(TermMode::ALT_SCREEN);
 
         if mouse_mode {
             let cell = self.pixel_to_cell(self.cursor_pos.0, self.cursor_pos.1);
-            let sgr = self.shared.grid.mode.contains(TermMode::MOUSE_SGR);
+            let sgr = mode.contains(TermMode::MOUSE_SGR);
             let button = if lines > 0 { 64u8 } else { 65u8 };
             let single =
                 input::mouse_to_bytes(button, &self.modifiers, cell.0 + 1, cell.1 + 1, true, sgr);
@@ -830,7 +922,7 @@ impl App {
             let _ = self.pty.write(&batch);
         } else if alt_screen {
             // Alt screen (vim, etc.): send arrow keys, no scrollback
-            let app_cursor = self.shared.grid.mode.contains(TermMode::CURSOR_KEYS);
+            let app_cursor = mode.contains(TermMode::CURSOR_KEYS);
             let seq: &[u8] = if lines > 0 {
                 if app_cursor { b"\x1BOA" } else { b"\x1B[A" }
             } else if app_cursor {
@@ -848,14 +940,13 @@ impl App {
             let old = self.viewport_offset;
             if lines > 0 {
                 // Scroll up into history
-                let max = self.shared.scrollback.len();
-                self.viewport_offset = (self.viewport_offset + count as usize).min(max);
+                self.viewport_offset = (self.viewport_offset + count as usize).min(scrollback_len);
             } else {
                 // Scroll down toward live
                 self.viewport_offset = self.viewport_offset.saturating_sub(count as usize);
             }
             if self.viewport_offset != old {
-                self.shared.grid.mark_all_dirty();
+                self.worker_state.lock().unwrap().grid.mark_all_dirty();
             }
         }
     }
@@ -875,83 +966,44 @@ struct Terminal {
     app: App,
 }
 
-unsafe extern "C-unwind" fn pty_read_callback(
-    descriptor: *mut CFFileDescriptor,
-    flags: usize,
-    _info: *mut c_void,
-) {
-    if flags & kCFFileDescriptorReadCallBack != 0 && !descriptor.is_null() {
-        unsafe {
-            (*descriptor).disable_call_backs(kCFFileDescriptorReadCallBack);
-        }
-    }
-}
-
 struct PtyRunLoopSources {
-    run_loop: CFRetained<CFRunLoop>,
-    descriptors: Vec<CFRetained<CFFileDescriptor>>,
-    sources: Vec<CFRetained<CFRunLoopSource>>,
+    _run_loop: CFRetained<CFRunLoop>,
+    _source: CFRetained<CFRunLoopSource>,
+    wake: Arc<RunLoopWake>,
 }
 
 impl PtyRunLoopSources {
     fn new() -> Self {
-        Self {
-            run_loop: CFRunLoop::current().expect("no current Core Foundation run loop"),
-            descriptors: Vec::new(),
-            sources: Vec::new(),
-        }
-    }
-
-    fn register(&mut self, fd: std::os::fd::RawFd) {
-        let context = CFFileDescriptorContext {
+        let run_loop = CFRunLoop::current().expect("no current Core Foundation run loop");
+        let mut context = CFRunLoopSourceContext {
             version: 0,
             info: std::ptr::null_mut(),
             retain: None,
             release: None,
             copyDescription: None,
+            equal: None,
+            hash: None,
+            schedule: None,
+            cancel: None,
+            perform: Some(run_loop_source_perform),
         };
-        let descriptor =
-            unsafe { CFFileDescriptor::new(None, fd, false, Some(pty_read_callback), &context) }
-                .expect("failed to create PTY run-loop descriptor");
-        let source = CFFileDescriptor::new_run_loop_source(None, Some(&descriptor), 0)
+        let source = unsafe { CFRunLoopSource::new(None, 0, &mut context) }
             .expect("failed to create PTY run-loop source");
         let common_modes = unsafe {
             kCFRunLoopCommonModes
                 .as_ref()
                 .expect("Core Foundation common modes unavailable")
         };
-        self.run_loop.add_source(Some(&source), Some(common_modes));
-        descriptor.enable_call_backs(kCFFileDescriptorReadCallBack);
-        self.descriptors.push(descriptor);
-        self.sources.push(source);
-    }
-
-    fn enable_callbacks(&self) {
-        for descriptor in &self.descriptors {
-            descriptor.enable_call_backs(kCFFileDescriptorReadCallBack);
+        run_loop.add_source(Some(&source), Some(common_modes));
+        Self {
+            wake: Arc::new(RunLoopWake::new(&run_loop, &source)),
+            _run_loop: run_loop,
+            _source: source,
         }
     }
 
-    fn unregister(&mut self, fd: std::os::fd::RawFd) {
-        let Some(index) = self
-            .descriptors
-            .iter()
-            .position(|descriptor| descriptor.native_descriptor() == fd)
-        else {
-            return;
-        };
-
-        let common_modes = unsafe {
-            kCFRunLoopCommonModes
-                .as_ref()
-                .expect("Core Foundation common modes unavailable")
-        };
-        let source = self.sources.swap_remove(index);
-        self.run_loop
-            .remove_source(Some(&source), Some(common_modes));
-        let descriptor = self.descriptors.swap_remove(index);
-        descriptor.disable_call_backs(kCFFileDescriptorReadCallBack);
-        descriptor.invalidate();
+    fn wake(&self) -> Arc<RunLoopWake> {
+        self.wake.clone()
     }
 
     fn wait(&self, seconds: f64) {
@@ -964,9 +1016,11 @@ impl PtyRunLoopSources {
     }
 }
 
-fn spawn_terminal(mtm: MainThreadMarker) -> Terminal {
+unsafe extern "C-unwind" fn run_loop_source_perform(_info: *mut c_void) {}
+
+fn spawn_terminal(mtm: MainThreadMarker, run_loop_wake: Arc<RunLoopWake>) -> Terminal {
     let win = NativeWindow::new(mtm);
-    let app = App::new(&win);
+    let app = App::new(&win, run_loop_wake);
     Terminal { win, app }
 }
 
@@ -1014,10 +1068,12 @@ fn run_startup_bench() {
     let pty_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     let total_ms = total.elapsed().as_secs_f64() * 1000.0;
-    assert!(
-        total_ms < STARTUP_BUDGET_MS,
-        "startup benchmark exceeded {STARTUP_BUDGET_MS:.0} ms: {total_ms:.3} ms"
-    );
+    if !cfg!(debug_assertions) {
+        assert!(
+            total_ms < STARTUP_BUDGET_MS,
+            "startup benchmark exceeded {STARTUP_BUDGET_MS:.0} ms: {total_ms:.3} ms"
+        );
+    }
     println!(
         "startup_bench_headless font=embedded_ttf total_ms={total_ms:.3} metal_ms={metal_ms:.3} rasterizer_ms={rasterizer_ms:.3} atlas_ms={atlas_ms:.3} grid_ms={grid_ms:.3} pty_ms={pty_ms:.3} cols={cols} rows={rows}"
     );
@@ -1042,173 +1098,159 @@ fn main() {
     let mtm = MainThreadMarker::new().expect("must be called from the main thread");
     let nsapp = init_app(mtm);
 
+    let pty_sources = PtyRunLoopSources::new();
     let mut terminals: Vec<Terminal> = Vec::new();
-    terminals.push(spawn_terminal(mtm));
-
-    let mut pty_sources = PtyRunLoopSources::new();
-    pty_sources.register(terminals[0].app.wake_fd());
+    terminals.push(spawn_terminal(mtm, pty_sources.wake()));
 
     let mut state_events = Vec::new();
 
     loop {
         let (idle, quit, got_any_pty_data, got_events, sent_deferred_mouse, min_frame_deadline) =
             objc2::rc::autoreleasepool(|_| {
-            // Apply terminal state produced by each PTY worker.
-            let mut got_any_pty_data = false;
-            for t in terminals.iter_mut() {
-                got_any_pty_data |= t.app.sync_worker(&t.win);
-            }
-
-            // Coalesce: after receiving data, wait up to 500µs for one more
-            // batch. This prevents rendering intermediate states from split
-            // writes (e.g., tmux hiding cursor, drawing, then showing cursor).
-            // Single pass only — looping would hang on continuous output (yes).
-            if got_any_pty_data {
-                pty_sources.wait(0.0005);
+                // Apply terminal state produced by each PTY worker.
+                let mut got_any_pty_data = false;
                 for t in terminals.iter_mut() {
-                    t.app.sync_worker(&t.win);
+                    got_any_pty_data |= t.app.sync_worker(&t.win);
                 }
-            }
 
-            let mut sent_deferred_mouse = false;
-            for t in terminals.iter_mut() {
-                sent_deferred_mouse |= t.app.flush_pending_mouse_release();
-            }
-
-            // Drain NSEvents globally
-            let mut spawn_pending = false;
-            let mut quit = false;
-            let mut got_events = false;
-
-            loop {
-                let ns_event = nsapp.nextEventMatchingMask_untilDate_inMode_dequeue(
-                    NSEventMask::Any,
-                    None,
-                    // SAFETY: NSDefaultRunLoopMode is a global NSString constant,
-                    // always valid in a running application.
-                    unsafe { NSDefaultRunLoopMode },
-                    true,
-                );
-                let ns_event = match ns_event {
-                    Some(e) => e,
-                    None => break,
-                };
-
-                let event_type = ns_event.r#type();
-                let is_escape = event_type == NSEventType::KeyDown && ns_event.keyCode() == 0x35;
-
-                // Global shortcuts: Cmd+Q quits, Cmd+N spawns a new window
-                if event_type == NSEventType::KeyDown
-                    && ns_event
-                        .modifierFlags()
-                        .contains(NSEventModifierFlags::Command)
-                    && let Some(chars) = ns_event.charactersIgnoringModifiers()
-                {
-                    match chars.to_string().as_str() {
-                        "q" => {
-                            quit = true;
-                            nsapp.sendEvent(&ns_event);
-                            continue;
-                        }
-                        "n" => {
-                            spawn_pending = true;
-                            nsapp.sendEvent(&ns_event);
-                            continue;
-                        }
-                        _ => {}
+                // Coalesce: after receiving data, wait up to 500µs for one more
+                // batch. This prevents rendering intermediate states from split
+                // writes (e.g., tmux hiding cursor, drawing, then showing cursor).
+                // Single pass only — looping would hang on continuous output (yes).
+                if got_any_pty_data {
+                    pty_sources.wait(0.0005);
+                    for t in terminals.iter_mut() {
+                        t.app.sync_worker(&t.win);
                     }
                 }
 
-                // Route to matching terminal by window pointer
-                let mut handled = false;
-                if let Some(t) = terminals
-                    .iter_mut()
-                    .find(|t| t.win.owns_ns_event(&ns_event, mtm))
-                    && let Some(translated) = t.win.translate_ns_event(&ns_event)
-                {
-                    t.app.handle_event(&translated, &t.win);
-                    got_events = true;
-                    handled = true;
+                let mut sent_deferred_mouse = false;
+                for t in terminals.iter_mut() {
+                    sent_deferred_mouse |= t.app.flush_pending_mouse_release();
                 }
 
-                // Don't sendEvent for key-downs we already handled — AppKit's
-                // responder chain has no keyDown: override, so unhandled keys
-                // trigger NSBeep().  Also skip Escape to prevent AppKit from
-                // exiting fullscreen via the responder chain.
-                if !is_escape && !(handled && event_type == NSEventType::KeyDown) {
-                    nsapp.sendEvent(&ns_event);
+                // Drain NSEvents globally
+                let mut spawn_pending = false;
+                let mut quit = false;
+                let mut got_events = false;
+
+                loop {
+                    let ns_event = nsapp.nextEventMatchingMask_untilDate_inMode_dequeue(
+                        NSEventMask::Any,
+                        None,
+                        // SAFETY: NSDefaultRunLoopMode is a global NSString constant,
+                        // always valid in a running application.
+                        unsafe { NSDefaultRunLoopMode },
+                        true,
+                    );
+                    let ns_event = match ns_event {
+                        Some(e) => e,
+                        None => break,
+                    };
+
+                    let event_type = ns_event.r#type();
+                    let is_escape =
+                        event_type == NSEventType::KeyDown && ns_event.keyCode() == 0x35;
+
+                    // Global shortcuts: Cmd+Q quits, Cmd+N spawns a new window
+                    if event_type == NSEventType::KeyDown
+                        && ns_event
+                            .modifierFlags()
+                            .contains(NSEventModifierFlags::Command)
+                        && let Some(chars) = ns_event.charactersIgnoringModifiers()
+                    {
+                        match chars.to_string().as_str() {
+                            "q" => {
+                                quit = true;
+                                nsapp.sendEvent(&ns_event);
+                                continue;
+                            }
+                            "n" => {
+                                spawn_pending = true;
+                                nsapp.sendEvent(&ns_event);
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // Route to matching terminal by window pointer
+                    let mut handled = false;
+                    if let Some(t) = terminals
+                        .iter_mut()
+                        .find(|t| t.win.owns_ns_event(&ns_event, mtm))
+                        && let Some(translated) = t.win.translate_ns_event(&ns_event)
+                    {
+                        t.app.handle_event(&translated, &t.win);
+                        got_events = true;
+                        handled = true;
+                    }
+
+                    // Don't sendEvent for key-downs we already handled — AppKit's
+                    // responder chain has no keyDown: override, so unhandled keys
+                    // trigger NSBeep().  Also skip Escape to prevent AppKit from
+                    // exiting fullscreen via the responder chain.
+                    if !is_escape && !(handled && event_type == NSEventType::KeyDown) {
+                        nsapp.sendEvent(&ns_event);
+                    }
                 }
-            }
 
-            // Check state changes (resize/focus) for all terminals
-            for t in terminals.iter_mut() {
-                state_events.clear();
-                t.win.check_state_changes(&mut state_events);
-                for event in &state_events {
-                    t.app.handle_event(event, &t.win);
-                    got_events = true;
+                // Check state changes (resize/focus) for all terminals
+                for t in terminals.iter_mut() {
+                    state_events.clear();
+                    t.win.check_state_changes(&mut state_events);
+                    for event in &state_events {
+                        t.app.handle_event(event, &t.win);
+                        got_events = true;
+                    }
                 }
-            }
 
-            // Flush accumulated scroll for all terminals
-            for t in terminals.iter_mut() {
-                t.app.flush_scroll();
-            }
-
-            // Spawn new terminal if Cmd+N was pressed or dock menu clicked
-            if spawn_pending || new_window_requested() {
-                let t = spawn_terminal(mtm);
-                pty_sources.register(t.app.wake_fd());
-                terminals.push(t);
-            }
-
-            // Remove dead terminals (shell exited) and their run-loop sources.
-            let dead_fds: Vec<_> = terminals
-                .iter()
-                .filter(|t| !t.app.is_alive())
-                .map(|t| t.app.wake_fd())
-                .collect();
-            for fd in dead_fds {
-                pty_sources.unregister(fd);
-            }
-            terminals.retain_mut(|t| {
-                if t.app.is_alive() {
-                    true
-                } else {
-                    t.win.close();
-                    false
+                // Flush accumulated scroll for all terminals
+                for t in terminals.iter_mut() {
+                    t.app.flush_scroll();
                 }
+
+                // Spawn new terminal if Cmd+N was pressed or dock menu clicked
+                if spawn_pending || new_window_requested() {
+                    let t = spawn_terminal(mtm, pty_sources.wake());
+                    terminals.push(t);
+                }
+
+                // Remove dead terminals (shell exited) and their run-loop sources.
+                terminals.retain_mut(|t| {
+                    if t.app.is_alive() {
+                        true
+                    } else {
+                        t.win.close();
+                        false
+                    }
+                });
+
+                // Render all terminals
+                let mut all_idle = true;
+                let mut min_frame_deadline: Option<std::time::Instant> = None;
+                for t in terminals.iter_mut() {
+                    if t.win.is_focused() {
+                        all_idle &= t.app.render();
+                        if let Some(dl) = t.app.frame_deadline() {
+                            min_frame_deadline = Some(match min_frame_deadline {
+                                Some(existing) => existing.min(dl),
+                                None => dl,
+                            });
+                        }
+                    }
+                }
+
+                let idle = !got_any_pty_data && !sent_deferred_mouse && !got_events && all_idle;
+                (
+                    idle,
+                    quit,
+                    got_any_pty_data,
+                    got_events,
+                    sent_deferred_mouse,
+                    min_frame_deadline,
+                )
             });
-
-            // Render all terminals
-            let mut all_idle = true;
-            let mut min_frame_deadline: Option<std::time::Instant> = None;
-            for t in terminals.iter_mut() {
-                if t.win.is_focused() {
-                    all_idle &= t.app.render();
-                    if let Some(dl) = t.app.frame_deadline() {
-                        min_frame_deadline = Some(match min_frame_deadline {
-                            Some(existing) => existing.min(dl),
-                            None => dl,
-                        });
-                    }
-                }
-            }
-
-            let idle = !got_any_pty_data
-                && !sent_deferred_mouse
-                && !got_events
-                && all_idle;
-            pty_sources.enable_callbacks();
-            (
-                idle,
-                quit,
-                got_any_pty_data,
-                got_events,
-                sent_deferred_mouse,
-                min_frame_deadline,
-            )
-        });
 
         if quit || terminals.is_empty() {
             break;
@@ -1218,15 +1260,14 @@ fn main() {
             pty_sources.wait(f64::MAX);
         } else {
             let pending = got_any_pty_data || got_events || sent_deferred_mouse;
-            if !pending {
-                if let Some(deadline) = min_frame_deadline {
+            if !pending
+                && let Some(deadline) = min_frame_deadline {
                     let now = std::time::Instant::now();
                     if deadline > now {
                         let wait = (deadline - now).as_secs_f64();
                         pty_sources.wait(wait);
                     }
                 }
-            }
         }
     }
 }

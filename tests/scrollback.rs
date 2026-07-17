@@ -126,6 +126,35 @@ fn capacity_one_always_holds_last() {
 }
 
 #[test]
+fn incremental_copy_matches_full_copy() {
+    let mut source = Scrollback::new(3);
+    let mut incremental = Scrollback::new(3);
+    let mut full = Scrollback::new(3);
+
+    for i in 0..8 {
+        source.push_slice(&make_row(5, (0x41 + i) as u16));
+        incremental.copy_incremental_from(&source);
+        full.copy_from(&source);
+
+        assert_eq!(incremental.len(), full.len());
+        for row in 0..incremental.len() {
+            let incremental_row = incremental.row(row).unwrap();
+            let full_row = full.row(row).unwrap();
+            assert_eq!(incremental_row.len(), full_row.len());
+            for (incremental_cell, full_cell) in incremental_row.iter().zip(full_row) {
+                assert_eq!(incremental_cell.codepoint, full_cell.codepoint);
+            }
+        }
+    }
+
+    source.clear();
+    incremental.copy_incremental_from(&source);
+    full.copy_from(&source);
+    assert_eq!(incremental.len(), 0);
+    assert_eq!(incremental.len(), full.len());
+}
+
+#[test]
 fn zero_allocation_steady_state() {
     let mut sb = Scrollback::new(10);
     for _ in 0..10 {

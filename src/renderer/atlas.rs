@@ -58,6 +58,7 @@ pub struct Atlas {
     // timestamp array keeps the hot lookup path small.
     usage: Vec<u64>,
     frame: u64,
+    evictions: u64,
     // Direct lookup for ASCII (0x00..0x7F) — bypasses HashMap and LRU
     ascii_table: [AtlasPos; 128],
     bold_ascii_table: [AtlasPos; 128],
@@ -99,6 +100,7 @@ impl Atlas {
             ascii_end: 0,
             usage: vec![0; (cols * rows) as usize],
             frame: 0,
+            evictions: 0,
             ascii_table: [AtlasPos::default(); 128],
             bold_ascii_table: [AtlasPos::default(); 128],
         }
@@ -188,6 +190,10 @@ impl Atlas {
         }
     }
 
+    pub fn evictions(&self) -> u64 {
+        self.evictions
+    }
+
     fn insert(&mut self, key: GlyphKey, glyph: &RasterizedGlyph) -> AtlasPos {
         let slot = if self.next_slot < self.cols * self.rows {
             let s = self.next_slot;
@@ -237,6 +243,7 @@ impl Atlas {
     }
 
     fn evict_lru(&mut self) -> u32 {
+        self.evictions = self.evictions.wrapping_add(1);
         let mut slot = self.ascii_end;
         let mut oldest = u64::MAX;
         for candidate in self.ascii_end..self.usage.len() as u32 {
